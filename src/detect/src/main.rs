@@ -120,7 +120,7 @@ async fn main() {
     drop(width_sub);
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     loop {
-        let dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
+        let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
             Ok(v) => cdr::deserialize(&mut v.payload.contiguous())
                 .expect("Failed to deserialize message"),
             Err(e) => {
@@ -128,6 +128,21 @@ async fn main() {
                 continue;
             }
         };
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{:?}", e.to_string());
+                return;
+            }
+        };
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{:?}", e.to_string());
+                return;
+            }
+        };
+        dma_buf.dma_fd = fd.as_raw_fd();
         let boxes = match run_model(
             &s,
             &dma_buf,
@@ -179,27 +194,19 @@ async fn main() {
 #[inline(always)]
 fn run_model(
     s: &Settings,
-    dma_fd: &DeepviewDMABuf,
+    dma_buf: &DeepviewDMABuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
     boxes: &mut Vec<vaal::VAALBox>,
     stream_width: f64,
     stream_height: f64,
 ) -> Result<Vec<Box2D>, String> {
-    let pidfd: PidFd = match PidFd::from_pid(dma_fd.src_pid as i32) {
-        Ok(v) => v,
-        Err(e) => return Err(e.to_string()),
-    };
-    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_fd.dma_fd, GetFdFlags::empty()) {
-        Ok(v) => v,
-        Err(e) => return Err(e.to_string()),
-    };
     match backbone.load_frame_dmabuf(
         None,
-        fd.as_raw_fd(),
-        dma_fd.fourcc,
-        dma_fd.width as i32,
-        dma_fd.height as i32,
+        dma_buf.dma_fd,
+        dma_buf.fourcc,
+        dma_buf.width as i32,
+        dma_buf.height as i32,
         None,
         0,
     ) {
@@ -222,10 +229,10 @@ fn run_model(
 
             if let Err(e) = backbone.load_frame_dmabuf(
                 None,
-                dma_fd.dma_fd,
-                dma_fd.fourcc,
-                dma_fd.width as i32,
-                dma_fd.height as i32,
+                dma_buf.dma_fd,
+                dma_buf.fourcc,
+                dma_buf.width as i32,
+                dma_buf.height as i32,
                 None,
                 0,
             ) {
