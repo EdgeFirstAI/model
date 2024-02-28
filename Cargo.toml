@@ -26,5 +26,5 @@ pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
 
 [[bin]]
-name = "detect"
+name = "maivin-detect"
 path = "src/detect/src/main.rs"

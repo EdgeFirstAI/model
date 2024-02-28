@@ -5,14 +5,7 @@ use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use std::{
-    error::Error,
-    fs,
-    os::fd::AsRawFd,
-    process::Command,
-    str::FromStr,
-    time::{Duration, SystemTime},
-};
+use std::{error::Error, fs, os::fd::AsRawFd, process::Command, str::FromStr, time::Duration};
 use vaal::{self, Context, VAALBox};
 use zenoh::{config::Config, prelude::r#async::*};
 use zenoh_ros_type::{
@@ -23,9 +16,6 @@ use zenoh_ros_type::{
         FoxglovePointAnnotations, FoxgloveTextAnnotations,
     },
 };
-const USEC_PER_SEC: u128 = 1000000;
-const NSEC_PER_SEC: u128 = 1000 * USEC_PER_SEC;
-
 #[macro_export]
 macro_rules! log {
 	($verbose: expr, $( $args:expr ),*) => {
@@ -48,7 +38,7 @@ async fn main() {
         let mut _decoder = Context::new(decoder_device).unwrap();
 
         setup_context(&mut _decoder, &s);
-        let decoder_file = s.decoder_model.unwrap();
+        let decoder_file = s.decoder_model.as_ref().unwrap();
         _decoder
             .load_model_file(decoder_file.to_str().unwrap())
             .unwrap();
@@ -94,7 +84,7 @@ async fn main() {
     log!(s.verbose, "Declared subscriber on {:?}", &s.camera_topic);
 
     let mut err = false;
-    let stream_width = match width_sub.recv_timeout(Duration::from_secs(2)) {
+    let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(2)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
             Err(_) => {
@@ -108,7 +98,7 @@ async fn main() {
         }
     } as f64;
 
-    let stream_height = match height_sub.recv_timeout(Duration::from_secs(2)) {
+    let mut stream_height = match height_sub.recv_timeout(Duration::from_secs(2)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
             Err(_) => {
@@ -123,6 +113,8 @@ async fn main() {
     } as f64;
     if err {
         eprintln!("Cannot determine stream resolution, using normalized coordinates");
+        stream_height = 1.0;
+        stream_width = 1.0;
     };
     drop(height_sub);
     drop(width_sub);
@@ -137,6 +129,7 @@ async fn main() {
             }
         };
         let boxes = match run_model(
+            &s,
             &dma_buf,
             &backbone,
             &mut decoder,
@@ -147,7 +140,7 @@ async fn main() {
             Ok(boxes) => boxes,
             Err(e) => {
                 eprintln!("{:?}", e);
-                Vec::new()
+                return;
             }
         };
         log!(s.verbose, "Detected {:?} boxes", boxes.len());
@@ -168,6 +161,7 @@ async fn main() {
 
 #[inline(always)]
 fn run_model(
+    s: &Settings,
     dma_fd: &DeepviewDMABuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
@@ -175,13 +169,14 @@ fn run_model(
     stream_width: f64,
     stream_height: f64,
 ) -> Result<Vec<Box2D>, String> {
-    let fps = update_fps();
-    let start = vaal::clock_now();
     let pidfd: PidFd = match PidFd::from_pid(dma_fd.src_pid as i32) {
         Ok(v) => v,
         Err(e) => return Err(e.to_string()),
     };
-    let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_fd.dma_fd, GetFdFlags::empty()).unwrap();
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_fd.dma_fd, GetFdFlags::empty()) {
+        Ok(v) => v,
+        Err(e) => return Err(e.to_string()),
+    };
     match backbone.load_frame_dmabuf(
         None,
         fd.as_raw_fd(),
@@ -224,20 +219,10 @@ fn run_model(
         Ok(_) => {}
     };
 
-    let load_ns = vaal::clock_now() - start;
-
-    let start = vaal::clock_now();
     if let Err(e) = backbone.run_model() {
         return Err(format!("failed to run backbone: {}", e));
     }
-    let model_ns = vaal::clock_now() - start;
-
-    let copy_ns;
-    let decoder_ns;
-    let boxes_ns;
     let n_boxes;
-
-    let start = vaal::clock_now();
 
     if decoder.is_some() {
         let decoder_: &mut Context = decoder.as_mut().unwrap();
@@ -292,15 +277,10 @@ fn run_model(
                 e
             );
         }
-        copy_ns = vaal::clock_now() - start;
 
-        let start = vaal::clock_now();
         if let Err(e) = decoder_.run_model() {
             return Err(e.to_string());
         }
-        decoder_ns = vaal::clock_now() - start;
-
-        let start = vaal::clock_now();
 
         n_boxes = match decoder_.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
@@ -308,17 +288,13 @@ fn run_model(
                 return Err(format!("failed to read bounding boxes from model: {:?}", e));
             }
         };
-        boxes_ns = vaal::clock_now() - start;
     } else {
-        copy_ns = 0;
-        decoder_ns = 0;
         n_boxes = match backbone.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
             Err(e) => {
                 return Err(format!("failed to read bounding boxes from model: {:?}", e));
             }
         };
-        boxes_ns = vaal::clock_now() - start;
     }
 
     let model = if decoder.is_some() {
@@ -330,6 +306,7 @@ fn run_model(
     let mut new_boxes: Vec<Box2D> = Vec::new();
     for vaal_box in boxes.iter().take(n_boxes) {
         new_boxes.push(vaalbox_to_box2d(
+            s,
             vaal_box,
             model,
             stream_width,
@@ -407,36 +384,6 @@ fn build_image_annotations_msg(
     Ok(annotations)
 }
 
-fn update_fps() -> i32 {
-    static mut PREVIOUS_TIME: Option<SystemTime> = None;
-    static mut FPS_HISTORY: [i32; 30] = [0; 30];
-    static mut FPS_INDEX: usize = 0;
-
-    let timestamp = SystemTime::now();
-    let frame_time = match unsafe { PREVIOUS_TIME } {
-        Some(prev_time) => timestamp.duration_since(prev_time).unwrap(),
-        None => timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap(),
-    };
-    unsafe {
-        PREVIOUS_TIME = Some(timestamp);
-    };
-    unsafe {
-        FPS_HISTORY[FPS_INDEX] = (NSEC_PER_SEC / frame_time.as_nanos()) as i32;
-    };
-    unsafe {
-        FPS_INDEX = (FPS_INDEX + 1) % 30;
-    };
-
-    let mut fps = 0;
-    unsafe {
-        for fps_history in &FPS_HISTORY {
-            fps += fps_history;
-        }
-    }
-    fps /= 30;
-    fps
-}
-
 fn setup_context(context: &mut Context, s: &Settings) {
     context
         .parameter_seti("max_detection", &[s.max_boxes])
@@ -491,11 +438,33 @@ pub struct Box2D {
     pub label: String,
 }
 
-fn vaalbox_to_box2d(b: &VAALBox, model: &Context, stream_width: f64, stream_height: f64) -> Box2D {
-    let label = match model.label(b.label) {
-        Ok(s) => String::from(s),
-        Err(_) => b.label.to_string(),
+fn vaalbox_to_box2d(
+    s: &Settings,
+    b: &VAALBox,
+    model: &Context,
+    stream_width: f64,
+    stream_height: f64,
+) -> Box2D {
+    let label_ind = b.label + s.label_offset;
+    let label = match s.labels {
+        LabelSetting::Index => label_ind.to_string(),
+        LabelSetting::Score => b.score.to_string(),
+        LabelSetting::Label => match model.label(label_ind) {
+            Ok(s) => String::from(s),
+            Err(_) => b.label.to_string(),
+        },
+        LabelSetting::LabelScore => {
+            format!(
+                "{:?} {:?}",
+                match model.label(label_ind) {
+                    Ok(s) => String::from(s),
+                    Err(_) => label_ind.to_string(),
+                },
+                b.score.to_string()
+            )
+        }
     };
+
     Box2D {
         xmin: b.xmin as f64 * stream_width,
         ymin: b.ymin as f64 * stream_height,
