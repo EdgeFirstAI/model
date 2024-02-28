@@ -81,7 +81,7 @@ async fn main() {
         .res()
         .await
         .unwrap();
-    log!(s.verbose, "Declared subscriber on {:?}", &s.camera_topic);
+    println!("Declared subscriber on {:?}", &s.camera_topic);
 
     let mut err = false;
     let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(2)) {
@@ -155,6 +155,18 @@ async fn main() {
                 let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
                 session
                     .put(&s.detect_topic, encoded)
+                    .res_async()
+                    .await
+                    .unwrap();
+                session
+                    .put(
+                        keyexpr::new(&s.detect_topic)
+                            .unwrap()
+                            .join("schema")
+                            .unwrap(),
+                        "foxglove_msgs/msg/ImageAnnotations",
+                    )
+                    .encoding(Encoding::TEXT_PLAIN)
                     .res_async()
                     .await
                     .unwrap();
