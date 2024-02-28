@@ -144,7 +144,12 @@ async fn main() {
             }
         };
         log!(s.verbose, "Detected {:?} boxes", boxes.len());
-        let msg = build_image_annotations_msg(&boxes, dma_buf.header.stamp.clone());
+        let msg = build_image_annotations_msg(
+            &boxes,
+            dma_buf.header.stamp.clone(),
+            stream_width,
+            stream_height,
+        );
         match msg {
             Ok(m) => {
                 let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
@@ -320,6 +325,8 @@ fn run_model(
 fn build_image_annotations_msg(
     boxes: &Vec<Box2D>,
     timestamp: Time,
+    stream_width: f64,
+    stream_height: f64,
 ) -> Result<FoxgloveImageAnnotations, Box<dyn Error>> {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
@@ -365,8 +372,9 @@ fn build_image_annotations_msg(
             outline_color: white.clone(),
             outline_colors,
             fill_color: transparent.clone(),
-            thickness: 1.0,
+            thickness: 2.0,
         };
+
         let text = FoxgloveTextAnnotations {
             timestamp: timestamp.clone(),
             text: b.label.clone(),
@@ -374,7 +382,7 @@ fn build_image_annotations_msg(
                 x: b.xmin as f64,
                 y: b.ymin as f64,
             },
-            font_size: 12.0,
+            font_size: 0.02 * stream_width.max(stream_height),
             text_color: white.clone(),
             background_color: transparent.clone(),
         };
@@ -448,7 +456,7 @@ fn vaalbox_to_box2d(
     let label_ind = b.label + s.label_offset;
     let label = match s.labels {
         LabelSetting::Index => label_ind.to_string(),
-        LabelSetting::Score => b.score.to_string(),
+        LabelSetting::Score => format!("{:.2}", b.score),
         LabelSetting::Label => match model.label(label_ind) {
             Ok(s) => String::from(s),
             Err(_) => b.label.to_string(),
@@ -460,7 +468,7 @@ fn vaalbox_to_box2d(
                     Ok(s) => String::from(s),
                     Err(_) => label_ind.to_string(),
                 },
-                b.score.to_string()
+                format!("{:.2}", b.score)
             )
         }
     };

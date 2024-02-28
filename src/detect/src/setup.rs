@@ -48,7 +48,7 @@ pub struct Settings {
     #[arg(short, long, default_value = "npu")]
     pub engine: String,
 
-    /// threshold for detections
+    /// score threshold for detections
     #[arg(short, long, default_value = "0.1")]
     pub threshold: f32,
 
