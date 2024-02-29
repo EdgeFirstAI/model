@@ -12,10 +12,6 @@ pub enum LabelSetting {
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Settings {
-    /// verbose logging
-    #[arg(short, long)]
-    pub verbose: bool,
-
     /// zenoh key expression for camera DMA buffers
     #[arg(short, long, default_value = "rt/camera/raw")]
     pub camera_topic: String,

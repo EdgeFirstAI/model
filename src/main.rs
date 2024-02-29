@@ -4,6 +4,8 @@ mod setup;
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use env_logger;
+use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{error::Error, fs, os::fd::AsRawFd, process::Command, str::FromStr, time::Duration};
 use vaal::{self, Context, VAALBox};
@@ -16,21 +18,26 @@ use zenoh_ros_type::{
         FoxglovePointAnnotations, FoxgloveTextAnnotations,
     },
 };
-#[macro_export]
-macro_rules! log {
-	($verbose: expr, $( $args:expr ),*) => {
-		if $verbose {eprintln!( $( $args ),* );}
-	}
-}
+
 #[async_std::main]
 async fn main() {
     let s = Settings::parse();
-
+    env_logger::init();
     let mut backbone = Context::new(&s.engine).unwrap();
-    backbone.load_model_file(s.model.to_str().unwrap()).unwrap();
-    if s.verbose {
-        eprintln!("Loaded backbone model {}", s.model.to_str().unwrap());
-    }
+    let filename = match s.model.to_str() {
+        Some(v) => v,
+        None => {
+            error!(
+                "Cannot use file {:?}, please use only utf8 characters in file path",
+                s.model
+            );
+            return;
+        }
+    };
+    backbone.load_model_file(filename).unwrap();
+
+    info!("Loaded backbone model {:?}", s.model);
+
     let mut decoder = None;
 
     if s.decoder_model.is_some() {
@@ -42,9 +49,7 @@ async fn main() {
         _decoder
             .load_model_file(decoder_file.to_str().unwrap())
             .unwrap();
-        if s.verbose {
-            eprintln!("Loaded decoder model {}", decoder_file.to_str().unwrap());
-        }
+        info!("Loaded decoder model {}", decoder_file.to_str().unwrap());
         decoder = Some(_decoder);
     } else {
         setup_context(&mut backbone, &s);
@@ -59,7 +64,7 @@ async fn main() {
 
     let session = zenoh::open(config).res_async().await.unwrap();
 
-    log!(s.verbose, "Opened Zenoh session");
+    debug!("Opened Zenoh session");
 
     let subscriber = session
         .declare_subscriber(&s.camera_topic)
@@ -81,18 +86,23 @@ async fn main() {
         .res()
         .await
         .unwrap();
-    println!("Declared subscriber on {:?}", &s.camera_topic);
+    info!("Declared subscriber on {:?}", &s.camera_topic);
 
     let mut err = false;
     let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(2)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
-            Err(_) => {
+            Err(e) => {
+                warn!("Cannot determine stream width due {:?}", e);
                 err = true;
                 1
             }
         },
         Err(_) => {
+            warn!(
+                "Cannot determine stream width due to timeout on {:?}",
+                width_sub.key_expr().as_str()
+            );
             err = true;
             1
         }
@@ -101,48 +111,79 @@ async fn main() {
     let mut stream_height = match height_sub.recv_timeout(Duration::from_secs(2)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
-            Err(_) => {
+            Err(e) => {
+                warn!("Cannot determine height width due {:?}", e);
                 err = true;
                 1
             }
         },
         Err(_) => {
+            warn!(
+                "Cannot determine stream height due to timeout on {:?}",
+                height_sub.key_expr().as_str()
+            );
             err = true;
             1
         }
     } as f64;
+
     if err {
-        eprintln!("Cannot determine stream resolution, using normalized coordinates");
+        error!("Cannot determine stream resolution, using normalized coordinates");
         stream_height = 1.0;
         stream_width = 1.0;
-    };
+    } else {
+        info!(
+            "Found stream resolution: {}x{}",
+            stream_width, stream_height
+        );
+    }
+
     drop(height_sub);
     drop(width_sub);
+
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     loop {
         let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
-            Ok(v) => cdr::deserialize(&mut v.payload.contiguous())
-                .expect("Failed to deserialize message"),
-            Err(e) => {
-                eprintln!("Error when recv camera frame {:?}", e);
+            Ok(v) => match cdr::deserialize(&mut v.payload.contiguous()) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to deserialize message: {:?}", e);
+                    continue;
+                }
+            },
+
+            Err(_) => {
+                error!(
+                    "Timeout receiving camera frames from {:?}",
+                    subscriber.key_expr().as_str()
+                );
                 continue;
             }
         };
+        trace!("Recieved camera frame");
         let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("{:?}", e.to_string());
+                error!(
+                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                    dma_buf.src_pid, e
+                );
                 return;
             }
         };
         let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("{:?}", e.to_string());
+                error!(
+                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+                    e
+                );
                 return;
             }
         };
         dma_buf.dma_fd = fd.as_raw_fd();
+        trace!("Opened DMA buffer from camera");
+
         let boxes = match run_model(
             &s,
             &dma_buf,
@@ -154,11 +195,20 @@ async fn main() {
         ) {
             Ok(boxes) => boxes,
             Err(e) => {
-                eprintln!("{:?}", e);
+                error!("Failed to run model: {:?}", e);
                 return;
             }
         };
-        log!(s.verbose, "Detected {:?} boxes", boxes.len());
+        if first_run {
+            info!(
+                "Successfully recieved camera frames and run model, found {:?} boxes",
+                boxes.len()
+            );
+            first_run = false;
+        } else {
+            trace!("Detected {:?} boxes", boxes.len());
+        }
+
         let msg = build_image_annotations_msg(
             &boxes,
             dma_buf.header.stamp.clone(),
@@ -186,7 +236,7 @@ async fn main() {
                     .await
                     .unwrap();
             }
-            Err(e) => eprintln!("{e:?}"),
+            Err(e) => error!("{e:?}"),
         }
     }
 }
@@ -214,17 +264,17 @@ fn run_model(
             //possible vaal error that we can handle
             let poss_err = "attempted an operation which is unsupported on the current platform";
             if e == poss_err {
-                eprintln!(
+                error!(
                     "Attemping to clear cache,\
 						   likely due to g2d alloc fail,\
 						   this should be fixed in VAAL"
                 );
                 match clear_cached_memory() {
-                    Ok(()) => eprintln!("Cleared cached memory"),
-                    Err(()) => eprintln!("Could not clear cached memory"),
+                    Ok(()) => error!("Cleared cached memory"),
+                    Err(()) => error!("Could not clear cached memory"),
                 }
             } else {
-                panic!("Could not clear cache exiting");
+                return Err(format!("Could not clear cache exiting"));
             }
 
             if let Err(e) = backbone.load_frame_dmabuf(
@@ -236,28 +286,32 @@ fn run_model(
                 None,
                 0,
             ) {
-                panic!("{:?}", e);
+                return Err(format!("Could not load frame {:?}", e));
             }
+            trace!("Loaded frame into model");
         }
-        Err(_) => panic!("load_frame_dmabuf error"),
-        Ok(_) => {}
+        Err(_) => return Err(format!("load_frame_dmabuf error")),
+        Ok(_) => {
+            trace!("Loaded frame into model");
+        }
     };
 
     if let Err(e) = backbone.run_model() {
-        return Err(format!("failed to run backbone: {}", e));
+        return Err(format!("Failed to run model: {}", e));
     }
+    trace!("Ran model inference");
     let n_boxes;
 
     if decoder.is_some() {
         let decoder_: &mut Context = decoder.as_mut().unwrap();
         let model = match decoder_.model() {
             Ok(model) => model,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(format!("Failed get decoder model: {:?}", e)),
         };
 
         let inputs_idx = match model.inputs() {
             Ok(inputs) => inputs,
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(format!("Failed get decoder model input: {:?}", e)),
         };
 
         let context = decoder_.dvrt_context().unwrap();
@@ -283,40 +337,43 @@ fn run_model(
         let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
 
         if let Err(e) = out_1.dequantize(in_1) {
-            eprintln!(
-                "failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}):{}",
+            return Err(format!(
+                "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}):{}",
                 out_1.tensor_type(),
                 in_1.tensor_type(),
                 e
-            );
+            ));
         }
+        trace!("Copied backdone out_1 to decoder in_1");
 
         let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
 
         if let Err(e) = out_2.dequantize(in_2) {
-            eprintln!(
-                "failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}):{}",
+            return Err(format!(
+                "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}):{}",
                 out_2.tensor_type(),
                 in_2.tensor_type(),
                 e
-            );
+            ));
         }
+        trace!("Copied backdone out_2 to decoder in_2");
 
         if let Err(e) = decoder_.run_model() {
-            return Err(e.to_string());
+            return Err(format!("Failed to run decoder model: {:?}", e));
         }
+        trace!("Ran decoder model inference");
 
         n_boxes = match decoder_.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
             Err(e) => {
-                return Err(format!("failed to read bounding boxes from model: {:?}", e));
+                return Err(format!("Failed to read bounding boxes from model: {:?}", e));
             }
         };
     } else {
         n_boxes = match backbone.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
             Err(e) => {
-                return Err(format!("failed to read bounding boxes from model: {:?}", e));
+                return Err(format!("Failed to read bounding boxes from model: {:?}", e));
             }
         };
     }
@@ -433,16 +490,16 @@ fn clear_cached_memory() -> Result<(), ()> {
             match output.status.code() {
                 Some(code) if code == 0 => {}
                 _ => {
-                    eprintln!("sync command failed");
-                    eprintln!("stdout {:?}", output.stdout);
-                    eprintln!("stderr {:?}", output.stderr);
+                    error!("sync command Failed");
+                    error!("stdout {:?}", output.stdout);
+                    error!("stderr {:?}", output.stderr);
                     return Err(());
                 }
             };
         }
         Err(e) => {
-            eprintln!("Unable to run sync");
-            eprintln!("{:?}", e);
+            error!("Unable to run sync");
+            error!("{:?}", e);
             return Err(());
         }
     };
@@ -451,17 +508,17 @@ fn clear_cached_memory() -> Result<(), ()> {
 }
 
 pub struct Box2D {
-    #[doc = " left-most normalized coordinate of the bounding box."]
+    #[doc = " left-most pixel coordinate of the bounding box."]
     pub xmin: f64,
-    #[doc = " top-most normalized coordinate of the bounding box."]
+    #[doc = " top-most pixel coordinate of the bounding box."]
     pub ymin: f64,
-    #[doc = " right-most normalized coordinate of the bounding box."]
+    #[doc = " right-most pixel coordinate of the bounding box."]
     pub xmax: f64,
-    #[doc = " bottom-most normalized coordinate of the bounding box."]
+    #[doc = " bottom-most pixel coordinate of the bounding box."]
     pub ymax: f64,
     #[doc = " model-specific score for this detection, higher implies more confidence."]
     pub score: f64,
-    #[doc = " label index for this detection"]
+    #[doc = " label for this detection"]
     pub label: String,
 }
 
