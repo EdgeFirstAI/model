@@ -5,7 +5,7 @@ use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use env_logger;
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
@@ -13,7 +13,6 @@ use std::{
     os::fd::AsRawFd,
     process::Command,
     str::FromStr,
-    sync::atomic::AtomicBool,
     time::{Duration, SystemTime},
 };
 use vaal::{self, Context, VAALBox};
@@ -234,18 +233,10 @@ async fn main() {
                 let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
                 session
                     .put(&s.detect_topic, encoded)
-                    .res_async()
-                    .await
-                    .unwrap();
-                session
-                    .put(
-                        keyexpr::new(&s.detect_topic)
-                            .unwrap()
-                            .join("schema")
-                            .unwrap(),
-                        "foxglove_msgs/msg/ImageAnnotations",
-                    )
-                    .encoding(Encoding::TEXT_PLAIN)
+                    .encoding(Encoding::WithSuffix(
+                        KnownEncoding::AppOctetStream,
+                        "foxglove_msgs/msg/ImageAnnotations".into(),
+                    ))
                     .res_async()
                     .await
                     .unwrap();
