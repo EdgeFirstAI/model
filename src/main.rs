@@ -7,7 +7,15 @@ use clap::Parser;
 use env_logger;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use std::{error::Error, fs, os::fd::AsRawFd, process::Command, str::FromStr, time::Duration};
+use std::{
+    error::Error,
+    fs,
+    os::fd::AsRawFd,
+    process::Command,
+    str::FromStr,
+    sync::atomic::AtomicBool,
+    time::{Duration, SystemTime},
+};
 use vaal::{self, Context, VAALBox};
 use zenoh::{config::Config, prelude::r#async::*};
 use zenoh_ros_type::{
@@ -19,10 +27,15 @@ use zenoh_ros_type::{
     },
 };
 
+const NSEC_PER_MSEC: i64 = 1_000_000;
+const NSEC_PER_SEC: i64 = 1_000_000_000;
+
 #[async_std::main]
 async fn main() {
     let s = Settings::parse();
     env_logger::init();
+    let mut first_run = true;
+
     let mut backbone = Context::new(&s.engine).unwrap();
     let filename = match s.model.to_str() {
         Some(v) => v,
@@ -42,15 +55,15 @@ async fn main() {
 
     if s.decoder_model.is_some() {
         let decoder_device = "cpu";
-        let mut _decoder = Context::new(decoder_device).unwrap();
+        let mut decoder_ctx = Context::new(decoder_device).unwrap();
 
-        setup_context(&mut _decoder, &s);
+        setup_context(&mut decoder_ctx, &s);
         let decoder_file = s.decoder_model.as_ref().unwrap();
-        _decoder
+        decoder_ctx
             .load_model_file(decoder_file.to_str().unwrap())
             .unwrap();
         info!("Loaded decoder model {}", decoder_file.to_str().unwrap());
-        decoder = Some(_decoder);
+        decoder = Some(decoder_ctx);
     } else {
         setup_context(&mut backbone, &s);
     }
@@ -64,7 +77,7 @@ async fn main() {
 
     let session = zenoh::open(config).res_async().await.unwrap();
 
-    debug!("Opened Zenoh session");
+    info!("Opened Zenoh session");
 
     let subscriber = session
         .declare_subscriber(&s.camera_topic)
@@ -161,6 +174,7 @@ async fn main() {
             }
         };
         trace!("Recieved camera frame");
+
         let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
             Ok(v) => v,
             Err(e) => {
@@ -168,7 +182,7 @@ async fn main() {
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
                     dma_buf.src_pid, e
                 );
-                return;
+                continue;
             }
         };
         let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
@@ -178,7 +192,7 @@ async fn main() {
                     "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
                     e
                 );
-                return;
+                continue;
             }
         };
         dma_buf.dma_fd = fd.as_raw_fd();
@@ -251,6 +265,8 @@ fn run_model(
     stream_width: f64,
     stream_height: f64,
 ) -> Result<Vec<Box2D>, String> {
+    let fps = update_fps();
+    let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
         None,
         dma_buf.dma_fd,
@@ -295,13 +311,21 @@ fn run_model(
             trace!("Loaded frame into model");
         }
     };
+    let load_ns = vaal::clock_now() - start;
 
+    let start = vaal::clock_now();
     if let Err(e) = backbone.run_model() {
         return Err(format!("Failed to run model: {}", e));
     }
+    let model_ns = vaal::clock_now() - start;
     trace!("Ran model inference");
+
+    let mut copy_ns;
+    let decoder_ns;
+    let boxes_ns;
     let n_boxes;
 
+    let start = vaal::clock_now();
     if decoder.is_some() {
         let decoder_: &mut Context = decoder.as_mut().unwrap();
         let model = match decoder_.model() {
@@ -344,8 +368,10 @@ fn run_model(
                 e
             ));
         }
+        copy_ns = vaal::clock_now() - start;
         trace!("Copied backdone out_1 to decoder in_1");
 
+        let start = vaal::clock_now();
         let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
 
         if let Err(e) = out_2.dequantize(in_2) {
@@ -356,19 +382,34 @@ fn run_model(
                 e
             ));
         }
+        copy_ns += vaal::clock_now() - start;
         trace!("Copied backdone out_2 to decoder in_2");
 
+        let start = vaal::clock_now();
         if let Err(e) = decoder_.run_model() {
             return Err(format!("Failed to run decoder model: {:?}", e));
         }
+        decoder_ns = vaal::clock_now() - start;
         trace!("Ran decoder model inference");
 
+        let start = vaal::clock_now();
         n_boxes = match decoder_.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
             Err(e) => {
                 return Err(format!("Failed to read bounding boxes from model: {:?}", e));
             }
         };
+        boxes_ns = vaal::clock_now() - start;
+        trace!("Read bounding boxes from model");
+        trace!(
+            "Model: FPS: {:>3}, load: {:>2.3} ms, infer: {:>2.3} ms, copy: {:>2.3} ms, decode: {:>2.3} ms, boxes: {:>2.3} ms",
+            fps,
+            load_ns as f64 / NSEC_PER_MSEC as f64,
+            model_ns as f64 / NSEC_PER_MSEC as f64,
+            copy_ns as f64 / NSEC_PER_MSEC as f64,
+            decoder_ns as f64 / NSEC_PER_MSEC as f64,
+            boxes_ns as f64 / NSEC_PER_MSEC as f64,
+        )
     } else {
         n_boxes = match backbone.boxes(boxes, boxes.capacity()) {
             Ok(len) => len,
@@ -376,6 +417,15 @@ fn run_model(
                 return Err(format!("Failed to read bounding boxes from model: {:?}", e));
             }
         };
+        boxes_ns = vaal::clock_now() - start;
+        trace!("Read bounding boxes from model");
+        trace!(
+            "Model: FPS: {:>3}, load: {:>2.3} ms, infer: {:>2.3} ms, boxes: {:>2.3} ms",
+            fps,
+            load_ns as f64 / NSEC_PER_MSEC as f64,
+            model_ns as f64 / NSEC_PER_MSEC as f64,
+            boxes_ns as f64 / NSEC_PER_MSEC as f64,
+        );
     }
 
     let model = if decoder.is_some() {
@@ -505,6 +555,36 @@ fn clear_cached_memory() -> Result<(), ()> {
     };
     fs::write("/proc/sys/vm/drop_caches", "1").unwrap();
     Ok(())
+}
+
+fn update_fps() -> i32 {
+    static mut PREVIOUS_TIME: Option<SystemTime> = None;
+    static mut FPS_HISTORY: [i32; 30] = [0; 30];
+    static mut FPS_INDEX: usize = 0;
+
+    let timestamp = SystemTime::now();
+    let frame_time = match unsafe { PREVIOUS_TIME } {
+        Some(prev_time) => timestamp.duration_since(prev_time).unwrap(),
+        None => timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap(),
+    };
+    unsafe {
+        PREVIOUS_TIME = Some(timestamp);
+    };
+    unsafe {
+        FPS_HISTORY[FPS_INDEX] = (NSEC_PER_SEC as u128 / frame_time.as_nanos()) as i32;
+    };
+    unsafe {
+        FPS_INDEX = (FPS_INDEX + 1) % 30;
+    };
+
+    let mut fps = 0;
+    unsafe {
+        for fps_history in &FPS_HISTORY {
+            fps += fps_history;
+        }
+    }
+    fps /= 30;
+    fps
 }
 
 pub struct Box2D {
