@@ -71,11 +71,11 @@ async fn main() {
 
     let mode = WhatAmI::from_str(&s.mode).unwrap();
     config.set_mode(Some(mode)).unwrap();
-    // config.connect.endpoints = s.endpoints.iter().map(|v|
-    // v.parse().unwrap()).collect();
+    config.connect.endpoints = s.endpoints.iter().map(|v| v.parse().unwrap()).collect();
+    config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
+    let _ = config.scouting.multicast.set_enabled(Some(false));
 
-    let session = zenoh::open(config).res_async().await.unwrap();
-
+    let session = zenoh::open(config.clone()).res_async().await.unwrap();
     info!("Opened Zenoh session");
 
     let subscriber = session
@@ -83,6 +83,7 @@ async fn main() {
         .res()
         .await
         .unwrap();
+    info!("Declared subscriber on {:?}", &s.camera_topic);
 
     let res_topic: Vec<OwnedKeyExpr> = vec!["width", "height"]
         .into_iter()
@@ -98,10 +99,9 @@ async fn main() {
         .res()
         .await
         .unwrap();
-    info!("Declared subscriber on {:?}", &s.camera_topic);
 
     let mut err = false;
-    let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(2)) {
+    let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(10)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
             Err(e) => {
@@ -120,7 +120,7 @@ async fn main() {
         }
     } as f64;
 
-    let mut stream_height = match height_sub.recv_timeout(Duration::from_secs(2)) {
+    let mut stream_height = match height_sub.recv_timeout(Duration::from_secs(10)) {
         Ok(v) => match i32::try_from(v.value) {
             Ok(val) => val,
             Err(e) => {

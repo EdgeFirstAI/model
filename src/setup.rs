@@ -13,7 +13,7 @@ pub enum LabelSetting {
 #[command(author, version, about, long_about = None)]
 pub struct Settings {
     /// zenoh key expression for camera DMA buffers
-    #[arg(short, long, default_value = "rt/camera/raw")]
+    #[arg(short, long, default_value = "rt/camera/dma")]
     pub camera_topic: String,
 
     /// zenoh key expression for publishing detection results
@@ -25,11 +25,15 @@ pub struct Settings {
     pub res_topic: String,
 
     /// connect to zenoh endpoints
-    #[arg(long)]
+    #[arg(short, long, default_value = "tcp/127.0.0.1:7447")]
     pub endpoints: Vec<String>,
 
+    /// listen to zenoh endpoints
+    #[arg(short, long)]
+    pub listen: Vec<String>,
+
     /// zenoh connection mode
-    #[arg(long, default_value = "peer")]
+    #[arg(long, default_value = "client")]
     pub mode: String,
 
     /// model
@@ -37,7 +41,7 @@ pub struct Settings {
     pub model: PathBuf,
 
     /// camera mirror
-    #[arg(short, long, default_value = "label", value_enum)]
+    #[arg(long, default_value = "label", value_enum)]
     pub labels: LabelSetting,
 
     /// engine for model context
