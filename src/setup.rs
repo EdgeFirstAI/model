@@ -21,8 +21,8 @@ pub struct Settings {
     pub detect_topic: String,
 
     /// resolution info topic
-    #[arg(long, default_value = "rt/camera/stream_info")]
-    pub res_topic: String,
+    #[arg(long, default_value = "rt/camera/info")]
+    pub info_topic: String,
 
     /// connect to zenoh endpoints
     #[arg(short, long, default_value = "tcp/127.0.0.1:7447")]

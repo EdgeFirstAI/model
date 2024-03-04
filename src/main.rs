@@ -24,6 +24,7 @@ use zenoh_ros_type::{
         point_annotation_type::LINE_LOOP, FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2,
         FoxglovePointAnnotations, FoxgloveTextAnnotations,
     },
+    sensor_msgs::CameraInfo,
 };
 
 const NSEC_PER_MSEC: i64 = 1_000_000;
@@ -78,80 +79,49 @@ async fn main() {
     let session = zenoh::open(config.clone()).res_async().await.unwrap();
     info!("Opened Zenoh session");
 
+    let info_sub = session
+        .declare_subscriber(&s.info_topic)
+        .res()
+        .await
+        .unwrap();
+    info!("Declared subscriber on {:?}", &s.info_topic);
+
+    let stream_width: f64;
+    let stream_height: f64;
+    match info_sub.recv_timeout(Duration::from_secs(10)) {
+        Ok(v) => {
+            match cdr::deserialize::<CameraInfo>(&mut v.payload.contiguous()) {
+                Ok(v) => {
+                    stream_width = v.width as f64;
+                    stream_height = v.height as f64;
+                    info!(
+                        "Found stream resolution: {}x{}",
+                        stream_width, stream_height
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to deserialize camera info message: {:?}", e);
+                    warn!("Cannot determine stream resolution, using normalized coordinates");
+                    stream_width = 1.0;
+                    stream_height = 1.0;
+                }
+            };
+        }
+        Err(_) => {
+            warn!("Timeout on {:?}", s.info_topic);
+            warn!("Cannot determine stream resolution, using normalized coordinates");
+            stream_width = 1.0;
+            stream_height = 1.0;
+        }
+    }
+    drop(info_sub);
+
     let subscriber = session
         .declare_subscriber(&s.camera_topic)
         .res()
         .await
         .unwrap();
     info!("Declared subscriber on {:?}", &s.camera_topic);
-
-    let res_topic: Vec<OwnedKeyExpr> = vec!["width", "height"]
-        .into_iter()
-        .map(|x| keyexpr::new(&s.res_topic).unwrap().join(x).unwrap())
-        .collect();
-    let width_sub = session
-        .declare_subscriber(&res_topic[0])
-        .res()
-        .await
-        .unwrap();
-    let height_sub = session
-        .declare_subscriber(&res_topic[1])
-        .res()
-        .await
-        .unwrap();
-
-    let mut err = false;
-    let mut stream_width = match width_sub.recv_timeout(Duration::from_secs(10)) {
-        Ok(v) => match i32::try_from(v.value) {
-            Ok(val) => val,
-            Err(e) => {
-                warn!("Cannot determine stream width due {:?}", e);
-                err = true;
-                1
-            }
-        },
-        Err(_) => {
-            warn!(
-                "Cannot determine stream width due to timeout on {:?}",
-                width_sub.key_expr().as_str()
-            );
-            err = true;
-            1
-        }
-    } as f64;
-
-    let mut stream_height = match height_sub.recv_timeout(Duration::from_secs(10)) {
-        Ok(v) => match i32::try_from(v.value) {
-            Ok(val) => val,
-            Err(e) => {
-                warn!("Cannot determine height width due {:?}", e);
-                err = true;
-                1
-            }
-        },
-        Err(_) => {
-            warn!(
-                "Cannot determine stream height due to timeout on {:?}",
-                height_sub.key_expr().as_str()
-            );
-            err = true;
-            1
-        }
-    } as f64;
-
-    if err {
-        error!("Cannot determine stream resolution, using normalized coordinates");
-        stream_height = 1.0;
-        stream_width = 1.0;
-    } else {
-        info!(
-            "Found stream resolution: {}x{}",
-            stream_width, stream_height
-        );
-    }
-
-    drop(height_sub);
-    drop(width_sub);
 
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     loop {
