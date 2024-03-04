@@ -4,7 +4,6 @@ mod setup;
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use env_logger;
 use log::{error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
@@ -75,7 +74,8 @@ async fn main() {
     config.connect.endpoints = s.endpoints.iter().map(|v| v.parse().unwrap()).collect();
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
-
+    let _ = config.scouting.gossip.set_enabled(Some(false));
+    let _ = config.scouting.set_timeout(Some(0));
     let session = zenoh::open(config.clone()).res_async().await.unwrap();
     info!("Opened Zenoh session");
 
@@ -90,7 +90,7 @@ async fn main() {
     let stream_height: f64;
     match info_sub.recv_timeout(Duration::from_secs(10)) {
         Ok(v) => {
-            match cdr::deserialize::<CameraInfo>(&mut v.payload.contiguous()) {
+            match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
                 Ok(v) => {
                     stream_width = v.width as f64;
                     stream_height = v.height as f64;
@@ -127,7 +127,7 @@ async fn main() {
     loop {
         let _ = subscriber.drain();
         let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
-            Ok(v) => match cdr::deserialize(&mut v.payload.contiguous()) {
+            Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Failed to deserialize message: {:?}", e);
@@ -252,7 +252,7 @@ fn run_model(
                     Err(()) => error!("Could not clear cached memory"),
                 }
             } else {
-                return Err(format!("Could not clear cache exiting"));
+                return Err(String::from("Could not clear cache exiting"));
             }
 
             if let Err(e) = backbone.load_frame_dmabuf(
@@ -268,7 +268,7 @@ fn run_model(
             }
             trace!("Loaded frame into model");
         }
-        Err(_) => return Err(format!("load_frame_dmabuf error")),
+        Err(_) => return Err(String::from("load_frame_dmabuf error")),
         Ok(_) => {
             trace!("Loaded frame into model");
         }
