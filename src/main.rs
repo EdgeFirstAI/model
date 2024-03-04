@@ -125,6 +125,7 @@ async fn main() {
 
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     loop {
+        let _ = subscriber.drain();
         let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
             Ok(v) => match cdr::deserialize(&mut v.payload.contiguous()) {
                 Ok(v) => v,
