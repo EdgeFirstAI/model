@@ -40,7 +40,7 @@ pub struct Settings {
     #[arg(short, long, env, required = true)]
     pub model: PathBuf,
 
-    /// camera mirror
+    /// configure the text annotation of the detected bounding boxes
     #[arg(long, env, default_value = "label", value_enum)]
     pub labels: LabelSetting,
 
