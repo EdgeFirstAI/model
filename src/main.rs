@@ -71,7 +71,7 @@ async fn main() {
 
     let mode = WhatAmI::from_str(&s.mode).unwrap();
     config.set_mode(Some(mode)).unwrap();
-    config.connect.endpoints = s.endpoints.iter().map(|v| v.parse().unwrap()).collect();
+    config.connect.endpoints = s.connect.iter().map(|v| v.parse().unwrap()).collect();
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
     let _ = config.scouting.gossip.set_enabled(Some(false));
