@@ -75,7 +75,6 @@ async fn main() {
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
     let _ = config.scouting.gossip.set_enabled(Some(false));
-    let _ = config.scouting.set_timeout(Some(0));
     let session = zenoh::open(config.clone()).res_async().await.unwrap();
     info!("Opened Zenoh session");
 
@@ -118,15 +117,17 @@ async fn main() {
 
     let subscriber = session
         .declare_subscriber(&s.camera_topic)
+        .best_effort()
         .res()
         .await
         .unwrap();
     info!("Declared subscriber on {:?}", &s.camera_topic);
 
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
+    let timeout = Duration::from_millis(1000);
     loop {
         let _ = subscriber.drain();
-        let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
+        let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(timeout.clone()) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -135,10 +136,12 @@ async fn main() {
                 }
             },
 
-            Err(_) => {
+            Err(e) => {
                 error!(
-                    "Timeout receiving camera frames from {:?}",
-                    subscriber.key_expr().as_str()
+                    "Timeout ({} ms) receiving camera frames from {:?}: {:?}",
+                    timeout.as_millis(),
+                    subscriber.key_expr().as_str(),
+                    e
                 );
                 continue;
             }
