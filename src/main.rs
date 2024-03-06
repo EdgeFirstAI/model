@@ -114,7 +114,6 @@ async fn main() {
 
     let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
-        .best_effort()
         .res_async()
         .await
         .unwrap();
@@ -192,7 +191,7 @@ async fn main() {
     let sub_camera = hearbeat.await;
 
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
-    let timeout = Duration::from_millis(1000);
+    let timeout = Duration::from_millis(100);
     loop {
         let _ = sub_camera.drain();
         let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout.clone()) {
@@ -206,7 +205,7 @@ async fn main() {
 
             Err(e) => {
                 error!(
-                    "error receiving camera frame on {:?}: {:?}",
+                    "error receiving camera frame on {}: {:?}",
                     sub_camera.key_expr(),
                     e
                 );
@@ -263,7 +262,6 @@ async fn main() {
             trace!("Detected {:?} boxes", boxes.len());
         }
 
-        let boxes = Vec::new();
         let msg = build_image_annotations_msg(
             &boxes,
             dma_buf.header.stamp.clone(),
@@ -277,8 +275,8 @@ async fn main() {
                         KnownEncoding::AppOctetStream,
                         "foxglove_msgs/msg/ImageAnnotations".into(),
                     ));
-                match publ_detect.put(encoded).res_async().await {
-                    Ok(_) => (),
+                match publ_detect.put(encoded.clone()).res_async().await {
+                    Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
                     Err(e) => {
                         error!(
                             "Error sending message on {}: {:?}",
@@ -657,16 +655,16 @@ fn vaalbox_to_box2d(
         },
         LabelSetting::LabelScore => {
             format!(
-                "{:?} {:?}",
+                "{} {:.2}",
                 match model.label(label_ind) {
                     Ok(s) => String::from(s),
                     Err(_) => label_ind.to_string(),
                 },
-                format!("{:.2}", b.score)
+                b.score
             )
         }
     };
-
+    trace!("Created box with label {}", label);
     Box2D {
         xmin: b.xmin as f64 * stream_width,
         ymin: b.ymin as f64 * stream_height,
@@ -703,7 +701,7 @@ async fn heart_beat<'a>(
 
             Err(e) => {
                 error!(
-                    "error receiving camera frame on {:?}: {:?}",
+                    "error receiving camera frame on {}: {:?}",
                     sub_camera.key_expr(),
                     e
                 );
