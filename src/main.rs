@@ -107,8 +107,8 @@ async fn main() {
                 }
             };
         }
-        Err(_) => {
-            warn!("Timeout on {:?}", s.info_topic);
+        Err(e) => {
+            warn!("Failed to receive on {:?}: {:?}", s.info_topic, e);
             warn!("Cannot determine stream resolution, using normalized coordinates");
             stream_width = 1.0;
             stream_height = 1.0;
@@ -135,10 +135,11 @@ async fn main() {
                 }
             },
 
-            Err(_) => {
+            Err(e) => {
                 error!(
-                    "Timeout receiving camera frames from {:?}",
-                    subscriber.key_expr().as_str()
+                    "error receiving camera frame on {:?}: {:?}",
+                    subscriber.key_expr(),
+                    e
                 );
                 continue;
             }
