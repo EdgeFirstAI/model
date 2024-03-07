@@ -2,9 +2,10 @@
 use crate::setup::*;
 mod setup;
 use async_pidfd::PidFd;
+use async_std::task::spawn;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
@@ -12,10 +13,16 @@ use std::{
     os::fd::AsRawFd,
     process::Command,
     str::FromStr,
+    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, SystemTime},
 };
 use vaal::{self, Context, VAALBox};
-use zenoh::{config::Config, prelude::r#async::*};
+use zenoh::{
+    config::Config,
+    prelude::{r#async::*, sync::SyncResolve},
+    publication::Publisher,
+    subscriber::FlumeSubscriber,
+};
 use zenoh_ros_type::{
     builtin_interfaces::Time,
     deepview_msgs::DeepviewDMABuf,
@@ -35,38 +42,6 @@ async fn main() {
     env_logger::init();
     let mut first_run = true;
 
-    let mut backbone = Context::new(&s.engine).unwrap();
-    let filename = match s.model.to_str() {
-        Some(v) => v,
-        None => {
-            error!(
-                "Cannot use file {:?}, please use only utf8 characters in file path",
-                s.model
-            );
-            return;
-        }
-    };
-    backbone.load_model_file(filename).unwrap();
-
-    info!("Loaded backbone model {:?}", s.model);
-
-    let mut decoder = None;
-
-    if s.decoder_model.is_some() {
-        let decoder_device = "cpu";
-        let mut decoder_ctx = Context::new(decoder_device).unwrap();
-
-        setup_context(&mut decoder_ctx, &s);
-        let decoder_file = s.decoder_model.as_ref().unwrap();
-        decoder_ctx
-            .load_model_file(decoder_file.to_str().unwrap())
-            .unwrap();
-        info!("Loaded decoder model {}", decoder_file.to_str().unwrap());
-        decoder = Some(decoder_ctx);
-    } else {
-        setup_context(&mut backbone, &s);
-    }
-
     let mut config = Config::default();
 
     let mode = WhatAmI::from_str(&s.mode).unwrap();
@@ -74,14 +49,35 @@ async fn main() {
     config.connect.endpoints = s.connect.iter().map(|v| v.parse().unwrap()).collect();
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
     let _ = config.scouting.multicast.set_enabled(Some(false));
-    let _ = config.scouting.gossip.set_enabled(Some(false));
-    let _ = config.scouting.set_timeout(Some(0));
-    let session = zenoh::open(config.clone()).res_async().await.unwrap();
+    let _ = config.scouting.gossip.set_enabled(Some(true));
+    let session = match zenoh::open(config.clone()).res_async().await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while opening Zenoh session: {:?}", e);
+            return;
+        }
+    }
+    .into_arc();
     info!("Opened Zenoh session");
+
+    let publ_detect = match session
+        .declare_publisher(s.detect_topic.clone())
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring detection publisher {}: {:?}",
+                s.detect_topic, e
+            );
+            return;
+        }
+    };
 
     let info_sub = session
         .declare_subscriber(&s.info_topic)
-        .res()
+        .res_async()
         .await
         .unwrap();
     info!("Declared subscriber on {:?}", &s.info_topic);
@@ -116,17 +112,89 @@ async fn main() {
     }
     drop(info_sub);
 
-    let subscriber = session
+    let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
-        .res()
+        .res_async()
         .await
         .unwrap();
     info!("Declared subscriber on {:?}", &s.camera_topic);
 
+    let (tx, rx) = mpsc::channel();
+    let hearbeat = spawn(heart_beat(sub_camera, publ_detect.clone(), rx));
+
+    let mut backbone = match Context::new(&s.engine) {
+        Ok(v) => {
+            debug!("Opened VAAL Context on {}", s.engine);
+            v
+        }
+        Err(e) => {
+            error!("Could not open VAAL Context on {}, {:?}", s.engine, e);
+            return;
+        }
+    };
+    let filename = match s.model.to_str() {
+        Some(v) => v,
+        None => {
+            error!(
+                "Cannot use file {:?}, please use only utf8 characters in file path",
+                s.model
+            );
+            return;
+        }
+    };
+    match backbone.load_model_file(filename) {
+        Ok(_) => info!("Loaded backbone model {:?}", filename),
+        Err(e) => {
+            error!("Could not load model file {}: {:?}", filename, e);
+            return;
+        }
+    }
+
+    let mut decoder = None;
+
+    if s.decoder_model.is_some() {
+        let decoder_device = "cpu";
+        let mut decoder_ctx = match Context::new(decoder_device) {
+            Ok(v) => {
+                debug!("Opened VAAL Context on {}", decoder_device);
+                v
+            }
+            Err(e) => {
+                error!("Could not open VAAL Context on {}, {:?}", decoder_device, e);
+                return;
+            }
+        };
+        setup_context(&mut decoder_ctx, &s);
+        let decoder_file = match s.decoder_model.as_ref().unwrap().to_str() {
+            Some(v) => v,
+            None => {
+                error!(
+                    "Cannot use file {:?}, please use only utf8 characters in file path",
+                    s.decoder_model.as_ref().unwrap()
+                );
+                return;
+            }
+        };
+        match decoder_ctx.load_model_file(decoder_file) {
+            Ok(_) => info!("Loaded decoder model {:?}", decoder_file),
+            Err(e) => {
+                error!("Could not load decoder file {}: {:?}", decoder_file, e);
+                return;
+            }
+        }
+        decoder = Some(decoder_ctx);
+    } else {
+        setup_context(&mut backbone, &s);
+    }
+
+    drop(tx);
+    let sub_camera = hearbeat.await;
+
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
+    let timeout = Duration::from_millis(100);
     loop {
-        let _ = subscriber.drain();
-        let mut dma_buf: DeepviewDMABuf = match subscriber.recv_timeout(Duration::from_secs(1)) {
+        let _ = sub_camera.drain();
+        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout.clone()) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -137,8 +205,8 @@ async fn main() {
 
             Err(e) => {
                 error!(
-                    "error receiving camera frame on {:?}: {:?}",
-                    subscriber.key_expr(),
+                    "error receiving camera frame on {}: {:?}",
+                    sub_camera.key_expr(),
                     e
                 );
                 continue;
@@ -202,16 +270,21 @@ async fn main() {
         );
         match msg {
             Ok(m) => {
-                let encoded = cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap();
-                session
-                    .put(&s.detect_topic, encoded)
+                let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap())
                     .encoding(Encoding::WithSuffix(
                         KnownEncoding::AppOctetStream,
                         "foxglove_msgs/msg/ImageAnnotations".into(),
-                    ))
-                    .res_async()
-                    .await
-                    .unwrap();
+                    ));
+                match publ_detect.put(encoded.clone()).res_async().await {
+                    Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                    Err(e) => {
+                        error!(
+                            "Error sending message on {}: {:?}",
+                            publ_detect.key_expr(),
+                            e
+                        )
+                    }
+                }
             }
             Err(e) => error!("{e:?}"),
         }
@@ -582,16 +655,16 @@ fn vaalbox_to_box2d(
         },
         LabelSetting::LabelScore => {
             format!(
-                "{:?} {:?}",
+                "{} {:.2}",
                 match model.label(label_ind) {
                     Ok(s) => String::from(s),
                     Err(_) => label_ind.to_string(),
                 },
-                format!("{:.2}", b.score)
+                b.score
             )
         }
     };
-
+    trace!("Created box with label {}", label);
     Box2D {
         xmin: b.xmin as f64 * stream_width,
         ymin: b.ymin as f64 * stream_height,
@@ -599,5 +672,88 @@ fn vaalbox_to_box2d(
         ymax: b.ymax as f64 * stream_height,
         score: b.score as f64,
         label,
+    }
+}
+
+async fn heart_beat<'a>(
+    sub_camera: FlumeSubscriber<'a>,
+    publ_detect: Publisher<'_>,
+    rx: Receiver<bool>,
+) -> FlumeSubscriber<'a> {
+    loop {
+        match rx.try_recv() {
+            Ok(_) => return sub_camera,
+            Err(e) => match e {
+                TryRecvError::Disconnected => return sub_camera,
+                TryRecvError::Empty => (),
+            },
+        }
+        let _ = sub_camera.drain();
+        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(Duration::from_millis(1000))
+        {
+            Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to deserialize message: {:?}", e);
+                    continue;
+                }
+            },
+
+            Err(e) => {
+                error!(
+                    "error receiving camera frame on {}: {:?}",
+                    sub_camera.key_expr(),
+                    e
+                );
+                continue;
+            }
+        };
+        trace!("Recieved camera frame");
+
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                    dma_buf.src_pid, e
+                );
+                continue;
+            }
+        };
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+                    e
+                );
+                continue;
+            }
+        };
+        dma_buf.dma_fd = fd.as_raw_fd();
+        trace!("Opened DMA buffer from camera");
+
+        let msg = FoxgloveImageAnnotations {
+            circles: Vec::new(),
+            points: Vec::new(),
+            texts: Vec::new(),
+        };
+
+        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+            Encoding::WithSuffix(
+                KnownEncoding::AppOctetStream,
+                "foxglove_msgs/msg/ImageAnnotations".into(),
+            ),
+        );
+        match publ_detect.put(encoded).res_sync() {
+            Ok(_) => (),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_detect.key_expr(),
+                    e
+                )
+            }
+        }
     }
 }
