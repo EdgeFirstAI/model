@@ -8,7 +8,6 @@ use clap::Parser;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
-    error::Error,
     fs,
     os::fd::AsRawFd,
     process::Command,
@@ -27,8 +26,9 @@ use zenoh_ros_type::{
     builtin_interfaces::Time,
     deepview_msgs::DeepviewDMABuf,
     foxglove_msgs::{
-        point_annotation_type::LINE_LOOP, FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2,
-        FoxglovePointAnnotations, FoxgloveTextAnnotations,
+        point_annotation_type::{LINE_LOOP, UNKNOWN},
+        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
+        FoxgloveTextAnnotations,
     },
     sensor_msgs::CameraInfo,
 };
@@ -120,7 +120,14 @@ async fn main() {
     info!("Declared subscriber on {:?}", &s.camera_topic);
 
     let (tx, rx) = mpsc::channel();
-    let hearbeat = spawn(heart_beat(sub_camera, publ_detect.clone(), rx));
+    let heartbeat = spawn(heart_beat(
+        sub_camera,
+        publ_detect.clone(),
+        rx,
+        format!("Loading Model: {}", s.model.to_string_lossy()),
+        stream_width,
+        stream_height,
+    ));
 
     let mut backbone = match Context::new(&s.engine) {
         Ok(v) => {
@@ -188,13 +195,22 @@ async fn main() {
     }
 
     drop(tx);
-    let sub_camera = hearbeat.await;
+
+    let sub_camera = heartbeat.await;
+
+    let model_name = match s.model.as_path().file_name() {
+        Some(v) => String::from(v.to_string_lossy()),
+        None => {
+            warn!("Cannot determine model file basename");
+            String::from("unknown_model_file")
+        }
+    };
 
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     let timeout = Duration::from_millis(100);
     loop {
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout.clone()) {
+        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -267,26 +283,24 @@ async fn main() {
             dma_buf.header.stamp.clone(),
             stream_width,
             stream_height,
+            &model_name,
         );
-        match msg {
-            Ok(m) => {
-                let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&m, Infinite).unwrap())
-                    .encoding(Encoding::WithSuffix(
-                        KnownEncoding::AppOctetStream,
-                        "foxglove_msgs/msg/ImageAnnotations".into(),
-                    ));
-                match publ_detect.put(encoded.clone()).res_async().await {
-                    Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
-                    Err(e) => {
-                        error!(
-                            "Error sending message on {}: {:?}",
-                            publ_detect.key_expr(),
-                            e
-                        )
-                    }
-                }
+
+        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+            Encoding::WithSuffix(
+                KnownEncoding::AppOctetStream,
+                "foxglove_msgs/msg/ImageAnnotations".into(),
+            ),
+        );
+        match publ_detect.put(encoded.clone()).res_async().await {
+            Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_detect.key_expr(),
+                    e
+                )
             }
-            Err(e) => error!("{e:?}"),
         }
     }
 }
@@ -326,10 +340,10 @@ fn run_model(
                     Err(()) => error!("Could not clear cached memory"),
                 }
             } else {
-                return Err(String::from("Could not clear cache exiting"));
+                return Err(format!("Could not load frame {:?}", e));
             }
 
-            if let Err(e) = backbone.load_frame_dmabuf(
+            match backbone.load_frame_dmabuf(
                 None,
                 dma_buf.dma_fd,
                 dma_buf.fourcc,
@@ -338,11 +352,13 @@ fn run_model(
                 None,
                 0,
             ) {
-                return Err(format!("Could not load frame {:?}", e));
-            }
-            trace!("Loaded frame into model");
+                Err(e) => return Err(format!("Could not load frame {:?}", e)),
+                Ok(_) => {
+                    trace!("Loaded frame into model")
+                }
+            };
         }
-        Err(_) => return Err(String::from("load_frame_dmabuf error")),
+        Err(e) => return Err(format!("Could not load frame {:?}", e)),
         Ok(_) => {
             trace!("Loaded frame into model");
         }
@@ -389,16 +405,14 @@ fn run_model(
         let in_1_shape = in_1.shape();
 
         if out_1_shape[1] != in_1_shape[1] && out_1_shape[2] != in_1_shape[2] {
-            let temp = in_2_idx;
-            in_2_idx = in_1_idx;
-            in_1_idx = temp;
+            std::mem::swap(&mut in_2_idx, &mut in_1_idx);
         }
 
         let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
 
         if let Err(e) = out_1.dequantize(in_1) {
             return Err(format!(
-                "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}):{}",
+                "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}): {}",
                 out_1.tensor_type(),
                 in_1.tensor_type(),
                 e
@@ -412,7 +426,7 @@ fn run_model(
 
         if let Err(e) = out_2.dequantize(in_2) {
             return Err(format!(
-                "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}):{}",
+                "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}): {}",
                 out_2.tensor_type(),
                 in_2.tensor_type(),
                 e
@@ -485,11 +499,12 @@ fn run_model(
 }
 
 fn build_image_annotations_msg(
-    boxes: &Vec<Box2D>,
+    boxes: &[Box2D],
     timestamp: Time,
     stream_width: f64,
     stream_height: f64,
-) -> Result<FoxgloveImageAnnotations, Box<dyn Error>> {
+    msg: &str,
+) -> FoxgloveImageAnnotations {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
         points: Vec::new(),
@@ -507,6 +522,30 @@ fn build_image_annotations_msg(
         b: 0.0,
         a: 0.0,
     };
+    let empty_points = FoxglovePointAnnotations {
+        timestamp: timestamp.clone(),
+        type_: UNKNOWN,
+        points: Vec::new(),
+        outline_color: white.clone(),
+        outline_colors: Vec::new(),
+        fill_color: transparent.clone(),
+        thickness: 2.0,
+    };
+
+    let empty_text = FoxgloveTextAnnotations {
+        timestamp: timestamp.clone(),
+        text: msg.to_owned(),
+        position: FoxglovePoint2 {
+            x: stream_width * 0.025,
+            y: stream_height * 0.95,
+        },
+        font_size: 0.015 * stream_width.max(stream_height),
+        text_color: white.clone(),
+        background_color: transparent.clone(),
+    };
+
+    annotations.points.push(empty_points);
+    annotations.texts.push(empty_text);
     for b in boxes.iter() {
         let outline_colors = vec![white.clone(), white.clone(), white.clone(), white.clone()];
         let points = vec![
@@ -541,8 +580,8 @@ fn build_image_annotations_msg(
             timestamp: timestamp.clone(),
             text: b.label.clone(),
             position: FoxglovePoint2 {
-                x: b.xmin as f64,
-                y: b.ymin as f64,
+                x: b.xmin,
+                y: b.ymin,
             },
             font_size: 0.02 * stream_width.max(stream_height),
             text_color: white.clone(),
@@ -551,7 +590,7 @@ fn build_image_annotations_msg(
         annotations.points.push(points);
         annotations.texts.push(text);
     }
-    Ok(annotations)
+    annotations
 }
 
 fn setup_context(context: &mut Context, s: &Settings) {
@@ -574,7 +613,7 @@ fn clear_cached_memory() -> Result<(), ()> {
     match Command::new("sync").output() {
         Ok(output) => {
             match output.status.code() {
-                Some(code) if code == 0 => {}
+                Some(0) => {}
                 _ => {
                     error!("sync command Failed");
                     error!("stdout {:?}", output.stdout);
@@ -679,6 +718,9 @@ async fn heart_beat<'a>(
     sub_camera: FlumeSubscriber<'a>,
     publ_detect: Publisher<'_>,
     rx: Receiver<bool>,
+    msg: String,
+    stream_width: f64,
+    stream_height: f64,
 ) -> FlumeSubscriber<'a> {
     loop {
         match rx.try_recv() {
@@ -733,18 +775,20 @@ async fn heart_beat<'a>(
         dma_buf.dma_fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
-        let msg = FoxgloveImageAnnotations {
-            circles: Vec::new(),
-            points: Vec::new(),
-            texts: Vec::new(),
-        };
-
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "foxglove_msgs/msg/ImageAnnotations".into(),
-            ),
+        let image_annotations = build_image_annotations_msg(
+            &Vec::new(),
+            dma_buf.header.stamp,
+            stream_width,
+            stream_height,
+            &msg,
         );
+
+        let encoded =
+            Value::from(cdr::serialize::<_, _, CdrLe>(&image_annotations, Infinite).unwrap())
+                .encoding(Encoding::WithSuffix(
+                    KnownEncoding::AppOctetStream,
+                    "foxglove_msgs/msg/ImageAnnotations".into(),
+                ));
         match publ_detect.put(encoded).res_sync() {
             Ok(_) => (),
             Err(e) => {
