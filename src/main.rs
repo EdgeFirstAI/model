@@ -536,7 +536,7 @@ fn build_image_annotations_msg(
         timestamp: timestamp.clone(),
         text: msg.to_owned(),
         position: FoxglovePoint2 {
-            x: 0.0,
+            x: stream_width * 0.025,
             y: stream_height * 0.95,
         },
         font_size: 0.015 * stream_width.max(stream_height),
