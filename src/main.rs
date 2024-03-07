@@ -210,7 +210,7 @@ async fn main() {
     let timeout = Duration::from_millis(100);
     loop {
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout.clone()) {
+        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -366,9 +366,8 @@ fn run_model(
     let load_ns = vaal::clock_now() - start;
 
     let start = vaal::clock_now();
-    match backbone.run_model() {
-        Err(e) => return Err(format!("Failed to run model: {}", e)),
-        Ok(_) => {}
+    if let Err(e) = backbone.run_model() {
+        return Err(format!("Failed to run model: {}", e));
     }
     let model_ns = vaal::clock_now() - start;
     trace!("Ran model inference");
@@ -406,9 +405,7 @@ fn run_model(
         let in_1_shape = in_1.shape();
 
         if out_1_shape[1] != in_1_shape[1] && out_1_shape[2] != in_1_shape[2] {
-            let temp = in_2_idx;
-            in_2_idx = in_1_idx;
-            in_1_idx = temp;
+            std::mem::swap(&mut in_2_idx, &mut in_1_idx);
         }
 
         let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
@@ -502,11 +499,11 @@ fn run_model(
 }
 
 fn build_image_annotations_msg(
-    boxes: &Vec<Box2D>,
+    boxes: &[Box2D],
     timestamp: Time,
     stream_width: f64,
     stream_height: f64,
-    msg: &String,
+    msg: &str,
 ) -> FoxgloveImageAnnotations {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
@@ -537,7 +534,7 @@ fn build_image_annotations_msg(
 
     let empty_text = FoxgloveTextAnnotations {
         timestamp: timestamp.clone(),
-        text: msg.clone(),
+        text: msg.to_owned(),
         position: FoxglovePoint2 {
             x: 0.0,
             y: stream_height * 0.95,
@@ -583,8 +580,8 @@ fn build_image_annotations_msg(
             timestamp: timestamp.clone(),
             text: b.label.clone(),
             position: FoxglovePoint2 {
-                x: b.xmin as f64,
-                y: b.ymin as f64,
+                x: b.xmin,
+                y: b.ymin,
             },
             font_size: 0.02 * stream_width.max(stream_height),
             text_color: white.clone(),
@@ -616,7 +613,7 @@ fn clear_cached_memory() -> Result<(), ()> {
     match Command::new("sync").output() {
         Ok(output) => {
             match output.status.code() {
-                Some(code) if code == 0 => {}
+                Some(0) => {}
                 _ => {
                     error!("sync command Failed");
                     error!("stdout {:?}", output.stdout);
