@@ -1,6 +1,9 @@
 // use serde::{Deserialize, Serialize};
-use crate::setup::*;
+
 mod setup;
+mod tracker;
+
+use crate::{setup::*, tracker::*};
 use async_pidfd::PidFd;
 use async_std::task::spawn;
 use cdr::{CdrLe, Infinite};
@@ -32,7 +35,6 @@ use zenoh_ros_type::{
     },
     sensor_msgs::CameraInfo,
 };
-
 const NSEC_PER_MSEC: i64 = 1_000_000;
 const NSEC_PER_SEC: i64 = 1_000_000_000;
 
@@ -48,7 +50,11 @@ async fn main() {
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = s.connect.iter().map(|v| v.parse().unwrap()).collect();
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
-    let _ = config.scouting.multicast.set_enabled(Some(false));
+    let _ = config.scouting.multicast.set_enabled(Some(true));
+    let _ = config
+        .scouting
+        .multicast
+        .set_interface(Some("lo".to_string()));
     let _ = config.scouting.gossip.set_enabled(Some(true));
     let session = match zenoh::open(config.clone()).res_async().await {
         Ok(v) => v,
@@ -205,7 +211,7 @@ async fn main() {
             String::from("unknown_model_file")
         }
     };
-
+    let mut tracker = ByteTrack::new();
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     let timeout = Duration::from_millis(100);
     loop {
@@ -253,15 +259,7 @@ async fn main() {
         dma_buf.dma_fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
-        let boxes = match run_model(
-            &s,
-            &dma_buf,
-            &backbone,
-            &mut decoder,
-            &mut vaal_boxes,
-            stream_width,
-            stream_height,
-        ) {
+        let n_boxes = match run_model(&dma_buf, &backbone, &mut decoder, &mut vaal_boxes) {
             Ok(boxes) => boxes,
             Err(e) => {
                 error!("Failed to run model: {:?}", e);
@@ -271,15 +269,34 @@ async fn main() {
         if first_run {
             info!(
                 "Successfully recieved camera frames and run model, found {:?} boxes",
-                boxes.len()
+                n_boxes
             );
             first_run = false;
         } else {
-            trace!("Detected {:?} boxes", boxes.len());
+            trace!("Detected {:?} boxes", n_boxes);
         }
+        let model = if decoder.is_some() {
+            decoder.as_ref().unwrap()
+        } else {
+            &backbone
+        };
+        let timestamp =
+            dma_buf.header.stamp.nanosec as u64 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
+        let tracks = tracker.update(&s, &mut vaal_boxes[0..n_boxes], timestamp);
 
+        let mut new_boxes: Vec<Box2D> = Vec::new();
+        for (vaal_box, track_info) in vaal_boxes.iter().take(n_boxes).zip(tracks.iter()) {
+            new_boxes.push(vaalbox_to_box2d(
+                &s,
+                vaal_box,
+                model,
+                track_info,
+                stream_width,
+                stream_height,
+            ));
+        }
         let msg = build_image_annotations_msg(
-            &boxes,
+            &new_boxes,
             dma_buf.header.stamp.clone(),
             stream_width,
             stream_height,
@@ -307,14 +324,11 @@ async fn main() {
 
 #[inline(always)]
 fn run_model(
-    s: &Settings,
     dma_buf: &DeepviewDMABuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
-    boxes: &mut Vec<vaal::VAALBox>,
-    stream_width: f64,
-    stream_height: f64,
-) -> Result<Vec<Box2D>, String> {
+    boxes: &mut Vec<VAALBox>,
+) -> Result<usize, String> {
     let fps = update_fps();
     let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
@@ -478,24 +492,7 @@ fn run_model(
         );
     }
 
-    let model = if decoder.is_some() {
-        decoder.as_ref().unwrap()
-    } else {
-        backbone
-    };
-
-    let mut new_boxes: Vec<Box2D> = Vec::new();
-    for vaal_box in boxes.iter().take(n_boxes) {
-        new_boxes.push(vaalbox_to_box2d(
-            s,
-            vaal_box,
-            model,
-            stream_width,
-            stream_height,
-        ));
-    }
-
-    Ok(new_boxes)
+    Ok(n_boxes)
 }
 
 fn build_image_annotations_msg(
@@ -681,6 +678,7 @@ fn vaalbox_to_box2d(
     s: &Settings,
     b: &VAALBox,
     model: &Context,
+    track: &Option<TrackInfo>,
     stream_width: f64,
     stream_height: f64,
 ) -> Box2D {
@@ -702,6 +700,10 @@ fn vaalbox_to_box2d(
                 b.score
             )
         }
+        LabelSetting::Track => match track {
+            None => String::from(""),
+            Some(v) => v.uuid.to_string(),
+        },
     };
     trace!("Created box with label {}", label);
     Box2D {
@@ -731,7 +733,7 @@ async fn heart_beat<'a>(
             },
         }
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(Duration::from_millis(1000))
+        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(Duration::from_millis(100))
         {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,

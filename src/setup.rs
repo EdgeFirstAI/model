@@ -7,6 +7,7 @@ pub enum LabelSetting {
     Label,
     Score,
     LabelScore,
+    Track,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -67,4 +68,13 @@ pub struct Settings {
     /// optional decoder model that always runs on CPU
     #[arg(long, env)]
     pub decoder_model: Option<PathBuf>,
+
+    /// number of detections the tracked object can be missing for before being
+    /// removed
+    #[arg(long, env, default_value = "2")]
+    pub track_extra_lifespan: u32,
+
+    /// high score threshold for ByteTrack algorithm
+    #[arg(long, env, default_value = "0.7")]
+    pub track_high_conf: f32,
 }

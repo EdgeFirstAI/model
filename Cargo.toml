@@ -24,3 +24,5 @@ pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
 log = "0.4.21"
 env_logger = "0.11.2"
+lapjv = "0.2.1"
+uuid = { version = "1.5.0", features = ["v4"] }
