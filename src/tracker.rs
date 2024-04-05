@@ -34,9 +34,28 @@ impl Tracklet {
 fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
     let x = (vaal_box.xmax + vaal_box.xmin) / 2.0;
     let y = (vaal_box.ymax + vaal_box.ymin) / 2.0;
-    let a = (vaal_box.xmax - vaal_box.xmin) / (vaal_box.ymax - vaal_box.ymin);
-    let h = vaal_box.ymax - vaal_box.ymin;
+    let w = (vaal_box.xmax - vaal_box.xmin).max(EPSILON);
+    let h = (vaal_box.ymax - vaal_box.ymin).max(EPSILON);
+    let a = w / h;
+
     return [x, y, a, h];
+}
+
+fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
+    if xyah.len() < 4 {
+        return;
+    }
+    let x_ = xyah[0];
+    let y_ = xyah[1];
+    let a_ = xyah[2];
+    let h_ = xyah[3];
+    let w_ = h_ * a_;
+    vaal_box.xmin = x_ - w_ / 2.0;
+    vaal_box.xmax = x_ + w_ / 2.0;
+    vaal_box.ymin = y_ - h_ / 2.0;
+    vaal_box.ymax = y_ + h_ / 2.0;
+
+    return;
 }
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
@@ -45,7 +64,7 @@ pub struct TrackInfo {
     pub lifespan: u64,
 }
 const INVALID_MATCH: f32 = 1000000.0;
-const EPSILON: f32 = 0.0000001;
+const EPSILON: f32 = 0.00001;
 
 fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
     let intersection = (box1.xmax.min(box2.xmax) - box1.xmin.max(box2.xmin)).max(0.0)
@@ -66,7 +85,13 @@ fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
     return intersection / union;
 }
 
-fn box_cost(track: &Tracklet, new_box: &VAALBox, distance: f32, score_threshold: f32) -> f32 {
+fn box_cost(
+    track: &Tracklet,
+    new_box: &VAALBox,
+    distance: f32,
+    score_threshold: f32,
+    iou_threshold: f32,
+) -> f32 {
     let _ = distance;
 
     if new_box.score < score_threshold {
@@ -75,21 +100,17 @@ fn box_cost(track: &Tracklet, new_box: &VAALBox, distance: f32, score_threshold:
 
     // use iou between predicted box and real box:
     let predicted_xyah = track.filter.mean.as_slice();
-    let x_ = predicted_xyah[0];
-    let y_ = predicted_xyah[1];
-    let a_ = predicted_xyah[2];
-    let h_ = predicted_xyah[3];
-    let w_ = h_ * a_;
-    let expected = VAALBox {
-        xmin: x_ - w_ / 2.0,
-        xmax: x_ + w_ / 2.0,
-        ymin: y_ - h_ / 2.0,
-        ymax: y_ + h_ / 2.0,
+    let mut expected = VAALBox {
+        xmin: 0.0,
+        xmax: 0.0,
+        ymin: 0.0,
+        ymax: 0.0,
         score: 0.0,
         label: 0,
     };
+    xyah_to_vaalbox(predicted_xyah, &mut expected);
     let iou = iou(&expected, new_box);
-    if iou <= 0.25 {
+    if iou < iou_threshold {
         return INVALID_MATCH;
     }
     let cost = (1.5 - new_box.score) + (1.5 - iou);
@@ -111,6 +132,7 @@ impl ByteTrack {
         &mut self,
         boxes: &[VAALBox],
         score_threshold: f32,
+        iou_threshold: f32,
         box_filter: &[bool],
         track_filter: &[bool],
     ) -> Matrix<f32> {
@@ -135,6 +157,7 @@ impl ByteTrack {
                         // distances[(x, y)],
                         0.0,
                         score_threshold,
+                        iou_threshold,
                     )
                 }
             } else {
@@ -160,7 +183,8 @@ impl ByteTrack {
             for track in &mut self.tracklets {
                 track.filter.predict();
             }
-            let costs = self.compute_costs(boxes, s.track_high_conf, &matched, &tracked);
+            let costs =
+                self.compute_costs(boxes, s.track_high_conf, s.track_iou, &matched, &tracked);
             // With m boxes and n tracks, we compute a m x n array of costs for
             // association cost is based on distance computed by the Kalman Filter
             // Then we use lapjv (linear assignment) to minimize the cost of
@@ -184,26 +208,19 @@ impl ByteTrack {
                     });
                     assert!(!tracked[x]);
                     tracked[x] = true;
+
+                    let observed_box = boxes[i];
+
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
-                    let x_ = predicted_xyah[0];
-                    let y_ = predicted_xyah[1];
-                    let a_ = predicted_xyah[2];
-                    let h_ = predicted_xyah[3];
-
-                    self.tracklets[x].update(&boxes[i], s);
-
-                    let w_ = h_ * a_;
-                    boxes[i].xmin = x_ - w_ / 2.0;
-                    boxes[i].xmax = x_ + w_ / 2.0;
-                    boxes[i].ymin = y_ - h_ / 2.0;
-                    boxes[i].ymax = y_ + h_ / 2.0;
+                    xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
+                    self.tracklets[x].update(&observed_box, s);
                 }
             }
         }
 
         // try to match unmatched tracklets to low score detections as well
         if !self.tracklets.is_empty() {
-            let costs = self.compute_costs(boxes, 0.0, &matched, &tracked);
+            let costs = self.compute_costs(boxes, 0.0, s.track_iou, &matched, &tracked);
             let ans = lapjv(&costs).unwrap();
             for i in 0..ans.0.len() {
                 let x = ans.0[i];
@@ -273,7 +290,10 @@ impl ByteTrack {
                 self.tracklets.push(Tracklet {
                     id,
                     prev_boxes: boxes[i],
-                    filter: ConstantVelocityXYAHModel2::new(&vaalbox_to_xyah(&boxes[i])),
+                    filter: ConstantVelocityXYAHModel2::new(
+                        &vaalbox_to_xyah(&boxes[i]),
+                        s.track_update,
+                    ),
                     time_to_live: s.track_extra_lifespan as i32,
                     count: 1,
                     created: timestamp,
@@ -281,5 +301,39 @@ impl ByteTrack {
             }
         }
         matched_info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vaal::VAALBox;
+
+    use super::{vaalbox_to_xyah, xyah_to_vaalbox};
+
+    #[test]
+    fn filter() {
+        let box1 = VAALBox {
+            xmin: 0.02135,
+            xmax: 0.12438,
+            ymin: 0.0134,
+            ymax: 0.691,
+            score: 0.0,
+            label: 0,
+        };
+        let xyah = vaalbox_to_xyah(&box1);
+        let mut box2 = VAALBox {
+            xmin: 0.0,
+            xmax: 0.0,
+            ymin: 0.0,
+            ymax: 0.0,
+            score: 0.0,
+            label: 0,
+        };
+        xyah_to_vaalbox(&xyah, &mut box2);
+
+        assert!((box1.xmax - box2.xmax).abs() < f32::EPSILON);
+        assert!((box1.ymax - box2.ymax).abs() < f32::EPSILON);
+        assert!((box1.xmin - box2.xmin).abs() < f32::EPSILON);
+        assert!((box1.ymin - box2.ymin).abs() < f32::EPSILON);
     }
 }

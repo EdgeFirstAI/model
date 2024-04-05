@@ -71,10 +71,19 @@ pub struct Settings {
 
     /// number of detections the tracked object can be missing for before being
     /// removed
-    #[arg(long, env, default_value = "2")]
+    #[arg(long, env, default_value = "5")]
     pub track_extra_lifespan: u32,
 
     /// high score threshold for ByteTrack algorithm
     #[arg(long, env, default_value = "0.7")]
     pub track_high_conf: f32,
+
+    /// tracking iou threshold for box association
+    #[arg(long, env, default_value = "0.25")]
+    pub track_iou: f32,
+
+    /// tracking update factor. Higher update factor will also mean
+    /// less smoothing but more rapid response to change. Values from 0.0 to 1.0
+    #[arg(long, env, default_value = "0.25")]
+    pub track_update: f32,
 }

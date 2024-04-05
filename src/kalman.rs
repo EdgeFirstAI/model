@@ -13,9 +13,10 @@ where
     pub mean: SVector<R, 8>,
     pub std_weight_position: R,
     pub std_weight_velocity: R,
+    pub update_factor: R,
     motion_matrix: OMatrix<R, U8, U8>,
     update_matrix: OMatrix<R, U4, U8>,
-    covariance: OMatrix<R, U8, U8>,
+    pub covariance: OMatrix<R, U8, U8>,
 }
 
 #[allow(dead_code)]
@@ -28,7 +29,7 @@ impl<R> ConstantVelocityXYAHModel2<R>
 where
     R: RealField + Copy,
 {
-    pub fn new(measurement: &[R; 4]) -> Self {
+    pub fn new(measurement: &[R; 4], update_factor: R) -> Self {
         let ndim = 4;
         let dt: R = convert(1.0);
 
@@ -77,6 +78,7 @@ where
             covariance,
             std_weight_position,
             std_weight_velocity,
+            update_factor,
         }
     }
 
@@ -135,7 +137,7 @@ where
             .solve(&(self.covariance * self.update_matrix.transpose()).transpose())
             .transpose();
 
-        let innovation = (measurement - projected_mean).scale(convert(0.25));
+        let innovation = (measurement - projected_mean).scale(self.update_factor);
         // println!("kalman_gain={}", kalman_gain);
         // println!("innovation={}", innovation);
         let diff = innovation.transpose() * kalman_gain.transpose();
@@ -193,7 +195,7 @@ mod tests {
     use super::{ConstantVelocityXYAHModel2, GatingDistanceMetric};
     #[test]
     fn filter() {
-        let mut t = ConstantVelocityXYAHModel2::new(&[0.5, 0.5, 1.0, 0.5]);
+        let mut t = ConstantVelocityXYAHModel2::new(&[0.5, 0.5, 1.0, 0.5], 0.25);
         t.predict();
         println!("1. t.mean={}", t.mean);
         t.update(&[0.4, 0.5, 1.0, 0.5]);
@@ -216,7 +218,7 @@ mod tests {
 
     #[test]
     fn gating() {
-        let mut t = ConstantVelocityXYAHModel2::new(&[0.5, 0.5, 1.0, 0.5]);
+        let mut t = ConstantVelocityXYAHModel2::new(&[0.5, 0.5, 1.0, 0.5], 0.25);
         t.predict();
         t.update(&[0.49, 0.5, 1.0, 0.5]);
         t.predict();
