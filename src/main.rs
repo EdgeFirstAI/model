@@ -1,5 +1,6 @@
 // use serde::{Deserialize, Serialize};
 
+mod kalman;
 mod setup;
 mod tracker;
 
@@ -18,6 +19,7 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, SystemTime},
 };
+use uuid::Uuid;
 use vaal::{self, Context, VAALBox};
 use zenoh::{
     config::Config,
@@ -495,6 +497,29 @@ fn run_model(
     Ok(n_boxes)
 }
 
+const WHITE: FoxgloveColor = FoxgloveColor {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 1.0,
+};
+const TRANSPARENT: FoxgloveColor = FoxgloveColor {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
+
+fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
+    const BYTES_PER_CHANNEL: u8 = 32;
+    const FACTOR: u128 = (1 as u128) << BYTES_PER_CHANNEL;
+    FoxgloveColor {
+        r: (hexcode % FACTOR) as f64 / FACTOR as f64,
+        g: ((hexcode >> BYTES_PER_CHANNEL) % FACTOR) as f64 / FACTOR as f64,
+        b: ((hexcode >> (BYTES_PER_CHANNEL * 2)) % FACTOR) as f64 / FACTOR as f64,
+        a: 1.0,
+    }
+}
 fn build_image_annotations_msg(
     boxes: &[Box2D],
     timestamp: Time,
@@ -507,25 +532,14 @@ fn build_image_annotations_msg(
         points: Vec::new(),
         texts: Vec::new(),
     };
-    let white = FoxgloveColor {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    };
-    let transparent = FoxgloveColor {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.0,
-    };
+
     let empty_points = FoxglovePointAnnotations {
         timestamp: timestamp.clone(),
         type_: UNKNOWN,
         points: Vec::new(),
-        outline_color: white.clone(),
+        outline_color: WHITE.clone(),
         outline_colors: Vec::new(),
-        fill_color: transparent.clone(),
+        fill_color: TRANSPARENT.clone(),
         thickness: 2.0,
     };
 
@@ -537,14 +551,19 @@ fn build_image_annotations_msg(
             y: stream_height * 0.95,
         },
         font_size: 0.015 * stream_width.max(stream_height),
-        text_color: white.clone(),
-        background_color: transparent.clone(),
+        text_color: WHITE.clone(),
+        background_color: TRANSPARENT.clone(),
     };
 
     annotations.points.push(empty_points);
     annotations.texts.push(empty_text);
+
     for b in boxes.iter() {
-        let outline_colors = vec![white.clone(), white.clone(), white.clone(), white.clone()];
+        let color = match b.uuid {
+            None => WHITE.clone(),
+            Some(uuid) => u128_to_foxglove_color(uuid.as_u128()),
+        };
+        let outline_colors = vec![color.clone(), color.clone(), color.clone(), color.clone()];
         let points = vec![
             FoxglovePoint2 {
                 x: b.xmin,
@@ -567,9 +586,9 @@ fn build_image_annotations_msg(
             timestamp: timestamp.clone(),
             type_: LINE_LOOP,
             points,
-            outline_color: white.clone(),
+            outline_color: color.clone(),
             outline_colors,
-            fill_color: transparent.clone(),
+            fill_color: TRANSPARENT.clone(),
             thickness: 2.0,
         };
 
@@ -581,8 +600,8 @@ fn build_image_annotations_msg(
                 y: b.ymin,
             },
             font_size: 0.02 * stream_width.max(stream_height),
-            text_color: white.clone(),
-            background_color: transparent.clone(),
+            text_color: color.clone(),
+            background_color: TRANSPARENT.clone(),
         };
         annotations.points.push(points);
         annotations.texts.push(text);
@@ -672,6 +691,8 @@ pub struct Box2D {
     pub score: f64,
     #[doc = " label for this detection"]
     pub label: String,
+    #[doc = " track UUID for this detection"]
+    pub uuid: Option<Uuid>,
 }
 
 fn vaalbox_to_box2d(
@@ -701,11 +722,15 @@ fn vaalbox_to_box2d(
             )
         }
         LabelSetting::Track => match track {
-            None => String::from(""),
-            Some(v) => v.uuid.to_string(),
+            None => format!("{:.2}", b.score),
+            Some(v) => format!("{:.2}, {}", b.score, v.uuid.to_string()),
         },
     };
     trace!("Created box with label {}", label);
+    let uuid = match track {
+        None => None,
+        Some(v) => Some(v.uuid),
+    };
     Box2D {
         xmin: b.xmin as f64 * stream_width,
         ymin: b.ymin as f64 * stream_height,
@@ -713,6 +738,7 @@ fn vaalbox_to_box2d(
         ymax: b.ymax as f64 * stream_height,
         score: b.score as f64,
         label,
+        uuid,
     }
 }
 
