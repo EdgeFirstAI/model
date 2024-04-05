@@ -1,10 +1,6 @@
-use log::info;
 use nalgebra::{
-    allocator::Allocator,
-    convert,
-    dimension::{DimMin, U2, U4},
-    Cholesky, DVector, DefaultAllocator, Dyn, Matrix, OMatrix, RealField, SVector, VecStorage,
-    VectorN, U1, U8,
+    allocator::Allocator, convert, dimension::U4, DVector, DefaultAllocator, Dyn, OMatrix,
+    RealField, SVector, U1, U8,
 };
 
 #[derive(Debug, Clone)]
@@ -21,6 +17,8 @@ where
     update_matrix: OMatrix<R, U4, U8>,
     covariance: OMatrix<R, U8, U8>,
 }
+
+#[allow(dead_code)]
 pub enum GatingDistanceMetric {
     Gaussian,
     Mahalanobis,
@@ -148,6 +146,7 @@ where
         // kalman_gain.transpose();
     }
 
+    #[allow(dead_code)]
     pub fn gating_distance(
         &self,
         measurements: &OMatrix<R, Dyn, U4>,
@@ -235,9 +234,15 @@ mod tests {
         t.predict();
         t.update(&[0.42, 0.5, 1.0, 0.5]);
         t.predict();
+
+        // distances range from 0 to 1e6 for maha
         let mut measurements = OMatrix::<f32, Dyn, U4>::from_element(1, 0.0);
-        for (i, mut row) in measurements.row_iter_mut().enumerate() {
-            row.copy_from_slice(&[0.3, 0.5, 1.0, 0.5]);
+        measurements.copy_from_slice(&[0.3, 0.5, 1.0, 0.5]);
+
+        let mut distances = OMatrix::<f32, Dyn, Dyn>::from_element(1, 1, 0.0);
+        for (_, mut column) in distances.column_iter_mut().enumerate() {
+            let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Gaussian);
+            column.copy_from(&dist);
         }
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Mahalanobis);
         println!("Dist(false, maha): {}", dist);

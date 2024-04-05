@@ -1,12 +1,7 @@
-use crate::{
-    kalman::{self, ConstantVelocityXYAHModel2, GatingDistanceMetric},
-    setup::Settings,
-};
+use crate::{kalman::ConstantVelocityXYAHModel2, setup::Settings};
 use lapjv::{lapjv, Matrix};
-use log::{debug, info};
-use nalgebra::{
-    distance, Dyn, Matrix4, OMatrix, OVector, SVector, Vector2, Vector4, VectorN, U4, U8,
-};
+use log::{debug, trace};
+use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
 use vaal::VAALBox;
 
@@ -51,6 +46,7 @@ pub struct TrackInfo {
 }
 const INVALID_MATCH: f32 = 1000000.0;
 const EPSILON: f32 = 0.0000001;
+
 fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
     let intersection = (box1.xmax.min(box2.xmax) - box1.xmin.max(box2.xmin)).max(0.0)
         * (box1.ymax.min(box2.ymax) - box1.ymin.max(box2.ymin)).max(0.0);
@@ -63,18 +59,19 @@ fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
         + (box2.xmax - box2.xmin) * (box2.ymax - box2.ymin)
         - intersection;
 
-    if union <= 0.0 {
+    if union <= EPSILON {
         return 0.0;
     }
-    assert!(intersection <= union, "box1: {:#?} box2: {:#?}", box1, box2);
+
     return intersection / union;
 }
 
 fn box_cost(track: &Tracklet, new_box: &VAALBox, distance: f32, score_threshold: f32) -> f32 {
+    let _ = distance;
+
     if new_box.score < score_threshold {
         return INVALID_MATCH;
     }
-    // (1.5 - new_box.score * new_box.score) * (distance)
 
     // use iou between predicted box and real box:
     let predicted_xyah = track.filter.mean.as_slice();
@@ -96,12 +93,6 @@ fn box_cost(track: &Tracklet, new_box: &VAALBox, distance: f32, score_threshold:
         return INVALID_MATCH;
     }
     let cost = (1.5 - new_box.score) + (1.5 - iou);
-    assert!(cost >= 0.0, "score = {}, iou = {}", new_box.score, iou);
-
-    // if distance > 0.1 {
-    //     return INVALID_MATCH;
-    // }
-    // let cost = (1.5 - new_box.score) * distance;
 
     cost
 }
@@ -115,10 +106,6 @@ impl ByteTrack {
             frame_count: 0,
         }
     }
-
-    // fn getMultFromScore(score: f32) {
-
-    // }
 
     fn compute_costs(
         &mut self,
@@ -136,19 +123,6 @@ impl ByteTrack {
 
         // TODO: use matrix math for IOU, should speed up computation, and store it in
         // distances
-
-        // distances range from 0 to 1e6 for maha
-        // let mut distances =
-        //     OMatrix::<f32, Dyn, Dyn>::from_element(boxes.len(), self.tracklets.len(),
-        // 0.0);
-        // for (i, mut column) in distances.column_iter_mut().enumerate() {
-        //     let dist = self.tracklets[i].filter.gating_distance(
-        //         &measurements,
-        //         false,
-        //         GatingDistanceMetric::Gaussian,
-        //     );
-        //     column.copy_from(&dist);
-        // }
 
         Matrix::from_shape_fn((dims, dims), |(x, y)| {
             if x < boxes.len() && y < self.tracklets.len() {
@@ -169,8 +143,6 @@ impl ByteTrack {
         })
     }
 
-    // pub fn default() -> ByteTrack {}
-
     pub fn update(
         &mut self,
         s: &Settings,
@@ -181,8 +153,6 @@ impl ByteTrack {
         let high_conf_ind = (0..boxes.len())
             .filter(|x| boxes[*x].score >= s.track_high_conf)
             .collect::<Vec<usize>>();
-        let hc_boxes: Vec<VAALBox> = high_conf_ind.iter().map(|index| boxes[*index]).collect();
-        debug!("Found high conf boxes: {:?}", hc_boxes);
         let mut matched = vec![false; boxes.len()];
         let mut tracked = vec![false; self.tracklets.len()];
         let mut matched_info = vec![None; boxes.len()];
@@ -230,14 +200,7 @@ impl ByteTrack {
                 }
             }
         }
-        let match_high_conf_ind = (0..boxes.len())
-            .filter(|x| high_conf_ind.contains(x) && !matched[*x])
-            .collect::<Vec<usize>>();
-        let hc_boxes: Vec<VAALBox> = match_high_conf_ind
-            .iter()
-            .map(|index| boxes[*index])
-            .collect();
-        debug!("high conf boxes not matched: {:?}", hc_boxes);
+
         // try to match unmatched tracklets to low score detections as well
         if !self.tracklets.is_empty() {
             let costs = self.compute_costs(boxes, 0.0, &matched, &tracked);
@@ -248,7 +211,6 @@ impl ByteTrack {
                     // matched tracks
                     // We need to filter out those "invalid" assignments
                     if matched[i] || tracked[x] || (costs[(i, x)] >= INVALID_MATCH) {
-                        // We need to filter out those "invalid" assignments
                         continue;
                     }
                     matched[i] = true;
@@ -257,7 +219,7 @@ impl ByteTrack {
                         count: self.tracklets[x].count,
                         lifespan: timestamp - self.tracklets[x].created,
                     });
-                    info!(
+                    trace!(
                         "Cost: {} Box: {:#?} UUID: {} Mean: {}",
                         costs[(i, x)],
                         boxes[i],
@@ -286,14 +248,15 @@ impl ByteTrack {
         // reduce lifespan of tracklets that didn't get matched
         for i in 0..self.tracklets.len() {
             if !tracked[i] {
-                info!("Tracklet without match: {:#?}", self.tracklets[i]);
+                trace!("Tracklet without match: {:#?}", self.tracklets[i]);
                 self.tracklets[i].time_to_live -= 1;
             }
         }
+
         // move tracklets that don't have lifespan to the removed tracklets
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].time_to_live < 0 {
-                info!("Tracklet removed: {:?}", self.tracklets[i].id);
+                debug!("Tracklet removed: {:?}", self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
         }
@@ -320,37 +283,3 @@ impl ByteTrack {
         matched_info
     }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use vaal::VAALBox;
-
-//     use super::ByteTrack;
-
-//     #[test]
-//     fn bytetrack() {
-//         let mut bt = ByteTrack::new();
-//         let mut boxes = vec![VAALBox {
-//             label: 0,
-//             xmin: 0.5,
-//             ymin: 0.5,
-//             xmax: 0.6,
-//             ymax: 0.6,
-//             score: 0.6,
-//         }];
-//         bt.update(&mut boxes);
-
-//         boxes[0].score = 0.4;
-//         boxes.push(VAALBox {
-//             label: 0,
-//             xmin: 0.3,
-//             ymin: 0.3,
-//             xmax: 0.4,
-//             ymax: 0.4,
-//             score: 0.6,
-//         });
-
-//         // boxes.reverse();
-//         bt.update(&mut boxes);
-//     }
-// }
