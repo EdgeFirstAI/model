@@ -58,7 +58,7 @@ pub struct Settings {
     pub iou: f32,
 
     /// max boxes for detections
-    #[arg(long, env, default_value = "50")]
+    #[arg(long, env, default_value = "100")]
     pub max_boxes: i32,
 
     /// Label offset for detections
@@ -78,7 +78,8 @@ pub struct Settings {
     #[arg(long, env, default_value = "0.7")]
     pub track_high_conf: f32,
 
-    /// tracking iou threshold for box association
+    /// tracking iou threshold for box association. Higher values will require
+    /// boxes to have higher IOU to the predicted track to be associated
     #[arg(long, env, default_value = "0.25")]
     pub track_iou: f32,
 
