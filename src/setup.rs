@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::warn;
 use std::path::PathBuf;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
@@ -69,22 +70,34 @@ pub struct Settings {
     #[arg(long, env)]
     pub decoder_model: Option<PathBuf>,
 
-    /// number of detections the tracked object can be missing for before being
-    /// removed
-    #[arg(long, env, default_value = "5")]
-    pub track_extra_lifespan: u32,
+    /// enable tracking objects. Must be enabled for other --track_[...] flags
+    /// to work
+    #[arg(long, env, action)]
+    pub track: bool,
 
-    /// high score threshold for ByteTrack algorithm
+    /// number of seconds the tracked object can be missing for before being
+    /// removed.
+    #[arg(long, env, default_value = "2.0")]
+    pub track_extra_lifespan: f32,
+
+    /// high score threshold for ByteTrack algorithm.
     #[arg(long, env, default_value = "0.7")]
     pub track_high_conf: f32,
 
     /// tracking iou threshold for box association. Higher values will require
-    /// boxes to have higher IOU to the predicted track to be associated
+    /// boxes to have higher IOU to the predicted track to be associated.
     #[arg(long, env, default_value = "0.25")]
     pub track_iou: f32,
 
     /// tracking update factor. Higher update factor will also mean
-    /// less smoothing but more rapid response to change. Values from 0.0 to 1.0
+    /// less smoothing but more rapid response to change (0.0 to 1.0)
     #[arg(long, env, default_value = "0.25")]
     pub track_update: f32,
+}
+
+pub fn validate_settings(s: &mut Settings) {
+    if !s.track && s.labels == LabelSetting::Track {
+        warn!("Tracking was not enabled, label setting will be changed from `track` to `score`");
+        s.labels = LabelSetting::Score;
+    }
 }

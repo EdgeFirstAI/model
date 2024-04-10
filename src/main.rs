@@ -42,7 +42,8 @@ const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 #[async_std::main]
 async fn main() {
-    let s = Settings::parse();
+    let mut s = Settings::parse();
+    validate_settings(&mut s);
     env_logger::init();
     let mut first_run = true;
 
@@ -284,10 +285,18 @@ async fn main() {
         };
         let timestamp =
             dma_buf.header.stamp.nanosec as u64 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-        let tracks = tracker.update(&s, &mut vaal_boxes[0..n_boxes], timestamp);
+        let tracks = if s.track {
+            tracker.update(&s, &mut vaal_boxes[0..n_boxes], timestamp)
+        } else {
+            vec![None; n_boxes]
+        };
 
         let mut new_boxes: Vec<Box2D> = Vec::new();
         for (vaal_box, track_info) in vaal_boxes.iter().take(n_boxes).zip(tracks.iter()) {
+            // when tracking is turned on, only send results for tracked boxes
+            if s.track && track_info.is_none() {
+                continue;
+            }
             new_boxes.push(vaalbox_to_box2d(
                 &s,
                 vaal_box,
@@ -723,7 +732,8 @@ fn vaalbox_to_box2d(
         }
         LabelSetting::Track => match track {
             None => format!("{:.2}", b.score),
-            Some(v) => format!("{:.2}, {}", b.score, v.uuid.to_string()),
+            // only shows first 8 characters of the UUID
+            Some(v) => format!("{}", v.uuid.to_string().split_at(8).0),
         },
     };
     trace!("Created box with label {}", label);

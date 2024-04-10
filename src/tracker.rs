@@ -17,15 +17,15 @@ pub struct Tracklet {
     pub id: Uuid,
     pub prev_boxes: vaal::VAALBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
-    pub time_to_live: i32,
+    pub expiry: u64,
     pub count: i32,
     pub created: u64,
 }
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &VAALBox, s: &Settings) {
+    fn update(&mut self, vaalbox: &VAALBox, s: &Settings, ts: u64) {
         self.count += 1;
-        self.time_to_live = s.track_extra_lifespan as i32;
+        self.expiry = ts + (s.track_extra_lifespan * 1e9) as u64;
         self.prev_boxes = *vaalbox;
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
@@ -213,7 +213,7 @@ impl ByteTrack {
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.tracklets[x].update(&observed_box, s);
+                    self.tracklets[x].update(&observed_box, s, timestamp);
                 }
             }
         }
@@ -251,7 +251,7 @@ impl ByteTrack {
                     let a_ = predicted_xyah[2];
                     let h_ = predicted_xyah[3];
 
-                    self.tracklets[x].update(&boxes[i], s);
+                    self.tracklets[x].update(&boxes[i], s, timestamp);
 
                     let w_ = h_ * a_;
                     boxes[i].xmin = x_ - w_ / 2.0;
@@ -266,13 +266,13 @@ impl ByteTrack {
         for i in 0..self.tracklets.len() {
             if !tracked[i] {
                 trace!("Tracklet without match: {:#?}", self.tracklets[i]);
-                self.tracklets[i].time_to_live -= 1;
             }
         }
 
         // move tracklets that don't have lifespan to the removed tracklets
+        // must iterate from the back
         for i in (0..self.tracklets.len()).rev() {
-            if self.tracklets[i].time_to_live < 0 {
+            if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
@@ -294,7 +294,7 @@ impl ByteTrack {
                         &vaalbox_to_xyah(&boxes[i]),
                         s.track_update,
                     ),
-                    time_to_live: s.track_extra_lifespan as i32,
+                    expiry: timestamp + (s.track_extra_lifespan * 1e9) as u64,
                     count: 1,
                     created: timestamp,
                 });
