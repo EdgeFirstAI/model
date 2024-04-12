@@ -93,6 +93,14 @@ pub struct Settings {
     /// less smoothing but more rapid response to change (0.0 to 1.0)
     #[arg(long, env, default_value = "0.25")]
     pub track_update: f32,
+
+    /// enable publising visualization message
+    #[arg(long, env, action)]
+    pub visualization: bool,
+
+    /// zenoh key expression for publishing foxglove visualization topic
+    #[arg(long, default_value = "rt/detect/visualization")]
+    pub visual_topic: String,
 }
 
 pub fn validate_settings(s: &mut Settings) {

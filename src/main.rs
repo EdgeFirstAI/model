@@ -1,10 +1,11 @@
 // use serde::{Deserialize, Serialize};
 
+mod buildmsgs;
 mod kalman;
 mod setup;
 mod tracker;
 
-use crate::{setup::*, tracker::*};
+use crate::{buildmsgs::*, setup::*, tracker::*};
 use async_pidfd::PidFd;
 use async_std::task::spawn;
 use cdr::{CdrLe, Infinite};
@@ -27,16 +28,7 @@ use zenoh::{
     publication::Publisher,
     subscriber::FlumeSubscriber,
 };
-use zenoh_ros_type::{
-    builtin_interfaces::Time,
-    edgefirst_msgs::DmaBuf,
-    foxglove_msgs::{
-        point_annotation_type::{LINE_LOOP, UNKNOWN},
-        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
-        FoxgloveTextAnnotations,
-    },
-    sensor_msgs::CameraInfo,
-};
+use zenoh_ros_type::{edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 const NSEC_PER_MSEC: i64 = 1_000_000;
 const NSEC_PER_SEC: i64 = 1_000_000_000;
 
@@ -82,6 +74,25 @@ async fn main() {
             );
             return;
         }
+    };
+
+    let publ_visual = if s.visualization {
+        match session
+            .declare_publisher(s.visual_topic.clone())
+            .res_async()
+            .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!(
+                    "Error while declaring detection publisher {}: {:?}",
+                    s.detect_topic, e
+                );
+                return;
+            }
+        }
+    } else {
+        None
     };
 
     let info_sub = session
@@ -306,18 +317,17 @@ async fn main() {
                 stream_height,
             ));
         }
-        let msg = build_image_annotations_msg(
-            &new_boxes,
-            dma_buf.header.stamp.clone(),
-            stream_width,
-            stream_height,
-            &model_name,
-        );
 
+        let msg = build_detectboxes2d_msg(
+            &new_boxes,
+            dma_buf.header.stamp,
+            time_from_u64(0),
+            time_from_u64(0),
+        );
         let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
             Encoding::WithSuffix(
                 KnownEncoding::AppOctetStream,
-                "foxglove_msgs/msg/ImageAnnotations".into(),
+                "edgefirst_msgs/msgs/DetectBoxes2D".into(),
             ),
         );
         match publ_detect.put(encoded.clone()).res_async().await {
@@ -328,6 +338,32 @@ async fn main() {
                     publ_detect.key_expr(),
                     e
                 )
+            }
+        }
+        if publ_visual.is_some() {
+            let publ_visual = publ_visual.as_ref().unwrap();
+            let msg = build_image_annotations_msg(
+                &new_boxes,
+                dma_buf.header.stamp.clone(),
+                stream_width,
+                stream_height,
+                &model_name,
+            );
+
+            let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap())
+                .encoding(Encoding::WithSuffix(
+                    KnownEncoding::AppOctetStream,
+                    "foxglove_msgs/msg/ImageAnnotations".into(),
+                ));
+            match publ_visual.put(encoded.clone()).res_async().await {
+                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
+                }
             }
         }
     }
@@ -506,118 +542,6 @@ fn run_model(
     Ok(n_boxes)
 }
 
-const WHITE: FoxgloveColor = FoxgloveColor {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
-const TRANSPARENT: FoxgloveColor = FoxgloveColor {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
-};
-
-fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
-    const BYTES_PER_CHANNEL: u8 = 32;
-    const FACTOR: u128 = (1 as u128) << BYTES_PER_CHANNEL;
-    FoxgloveColor {
-        r: (hexcode % FACTOR) as f64 / FACTOR as f64,
-        g: ((hexcode >> BYTES_PER_CHANNEL) % FACTOR) as f64 / FACTOR as f64,
-        b: ((hexcode >> (BYTES_PER_CHANNEL * 2)) % FACTOR) as f64 / FACTOR as f64,
-        a: 1.0,
-    }
-}
-fn build_image_annotations_msg(
-    boxes: &[Box2D],
-    timestamp: Time,
-    stream_width: f64,
-    stream_height: f64,
-    msg: &str,
-) -> FoxgloveImageAnnotations {
-    let mut annotations = FoxgloveImageAnnotations {
-        circles: Vec::new(),
-        points: Vec::new(),
-        texts: Vec::new(),
-    };
-
-    let empty_points = FoxglovePointAnnotations {
-        timestamp: timestamp.clone(),
-        type_: UNKNOWN,
-        points: Vec::new(),
-        outline_color: WHITE.clone(),
-        outline_colors: Vec::new(),
-        fill_color: TRANSPARENT.clone(),
-        thickness: 2.0,
-    };
-
-    let empty_text = FoxgloveTextAnnotations {
-        timestamp: timestamp.clone(),
-        text: msg.to_owned(),
-        position: FoxglovePoint2 {
-            x: stream_width * 0.025,
-            y: stream_height * 0.95,
-        },
-        font_size: 0.015 * stream_width.max(stream_height),
-        text_color: WHITE.clone(),
-        background_color: TRANSPARENT.clone(),
-    };
-
-    annotations.points.push(empty_points);
-    annotations.texts.push(empty_text);
-
-    for b in boxes.iter() {
-        let color = match b.uuid {
-            None => WHITE.clone(),
-            Some(uuid) => u128_to_foxglove_color(uuid.as_u128()),
-        };
-        let outline_colors = vec![color.clone(), color.clone(), color.clone(), color.clone()];
-        let points = vec![
-            FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
-            },
-            FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymin,
-            },
-            FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymax,
-            },
-            FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymax,
-            },
-        ];
-        let points = FoxglovePointAnnotations {
-            timestamp: timestamp.clone(),
-            type_: LINE_LOOP,
-            points,
-            outline_color: color.clone(),
-            outline_colors,
-            fill_color: TRANSPARENT.clone(),
-            thickness: 2.0,
-        };
-
-        let text = FoxgloveTextAnnotations {
-            timestamp: timestamp.clone(),
-            text: b.label.clone(),
-            position: FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
-            },
-            font_size: 0.02 * stream_width.max(stream_height),
-            text_color: color.clone(),
-            background_color: TRANSPARENT.clone(),
-        };
-        annotations.points.push(points);
-        annotations.texts.push(text);
-    }
-    annotations
-}
-
 fn setup_context(context: &mut Context, s: &Settings) {
     context
         .parameter_seti("max_detection", &[s.max_boxes])
@@ -700,10 +624,18 @@ pub struct Box2D {
     pub score: f64,
     #[doc = " label for this detection"]
     pub label: String,
-    #[doc = " track UUID for this detection"]
-    pub uuid: Option<Uuid>,
+    #[doc = " tracking information for this detection"]
+    pub track: Option<Track>,
 }
 
+pub struct Track {
+    #[doc = " track UUID for this detection"]
+    pub uuid: Uuid,
+    #[doc = " number of detects this track has been seen for"]
+    pub count: i32,
+    #[doc = " when this track was first added"]
+    pub created: u64,
+}
 fn vaalbox_to_box2d(
     s: &Settings,
     b: &VAALBox,
@@ -737,9 +669,13 @@ fn vaalbox_to_box2d(
         },
     };
     trace!("Created box with label {}", label);
-    let uuid = match track {
+    let track_info = match track {
         None => None,
-        Some(v) => Some(v.uuid),
+        Some(v) => Some(Track {
+            uuid: v.uuid,
+            count: v.count,
+            created: v.created,
+        }),
     };
     Box2D {
         xmin: b.xmin as f64 * stream_width,
@@ -748,7 +684,7 @@ fn vaalbox_to_box2d(
         ymax: b.ymax as f64 * stream_height,
         score: b.score as f64,
         label,
-        uuid,
+        track: track_info,
     }
 }
 

@@ -19,7 +19,7 @@ vaal = "0.3.2"
 zenoh = "0.10.1-rc"
 cdr = "0.2.4"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type", branch = "main" }
+zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type", branch = "RVN-213" }
 pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
 log = { version = "0.4", features = ["release_max_level_debug"] }

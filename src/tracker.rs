@@ -61,7 +61,7 @@ fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
 pub struct TrackInfo {
     pub uuid: Uuid,
     pub count: i32,
-    pub lifespan: u64,
+    pub created: u64,
 }
 const INVALID_MATCH: f32 = 1000000.0;
 const EPSILON: f32 = 0.00001;
@@ -204,7 +204,7 @@ impl ByteTrack {
                     matched_info[i] = Some(TrackInfo {
                         uuid: self.tracklets[x].id,
                         count: self.tracklets[x].count,
-                        lifespan: timestamp - self.tracklets[x].created,
+                        created: self.tracklets[x].created,
                     });
                     assert!(!tracked[x]);
                     tracked[x] = true;
@@ -234,7 +234,7 @@ impl ByteTrack {
                     matched_info[i] = Some(TrackInfo {
                         uuid: self.tracklets[x].id,
                         count: self.tracklets[x].count,
-                        lifespan: timestamp - self.tracklets[x].created,
+                        created: self.tracklets[x].created,
                     });
                     trace!(
                         "Cost: {} Box: {:#?} UUID: {} Mean: {}",
@@ -285,7 +285,7 @@ impl ByteTrack {
                 matched_info[i] = Some(TrackInfo {
                     uuid: id,
                     count: 1,
-                    lifespan: 0,
+                    created: timestamp,
                 });
                 self.tracklets.push(Tracklet {
                     id,
