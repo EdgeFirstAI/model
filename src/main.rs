@@ -320,7 +320,7 @@ async fn main() {
 
         let msg = build_detectboxes2d_msg(
             &new_boxes,
-            dma_buf.header.stamp,
+            dma_buf.header.stamp.clone(),
             time_from_u64(0),
             time_from_u64(0),
         );
