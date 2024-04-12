@@ -29,7 +29,7 @@ use zenoh::{
 };
 use zenoh_ros_type::{
     builtin_interfaces::Time,
-    deepview_msgs::DeepviewDMABuf,
+    edgefirst_msgs::DmaBuf,
     foxglove_msgs::{
         point_annotation_type::{LINE_LOOP, UNKNOWN},
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
@@ -219,7 +219,7 @@ async fn main() {
     let timeout = Duration::from_millis(100);
     loop {
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout) {
+        let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -239,17 +239,17 @@ async fn main() {
         };
         trace!("Recieved camera frame");
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
             Err(e) => {
                 error!(
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.src_pid, e
+                    dma_buf.pid, e
                 );
                 continue;
             }
         };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
             Ok(v) => v,
             Err(e) => {
                 error!(
@@ -259,7 +259,7 @@ async fn main() {
                 continue;
             }
         };
-        dma_buf.dma_fd = fd.as_raw_fd();
+        dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
         let n_boxes = match run_model(&dma_buf, &backbone, &mut decoder, &mut vaal_boxes) {
@@ -335,7 +335,7 @@ async fn main() {
 
 #[inline(always)]
 fn run_model(
-    dma_buf: &DeepviewDMABuf,
+    dma_buf: &DmaBuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
     boxes: &mut Vec<VAALBox>,
@@ -344,7 +344,7 @@ fn run_model(
     let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
         None,
-        dma_buf.dma_fd,
+        dma_buf.fd,
         dma_buf.fourcc,
         dma_buf.width as i32,
         dma_buf.height as i32,
@@ -370,7 +370,7 @@ fn run_model(
 
             match backbone.load_frame_dmabuf(
                 None,
-                dma_buf.dma_fd,
+                dma_buf.fd,
                 dma_buf.fourcc,
                 dma_buf.width as i32,
                 dma_buf.height as i32,
@@ -769,8 +769,7 @@ async fn heart_beat<'a>(
             },
         }
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(Duration::from_millis(100))
-        {
+        let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(Duration::from_millis(100)) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -790,17 +789,17 @@ async fn heart_beat<'a>(
         };
         trace!("Recieved camera frame");
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
             Err(e) => {
                 error!(
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.src_pid, e
+                    dma_buf.pid, e
                 );
                 continue;
             }
         };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
             Ok(v) => v,
             Err(e) => {
                 error!(
@@ -810,7 +809,7 @@ async fn heart_beat<'a>(
                 continue;
             }
         };
-        dma_buf.dma_fd = fd.as_raw_fd();
+        dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
         let image_annotations = build_image_annotations_msg(
