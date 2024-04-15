@@ -143,6 +143,7 @@ async fn main() {
     let heartbeat = spawn(heart_beat(
         sub_camera,
         publ_detect.clone(),
+        publ_visual.clone(),
         rx,
         format!("Loading Model: {}", s.model.to_string_lossy()),
         stream_width,
@@ -308,30 +309,23 @@ async fn main() {
             if s.track && track_info.is_none() {
                 continue;
             }
-            new_boxes.push(vaalbox_to_box2d(
-                &s,
-                vaal_box,
-                model,
-                track_info,
-                stream_width,
-                stream_height,
-            ));
+            new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, track_info));
         }
 
         let msg = build_detectboxes2d_msg(
             &new_boxes,
             dma_buf.header.stamp.clone(),
-            time_from_u64(0),
-            time_from_u64(0),
+            time_from_ns(0),
+            time_from_ns(0),
         );
         let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
             Encoding::WithSuffix(
                 KnownEncoding::AppOctetStream,
-                "edgefirst_msgs/msgs/DetectBoxes2D".into(),
+                "edgefirst_msgs/msg/DetectBoxes2D".into(),
             ),
         );
         match publ_detect.put(encoded.clone()).res_async().await {
-            Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+            Ok(_) => trace!("Sent DetectBoxes2D message on {}", publ_detect.key_expr()),
             Err(e) => {
                 error!(
                     "Error sending message on {}: {:?}",
@@ -348,6 +342,7 @@ async fn main() {
                 stream_width,
                 stream_height,
                 &model_name,
+                s.labels,
             );
 
             let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap())
@@ -612,16 +607,18 @@ fn update_fps() -> i32 {
 }
 
 pub struct Box2D {
-    #[doc = " left-most pixel coordinate of the bounding box."]
+    #[doc = " left-most coordinate of the bounding box."]
     pub xmin: f64,
-    #[doc = " top-most pixel coordinate of the bounding box."]
+    #[doc = " top-most coordinate of the bounding box."]
     pub ymin: f64,
-    #[doc = " right-most pixel coordinate of the bounding box."]
+    #[doc = " right-most coordinate of the bounding box."]
     pub xmax: f64,
-    #[doc = " bottom-most pixel coordinate of the bounding box."]
+    #[doc = " bottom-most coordinate of the bounding box."]
     pub ymax: f64,
     #[doc = " model-specific score for this detection, higher implies more confidence."]
     pub score: f64,
+    #[doc = " index of label for this detection"]
+    pub index: i32,
     #[doc = " label for this detection"]
     pub label: String,
     #[doc = " tracking information for this detection"]
@@ -641,33 +638,13 @@ fn vaalbox_to_box2d(
     b: &VAALBox,
     model: &Context,
     track: &Option<TrackInfo>,
-    stream_width: f64,
-    stream_height: f64,
 ) -> Box2D {
     let label_ind = b.label + s.label_offset;
-    let label = match s.labels {
-        LabelSetting::Index => label_ind.to_string(),
-        LabelSetting::Score => format!("{:.2}", b.score),
-        LabelSetting::Label => match model.label(label_ind) {
-            Ok(s) => String::from(s),
-            Err(_) => b.label.to_string(),
-        },
-        LabelSetting::LabelScore => {
-            format!(
-                "{} {:.2}",
-                match model.label(label_ind) {
-                    Ok(s) => String::from(s),
-                    Err(_) => label_ind.to_string(),
-                },
-                b.score
-            )
-        }
-        LabelSetting::Track => match track {
-            None => format!("{:.2}", b.score),
-            // only shows first 8 characters of the UUID
-            Some(v) => format!("{}", v.uuid.to_string().split_at(8).0),
-        },
+    let label = match model.label(label_ind) {
+        Ok(s) => String::from(s),
+        Err(_) => b.label.to_string(),
     };
+
     trace!("Created box with label {}", label);
     let track_info = match track {
         None => None,
@@ -678,12 +655,13 @@ fn vaalbox_to_box2d(
         }),
     };
     Box2D {
-        xmin: b.xmin as f64 * stream_width,
-        ymin: b.ymin as f64 * stream_height,
-        xmax: b.xmax as f64 * stream_width,
-        ymax: b.ymax as f64 * stream_height,
+        xmin: b.xmin as f64,
+        ymin: b.ymin as f64,
+        xmax: b.xmax as f64,
+        ymax: b.ymax as f64,
         score: b.score as f64,
         label,
+        index: b.label,
         track: track_info,
     }
 }
@@ -691,6 +669,7 @@ fn vaalbox_to_box2d(
 async fn heart_beat<'a>(
     sub_camera: FlumeSubscriber<'a>,
     publ_detect: Publisher<'_>,
+    publ_visual: Option<Publisher<'_>>,
     rx: Receiver<bool>,
     msg: String,
     stream_width: f64,
@@ -748,20 +727,17 @@ async fn heart_beat<'a>(
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
-        let image_annotations = build_image_annotations_msg(
+        let boxes = build_detectboxes2d_msg(
             &Vec::new(),
-            dma_buf.header.stamp,
-            stream_width,
-            stream_height,
-            &msg,
+            dma_buf.header.stamp.clone(),
+            time_from_ns(0),
+            time_from_ns(0),
         );
-
-        let encoded =
-            Value::from(cdr::serialize::<_, _, CdrLe>(&image_annotations, Infinite).unwrap())
-                .encoding(Encoding::WithSuffix(
-                    KnownEncoding::AppOctetStream,
-                    "foxglove_msgs/msg/ImageAnnotations".into(),
-                ));
+        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&boxes, Infinite).unwrap())
+            .encoding(Encoding::WithSuffix(
+                KnownEncoding::AppOctetStream,
+                "edgefirst_msgs/msg/DetectBoxes2D".into(),
+            ));
         match publ_detect.put(encoded).res_sync() {
             Ok(_) => (),
             Err(e) => {
@@ -770,6 +746,35 @@ async fn heart_beat<'a>(
                     publ_detect.key_expr(),
                     e
                 )
+            }
+        }
+
+        if publ_visual.is_some() {
+            let publ_visual = publ_visual.as_ref().unwrap();
+            let annotations = build_image_annotations_msg(
+                &Vec::new(),
+                dma_buf.header.stamp.clone(),
+                stream_width,
+                stream_height,
+                &msg,
+                LabelSetting::Index,
+            );
+
+            let encoded =
+                Value::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap())
+                    .encoding(Encoding::WithSuffix(
+                        KnownEncoding::AppOctetStream,
+                        "foxglove_msgs/msg/ImageAnnotations".into(),
+                    ));
+            match publ_visual.put(encoded.clone()).res_async().await {
+                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
+                }
             }
         }
     }

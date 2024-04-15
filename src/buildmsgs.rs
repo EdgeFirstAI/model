@@ -6,7 +6,7 @@ use zenoh_ros_type::{
     FoxglovePoint2, FoxglovePointAnnotations, FoxgloveTextAnnotations,
 };
 
-use crate::Box2D;
+use crate::{Box2D, LabelSetting};
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -22,12 +22,15 @@ const TRANSPARENT: FoxgloveColor = FoxgloveColor {
 };
 
 fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
-    const BYTES_PER_CHANNEL: u8 = 32;
-    const FACTOR: u128 = (1 as u128) << BYTES_PER_CHANNEL;
+    const BYTES_PER_CHANNEL: u8 = 8;
+    const FACTOR: u32 = (1 << BYTES_PER_CHANNEL) - 1;
+
+    // only use the first 32 bits
+    let hexcode = (hexcode >> (128 - (4 * BYTES_PER_CHANNEL))) as u32;
     FoxgloveColor {
-        r: (hexcode % FACTOR) as f64 / FACTOR as f64,
-        g: ((hexcode >> BYTES_PER_CHANNEL) % FACTOR) as f64 / FACTOR as f64,
-        b: ((hexcode >> (BYTES_PER_CHANNEL * 2)) % FACTOR) as f64 / FACTOR as f64,
+        r: ((hexcode >> (BYTES_PER_CHANNEL * 3)) & FACTOR) as f64 / FACTOR as f64,
+        g: ((hexcode >> (BYTES_PER_CHANNEL * 2)) & FACTOR) as f64 / FACTOR as f64,
+        b: ((hexcode >> BYTES_PER_CHANNEL) & FACTOR) as f64 / FACTOR as f64,
         a: 1.0,
     }
 }
@@ -37,6 +40,7 @@ pub fn build_image_annotations_msg(
     stream_width: f64,
     stream_height: f64,
     msg: &str,
+    labels: LabelSetting,
 ) -> FoxgloveImageAnnotations {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
@@ -77,20 +81,20 @@ pub fn build_image_annotations_msg(
         let outline_colors = vec![color.clone(), color.clone(), color.clone(), color.clone()];
         let points = vec![
             FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
+                x: b.xmin * stream_width,
+                y: b.ymin * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymin,
+                x: b.xmax * stream_width,
+                y: b.ymin * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymax,
+                x: b.xmax * stream_width,
+                y: b.ymax * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymax,
+                x: b.xmin * stream_width,
+                y: b.ymax * stream_height,
             },
         ];
         let points = FoxglovePointAnnotations {
@@ -103,12 +107,26 @@ pub fn build_image_annotations_msg(
             thickness: 2.0,
         };
 
+        match labels {
+            LabelSetting::Index => format!("{:.2}", b.index),
+            LabelSetting::Score => format!("{:.2}", b.score),
+            LabelSetting::Label => b.label.clone(),
+            LabelSetting::LabelScore => {
+                format!("{} {:.2}", b.label, b.score)
+            }
+            LabelSetting::Track => match &b.track {
+                None => format!("{:.2}", b.score),
+                // only shows first 8 characters of the UUID
+                Some(v) => format!("{}", v.uuid.to_string().split_at(8).0),
+            },
+        };
+
         let text = FoxgloveTextAnnotations {
             timestamp: timestamp.clone(),
             text: b.label.clone(),
             position: FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
+                x: b.xmin * stream_width,
+                y: b.ymin * stream_height,
             },
             font_size: 0.02 * stream_width.max(stream_height),
             text_color: color.clone(),
@@ -120,7 +138,7 @@ pub fn build_image_annotations_msg(
     annotations
 }
 
-pub fn time_from_u64(ts: u64) -> Time {
+pub fn time_from_ns(ts: u64) -> Time {
     Time {
         sec: (ts / 1000_000_000) as i32,
         nanosec: (ts % 1000_000_000) as u32,
@@ -133,19 +151,19 @@ impl From<&Box2D> for DetectBox2D {
             Some(v) => DetectTrack {
                 id: v.uuid.to_string(),
                 lifetime: v.count,
-                created: time_from_u64(v.created),
+                created: time_from_ns(v.created),
             },
             None => DetectTrack {
                 id: String::new(),
                 lifetime: 0,
-                created: time_from_u64(0),
+                created: time_from_ns(0),
             },
         };
         DetectBox2D {
-            center_x: ((box2d.xmax + box2d.xmin) / 2.0) as f32,
-            center_y: ((box2d.ymax + box2d.ymin) / 2.0) as f32,
-            width: ((box2d.xmax - box2d.xmin) / 2.0) as f32,
-            height: ((box2d.ymax - box2d.ymin) / 2.0) as f32,
+            center_x: (box2d.xmax + box2d.xmin) as f32,
+            center_y: (box2d.ymax + box2d.ymin) as f32,
+            width: (box2d.xmax - box2d.xmin) as f32,
+            height: (box2d.ymax - box2d.ymin) as f32,
             label: box2d.label.clone(),
             score: box2d.score as f32,
             distance: 0.0,

@@ -2,7 +2,7 @@ use clap::Parser;
 use log::warn;
 use std::path::PathBuf;
 
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq)]
+#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum LabelSetting {
     Index,
     Label,
