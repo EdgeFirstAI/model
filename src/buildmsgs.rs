@@ -160,8 +160,8 @@ impl From<&Box2D> for DetectBox2D {
             },
         };
         DetectBox2D {
-            center_x: (box2d.xmax + box2d.xmin) as f32,
-            center_y: (box2d.ymax + box2d.ymin) as f32,
+            center_x: ((box2d.xmax + box2d.xmin) / 2.0) as f32,
+            center_y: ((box2d.ymax + box2d.ymin) / 2.0) as f32,
             width: (box2d.xmax - box2d.xmin) as f32,
             height: (box2d.ymax - box2d.ymin) as f32,
             label: box2d.label.clone(),
