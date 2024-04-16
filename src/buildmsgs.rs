@@ -1,9 +1,12 @@
-use zenoh_ros_type::{
+use edgefirst_schemas::{
     builtin_interfaces::Time,
-    point_annotation_type::{LINE_LOOP, UNKNOWN},
+    edgefirst_msgs::{DetectBox2D, DetectBoxes2D, DetectTrack},
+    foxglove_msgs::{
+        point_annotation_type::{LINE_LOOP, UNKNOWN},
+        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
+        FoxgloveTextAnnotations,
+    },
     std_msgs::Header,
-    DetectBox2D, DetectBoxes2D, DetectTrack, FoxgloveColor, FoxgloveImageAnnotations,
-    FoxglovePoint2, FoxglovePointAnnotations, FoxgloveTextAnnotations,
 };
 
 use crate::{Box2D, LabelSetting};
