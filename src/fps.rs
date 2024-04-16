@@ -1,0 +1,64 @@
+use std::{
+    fmt,
+    time::{Duration, SystemTime},
+};
+
+const NSEC_PER_SEC: i64 = 1_000_000_000;
+
+/// A simple struct to calculate the average FPS over the last N frames.  To
+/// use, call the `update` method once per frame which returns the average FPS
+/// over the last N frames.
+pub struct Fps<const N: usize> {
+    previous: SystemTime,
+    history: [i32; N],
+    index: usize,
+}
+
+impl<const N: usize> Default for Fps<N> {
+    fn default() -> Self {
+        Fps {
+            previous: SystemTime::now(),
+            history: [0; N],
+            index: 0,
+        }
+    }
+}
+
+impl<const N: usize> fmt::Display for Fps<N> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "now: {:?} previous: {:?} history: {:?}",
+            SystemTime::now(),
+            self.previous,
+            self.history
+        )
+    }
+}
+
+impl<const N: usize> Fps<N> {
+    /// Update the FPS calculation and return the average FPS over the last N
+    /// calls to this function.  Over the first N calls to this function the
+    /// value will ramp up over N frames to the true average FPS.
+    pub fn update(&mut self) -> i32 {
+        let timestamp = SystemTime::now();
+        let frame_time = timestamp
+            .duration_since(self.previous)
+            .unwrap_or(Duration::from_secs(0));
+        self.previous = timestamp;
+        self.history[self.index] = (NSEC_PER_SEC as u128 / frame_time.as_nanos()) as i32;
+        self.index = (self.index + 1) % N;
+        let fps = self.history.iter().sum::<i32>() / N as i32;
+
+        if self.index == 0 {
+            log::debug!(
+                "FPS AVG: {} MIN: {} MAX: {}",
+                fps,
+                self.history.iter().min().unwrap(),
+                self.history.iter().max().unwrap()
+            );
+        }
+
+        fps
+    }
+}

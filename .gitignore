@@ -50,3 +50,5 @@ Thumbs.db
 
 audit.json
 sonar-issues.json
+
+.vscode/

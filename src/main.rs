@@ -9,25 +9,7 @@ use async_pidfd::PidFd;
 use async_std::task::spawn;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use log::{debug, error, info, trace, warn};
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use std::{
-    fs,
-    os::fd::AsRawFd,
-    process::Command,
-    str::FromStr,
-    sync::mpsc::{self, Receiver, TryRecvError},
-    time::{Duration, SystemTime},
-};
-use uuid::Uuid;
-use vaal::{self, Context, VAALBox};
-use zenoh::{
-    config::Config,
-    prelude::{r#async::*, sync::SyncResolve},
-    publication::Publisher,
-    subscriber::FlumeSubscriber,
-};
-use zenoh_ros_type::{
+use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::DmaBuf,
     foxglove_msgs::{
@@ -37,8 +19,28 @@ use zenoh_ros_type::{
     },
     sensor_msgs::CameraInfo,
 };
+use log::{debug, error, info, trace, warn};
+use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
+use std::{
+    fs,
+    os::fd::AsRawFd,
+    process::Command,
+    str::FromStr,
+    sync::mpsc::{self, Receiver, TryRecvError},
+    time::Duration,
+};
+use uuid::Uuid;
+use vaal::{self, Context, VAALBox};
+use zenoh::{
+    config::Config,
+    prelude::{r#async::*, sync::SyncResolve},
+    publication::Publisher,
+    subscriber::FlumeSubscriber,
+};
+
+mod fps;
+
 const NSEC_PER_MSEC: i64 = 1_000_000;
-const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 #[async_std::main]
 async fn main() {
@@ -93,6 +95,7 @@ async fn main() {
 
     let stream_width: f64;
     let stream_height: f64;
+
     match info_sub.recv_timeout(Duration::from_secs(10)) {
         Ok(v) => {
             match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
@@ -217,6 +220,8 @@ async fn main() {
     let mut tracker = ByteTrack::new();
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     let timeout = Duration::from_millis(100);
+    let mut fps = fps::Fps::<90>::default();
+
     loop {
         let _ = sub_camera.drain();
         let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
@@ -259,10 +264,17 @@ async fn main() {
                 continue;
             }
         };
+
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
 
-        let n_boxes = match run_model(&dma_buf, &backbone, &mut decoder, &mut vaal_boxes) {
+        let n_boxes = match run_model(
+            &dma_buf,
+            &backbone,
+            &mut decoder,
+            &mut vaal_boxes,
+            fps.update(),
+        ) {
             Ok(boxes) => boxes,
             Err(e) => {
                 error!("Failed to run model: {:?}", e);
@@ -339,8 +351,8 @@ fn run_model(
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
     boxes: &mut Vec<VAALBox>,
+    fps: i32,
 ) -> Result<usize, String> {
-    let fps = update_fps();
     let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
         None,
@@ -655,36 +667,6 @@ fn clear_cached_memory() -> Result<(), ()> {
     };
     fs::write("/proc/sys/vm/drop_caches", "1").unwrap();
     Ok(())
-}
-
-fn update_fps() -> i32 {
-    static mut PREVIOUS_TIME: Option<SystemTime> = None;
-    static mut FPS_HISTORY: [i32; 30] = [0; 30];
-    static mut FPS_INDEX: usize = 0;
-
-    let timestamp = SystemTime::now();
-    let frame_time = match unsafe { PREVIOUS_TIME } {
-        Some(prev_time) => timestamp.duration_since(prev_time).unwrap(),
-        None => timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap(),
-    };
-    unsafe {
-        PREVIOUS_TIME = Some(timestamp);
-    };
-    unsafe {
-        FPS_HISTORY[FPS_INDEX] = (NSEC_PER_SEC as u128 / frame_time.as_nanos()) as i32;
-    };
-    unsafe {
-        FPS_INDEX = (FPS_INDEX + 1) % 30;
-    };
-
-    let mut fps = 0;
-    unsafe {
-        for fps_history in &FPS_HISTORY {
-            fps += fps_history;
-        }
-    }
-    fps /= 30;
-    fps
 }
 
 pub struct Box2D {
