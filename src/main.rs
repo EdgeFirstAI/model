@@ -8,18 +8,19 @@ mod tracker;
 use crate::{buildmsgs::*, setup::*, tracker::*};
 use async_pidfd::PidFd;
 use async_std::task::spawn;
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 use log::{debug, error, info, trace, warn};
+use os_clock::{self, Clock, MONOTONIC_CLOCK};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     fs,
     os::fd::AsRawFd,
+    path::PathBuf,
     process::Command,
     str::FromStr,
     sync::mpsc::{self, Receiver, TryRecvError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 use vaal::{self, Context, VAALBox};
@@ -78,6 +79,21 @@ async fn main() {
         }
     };
 
+    let publ_model_info = match session
+        .declare_publisher(s.info_topic.clone())
+        .res_async()
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring detection publisher {}: {:?}",
+                s.info_topic, e
+            );
+            return;
+        }
+    };
+
     let publ_visual = if s.visualization {
         match session
             .declare_publisher(s.visual_topic.clone())
@@ -97,44 +113,46 @@ async fn main() {
         None
     };
 
-    let info_sub = session
-        .declare_subscriber(&s.info_topic)
-        .res_async()
-        .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &s.info_topic);
-
     let stream_width: f64;
     let stream_height: f64;
-
-    match info_sub.recv_timeout(Duration::from_secs(10)) {
-        Ok(v) => {
-            match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
-                Ok(v) => {
-                    stream_width = v.width as f64;
-                    stream_height = v.height as f64;
-                    info!(
-                        "Found stream resolution: {}x{}",
-                        stream_width, stream_height
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to deserialize camera info message: {:?}", e);
-                    warn!("Cannot determine stream resolution, using normalized coordinates");
-                    stream_width = 1.0;
-                    stream_height = 1.0;
-                }
-            };
+    if s.visualization {
+        let info_sub = session
+            .declare_subscriber(&s.camera_info_topic)
+            .res_async()
+            .await
+            .unwrap();
+        info!("Declared subscriber on {:?}", &s.camera_info_topic);
+        match info_sub.recv_timeout(Duration::from_secs(10)) {
+            Ok(v) => {
+                match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
+                    Ok(v) => {
+                        stream_width = v.width as f64;
+                        stream_height = v.height as f64;
+                        info!(
+                            "Found stream resolution: {}x{}",
+                            stream_width, stream_height
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize camera info message: {:?}", e);
+                        warn!("Cannot determine stream resolution, using normalized coordinates");
+                        stream_width = 1.0;
+                        stream_height = 1.0;
+                    }
+                };
+            }
+            Err(e) => {
+                warn!("Failed to receive on {:?}: {:?}", s.camera_info_topic, e);
+                warn!("Cannot determine stream resolution, using normalized coordinates");
+                stream_width = 1.0;
+                stream_height = 1.0;
+            }
         }
-        Err(e) => {
-            warn!("Failed to receive on {:?}: {:?}", s.info_topic, e);
-            warn!("Cannot determine stream resolution, using normalized coordinates");
-            stream_width = 1.0;
-            stream_height = 1.0;
-        }
+        drop(info_sub);
+    } else {
+        stream_width = 1.0;
+        stream_height = 1.0;
     }
-    drop(info_sub);
-
     let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
         .res_async()
@@ -146,9 +164,10 @@ async fn main() {
     let heartbeat = spawn(heart_beat(
         sub_camera,
         publ_detect.clone(),
+        publ_model_info.clone(),
         publ_visual.clone(),
         rx,
-        format!("Loading Model: {}", s.model.to_string_lossy()),
+        s.model.clone(),
         stream_width,
         stream_height,
     ));
@@ -180,7 +199,6 @@ async fn main() {
             return;
         }
     }
-
     let mut decoder = None;
 
     if s.decoder_model.is_some() {
@@ -220,6 +238,12 @@ async fn main() {
 
     drop(tx);
 
+    let mut model_info_msg = build_model_info_msg(
+        time_from_ns(0u32),
+        Some(&mut backbone),
+        decoder.as_mut(),
+        &s.model,
+    );
     let sub_camera = heartbeat.await;
 
     let model_name = match s.model.as_path().file_name() {
@@ -279,7 +303,7 @@ async fn main() {
 
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
-
+        let model_start = Instant::now();
         let n_boxes = match run_model(
             &dma_buf,
             &backbone,
@@ -293,6 +317,8 @@ async fn main() {
                 return;
             }
         };
+        let model_duration = model_start.elapsed().as_nanos();
+
         if first_run {
             info!(
                 "Successfully recieved camera frames and run model, found {:?} boxes",
@@ -321,23 +347,23 @@ async fn main() {
             if s.track && track_info.is_none() {
                 continue;
             }
-            new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, track_info));
+            new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, timestamp, track_info));
         }
-
-        let msg = build_detectboxes2d_msg(
+        let curr_time = match MONOTONIC_CLOCK.get_time() {
+            Ok(t) => t.as_nanos(),
+            Err(e) => {
+                error!("Could not get Monotonic clock time: {:?}", e);
+                0
+            }
+        };
+        let detect = build_detect_msg_and_encode(
             &new_boxes,
             dma_buf.header.stamp.clone(),
-            time_from_ns(0),
-            time_from_ns(0),
+            time_from_ns(model_duration),
+            time_from_ns(curr_time),
         );
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "edgefirst_msgs/msg/DetectBoxes2D".into(),
-            ),
-        );
-        match publ_detect.put(encoded.clone()).res_async().await {
-            Ok(_) => trace!("Sent DetectBoxes2D message on {}", publ_detect.key_expr()),
+        match publ_detect.put(detect).res_async().await {
+            Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
             Err(e) => {
                 error!(
                     "Error sending message on {}: {:?}",
@@ -348,7 +374,7 @@ async fn main() {
         }
         if publ_visual.is_some() {
             let publ_visual = publ_visual.as_ref().unwrap();
-            let msg = build_image_annotations_msg(
+            let annotations = build_image_annotations_msg_and_encode(
                 &new_boxes,
                 dma_buf.header.stamp.clone(),
                 stream_width,
@@ -356,13 +382,7 @@ async fn main() {
                 &model_name,
                 s.labels,
             );
-
-            let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap())
-                .encoding(Encoding::WithSuffix(
-                    KnownEncoding::AppOctetStream,
-                    "foxglove_msgs/msg/ImageAnnotations".into(),
-                ));
-            match publ_visual.put(encoded.clone()).res_async().await {
+            match publ_visual.put(annotations).res_async().await {
                 Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
                 Err(e) => {
                     error!(
@@ -371,6 +391,19 @@ async fn main() {
                         e
                     )
                 }
+            }
+        }
+
+        let model_info =
+            update_model_info_msg_and_encode(dma_buf.header.stamp.clone(), &mut model_info_msg);
+        match publ_model_info.put(model_info).res_sync() {
+            Ok(_) => (),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_model_info.key_expr(),
+                    e
+                )
             }
         }
     }
@@ -603,6 +636,8 @@ pub struct Box2D {
     pub index: i32,
     #[doc = " label for this detection"]
     pub label: String,
+    #[doc = " timestamp"]
+    pub ts: u64,
     #[doc = " tracking information for this detection"]
     pub track: Option<Track>,
 }
@@ -619,6 +654,7 @@ fn vaalbox_to_box2d(
     s: &Settings,
     b: &VAALBox,
     model: &Context,
+    ts: u64,
     track: &Option<TrackInfo>,
 ) -> Box2D {
     let label_ind = b.label + s.label_offset;
@@ -643,6 +679,7 @@ fn vaalbox_to_box2d(
         ymax: b.ymax as f64,
         score: b.score as f64,
         label,
+        ts,
         index: b.label,
         track: track_info,
     }
@@ -651,12 +688,15 @@ fn vaalbox_to_box2d(
 async fn heart_beat<'a>(
     sub_camera: FlumeSubscriber<'a>,
     publ_detect: Publisher<'_>,
+    publ_model_info: Publisher<'_>,
     publ_visual: Option<Publisher<'_>>,
     rx: Receiver<bool>,
-    msg: String,
+    model_path: PathBuf,
     stream_width: f64,
     stream_height: f64,
 ) -> FlumeSubscriber<'a> {
+    let mut model_info_msg = build_model_info_msg(time_from_ns(0u32), None, None, &model_path);
+    let msg = format!("Loading Model: {}", model_path.to_string_lossy());
     loop {
         match rx.try_recv() {
             Ok(_) => return sub_camera,
@@ -708,19 +748,21 @@ async fn heart_beat<'a>(
         };
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
-
-        let boxes = build_detectboxes2d_msg(
+        let curr_time = match MONOTONIC_CLOCK.get_time() {
+            Ok(t) => t.as_nanos(),
+            Err(e) => {
+                error!("Could not get Monotonic clock time: {:?}", e);
+                0
+            }
+        };
+        let detect = build_detect_msg_and_encode(
             &Vec::new(),
             dma_buf.header.stamp.clone(),
-            time_from_ns(0),
-            time_from_ns(0),
+            time_from_ns(0u32),
+            time_from_ns(curr_time),
         );
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&boxes, Infinite).unwrap())
-            .encoding(Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "edgefirst_msgs/msg/DetectBoxes2D".into(),
-            ));
-        match publ_detect.put(encoded).res_sync() {
+
+        match publ_detect.put(detect).res_sync() {
             Ok(_) => (),
             Err(e) => {
                 error!(
@@ -731,9 +773,22 @@ async fn heart_beat<'a>(
             }
         }
 
+        let model_info =
+            update_model_info_msg_and_encode(dma_buf.header.stamp.clone(), &mut model_info_msg);
+        match publ_model_info.put(model_info).res_sync() {
+            Ok(_) => (),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_model_info.key_expr(),
+                    e
+                )
+            }
+        }
+
         if publ_visual.is_some() {
             let publ_visual = publ_visual.as_ref().unwrap();
-            let annotations = build_image_annotations_msg(
+            let annotations = build_image_annotations_msg_and_encode(
                 &Vec::new(),
                 dma_buf.header.stamp.clone(),
                 stream_width,
@@ -742,13 +797,7 @@ async fn heart_beat<'a>(
                 LabelSetting::Index,
             );
 
-            let encoded =
-                Value::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap())
-                    .encoding(Encoding::WithSuffix(
-                        KnownEncoding::AppOctetStream,
-                        "foxglove_msgs/msg/ImageAnnotations".into(),
-                    ));
-            match publ_visual.put(encoded.clone()).res_async().await {
+            match publ_visual.put(annotations).res_async().await {
                 Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
                 Err(e) => {
                     error!(

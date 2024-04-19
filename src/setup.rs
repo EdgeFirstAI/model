@@ -22,8 +22,8 @@ pub struct Settings {
     #[arg(short, long, default_value = "rt/detect/boxes2d")]
     pub detect_topic: String,
 
-    /// resolution info topic
-    #[arg(long, default_value = "rt/camera/info")]
+    /// zenoh key expression for publishing model info
+    #[arg(long, default_value = "rt/detect/info")]
     pub info_topic: String,
 
     /// connect to zenoh endpoints
@@ -101,6 +101,10 @@ pub struct Settings {
     /// zenoh key expression for publishing foxglove visualization topic
     #[arg(long, default_value = "rt/detect/visualization")]
     pub visual_topic: String,
+
+    /// resolution info topic, needed for visualization message type
+    #[arg(long, default_value = "rt/camera/info")]
+    pub camera_info_topic: String,
 }
 
 pub fn validate_settings(s: &mut Settings) {

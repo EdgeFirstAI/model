@@ -1,12 +1,22 @@
+use std::path::PathBuf;
+
+use cdr::{CdrLe, Infinite};
+use deepviewrt::tensor::TensorType;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{DetectBox2D, DetectBoxes2D, DetectTrack},
+    edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, ModelInfo},
     foxglove_msgs::{
         point_annotation_type::{LINE_LOOP, UNKNOWN},
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
         FoxgloveTextAnnotations,
     },
     std_msgs::Header,
+};
+use log::debug;
+use vaal::Context;
+use zenoh::{
+    prelude::{Encoding, KnownEncoding},
+    value::Value,
 };
 
 use crate::{Box2D, LabelSetting};
@@ -37,14 +47,14 @@ fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
         a: 1.0,
     }
 }
-pub fn build_image_annotations_msg(
+pub fn build_image_annotations_msg_and_encode(
     boxes: &[Box2D],
     timestamp: Time,
     stream_width: f64,
     stream_height: f64,
     msg: &str,
     labels: LabelSetting,
-) -> FoxgloveImageAnnotations {
+) -> Value {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
         points: Vec::new(),
@@ -138,10 +148,17 @@ pub fn build_image_annotations_msg(
         annotations.points.push(points);
         annotations.texts.push(text);
     }
-    annotations
+
+    Value::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap()).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "foxglove_msgs/msg/ImageAnnotations".into(),
+        ),
+    )
 }
 
-pub fn time_from_ns(ts: u64) -> Time {
+pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
+    let ts: u128 = ts.into();
     Time {
         sec: (ts / 1000_000_000) as i32,
         nanosec: (ts % 1000_000_000) as u32,
@@ -157,9 +174,9 @@ impl From<&Box2D> for DetectBox2D {
                 created: time_from_ns(v.created),
             },
             None => DetectTrack {
-                id: String::new(),
-                lifetime: 0,
-                created: time_from_ns(0),
+                id: String::from(""),
+                lifetime: 1,
+                created: time_from_ns(box2d.ts),
             },
         };
         DetectBox2D {
@@ -171,24 +188,23 @@ impl From<&Box2D> for DetectBox2D {
             score: box2d.score as f32,
             distance: 0.0,
             speed: 0.0,
-            is_tracked: box2d.track.is_some(),
             track,
         }
     }
 }
 
-pub fn build_detectboxes2d_msg(
+pub fn build_detect_msg_and_encode(
     boxes: &[Box2D],
     in_time: Time,
     model_time: Time,
     curr_time: Time,
-) -> DetectBoxes2D {
+) -> Value {
     let mut new_boxes = Vec::new();
     for b in boxes {
         new_boxes.push(b.into());
     }
 
-    DetectBoxes2D {
+    let detect = Detect {
         header: Header {
             stamp: in_time.clone(),
             frame_id: String::new(),
@@ -197,5 +213,140 @@ pub fn build_detectboxes2d_msg(
         model_time,
         output_time: curr_time,
         boxes: new_boxes,
+    };
+    Value::from(cdr::serialize::<_, _, CdrLe>(&detect, Infinite).unwrap()).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "edgefirst_msgs/msg/Detect".into(),
+        ),
+    )
+}
+
+fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
+    match t {
+        TensorType::RAW => model_info::RAW,
+        TensorType::STR => model_info::STRING,
+        TensorType::I8 => model_info::INT8,
+        TensorType::U8 => model_info::UINT8,
+        TensorType::I16 => model_info::INT16,
+        TensorType::U16 => model_info::UINT16,
+        TensorType::F16 => model_info::FLOAT16,
+        TensorType::I32 => model_info::INT32,
+        TensorType::U32 => model_info::UINT32,
+        TensorType::F32 => model_info::FLOAT32,
+        TensorType::I64 => model_info::INT64,
+        TensorType::U64 => model_info::UINT64,
+        TensorType::F64 => model_info::FLOAT64,
     }
+}
+
+pub fn build_model_info_msg(
+    in_time: Time,
+    model_ctx: Option<&mut Context>,
+    decoder_ctx: Option<&mut Context>,
+    path: &PathBuf,
+) -> ModelInfo {
+    let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
+    let mut output_type = model_info::RAW;
+    let output_ctx = match decoder_ctx {
+        Some(_) => &decoder_ctx,
+        None => &model_ctx,
+    };
+    match output_ctx {
+        Some(ref ctx) => match ctx.output_tensor(0) {
+            Some(tensor) => {
+                output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+                output_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+            }
+            None => {}
+        },
+        None => {}
+    };
+    let labels = match output_ctx {
+        Some(ref ctx) => ctx.labels().into_iter().map(|s| String::from(s)).collect(),
+        None => Vec::new(),
+    };
+
+    let model_format = match path.extension() {
+        // , HailoRT, RKNN, TensorRT, TFLite
+        Some(v) => match v.to_string_lossy().to_ascii_lowercase().as_str() {
+            "rtm" => String::from("DeepViewRT"),
+            "rknn" => String::from("RKNN"),
+            "tflite" => String::from("TFLite"),
+            "hef" => String::from("HailoRT"),
+            _ => v.to_string_lossy().into_owned(),
+        },
+        None => String::from("unknown"),
+    };
+
+    let model_name = match model_ctx {
+        Some(ref ctx) if ctx.model().is_err() => String::from("No Model"),
+        Some(ref ctx)
+            if ctx.model().unwrap().name().is_err()
+                || ctx.model().unwrap().name().unwrap().is_empty() =>
+        {
+            //the path cannot end with a `..` otherwise the model would not have loaded
+            path.file_name().unwrap().to_string_lossy().into_owned()
+        }
+        Some(ref ctx) => ctx.model().unwrap().name().unwrap().to_owned(),
+        None => String::from("Loading Model..."),
+    };
+    debug!("Model name = {}", model_name);
+    let model_type = String::from("Detection");
+
+    let mut input_shape = vec![0, 0, 0, 0];
+    let mut input_type = model_info::RAW;
+
+    match model_ctx {
+        Some(ctx) => 'label: {
+            let model = match ctx.model() {
+                Ok(v) => v,
+                Err(_) => break 'label,
+            };
+
+            let inputs = match model.inputs() {
+                Ok(v) => v,
+                _ => break 'label,
+            };
+            let dvrt_ctx = match ctx.dvrt_context() {
+                Ok(v) => v,
+                Err(_) => break 'label,
+            };
+            match dvrt_ctx.tensor_index(inputs[0] as usize) {
+                Ok(tensor) => {
+                    input_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+                    input_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+                }
+                Err(_) => break 'label,
+            };
+        }
+        None => {}
+    };
+
+    ModelInfo {
+        header: Header {
+            stamp: in_time.clone(),
+            frame_id: String::new(),
+        },
+        labels, // input_shape = model_ctx.
+        input_shape,
+        input_type,
+        output_shape,
+        output_type,
+        model_format,
+        model_name,
+        model_type,
+    }
+}
+
+//Updated the ModelInfo message with the given timestamp, and then encodes it
+// into a Zenoh Value
+pub fn update_model_info_msg_and_encode(timestamp: Time, msg: &mut ModelInfo) -> Value {
+    msg.header.stamp = timestamp;
+    Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "edgefirst_msgs/msg/ModelInfo".into(),
+        ),
+    )
 }
