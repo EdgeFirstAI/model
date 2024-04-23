@@ -171,8 +171,7 @@ async fn main() {
         publ_visual.clone(),
         rx,
         s.model.clone(),
-        stream_width,
-        stream_height,
+        (stream_width, stream_height),
     ));
 
     let mut backbone = match Context::new(&s.engine) {
@@ -693,8 +692,7 @@ async fn heart_beat<'a>(
     publ_visual: Option<Publisher<'_>>,
     rx: Receiver<bool>,
     model_path: PathBuf,
-    stream_width: f64,
-    stream_height: f64,
+    stream_dims: (f64, f64),
 ) -> FlumeSubscriber<'a> {
     let mut model_info_msg = build_model_info_msg(time_from_ns(0u32), None, None, &model_path);
     let msg = format!("Loading Model: {}", model_path.to_string_lossy());
@@ -792,8 +790,8 @@ async fn heart_beat<'a>(
             let annotations = build_image_annotations_msg_and_encode(
                 &Vec::new(),
                 dma_buf.header.stamp.clone(),
-                stream_width,
-                stream_height,
+                stream_dims.0,
+                stream_dims.1,
                 &msg,
                 LabelSetting::Index,
             );

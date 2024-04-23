@@ -258,13 +258,6 @@ impl ByteTrack {
             }
         }
 
-        // reduce lifespan of tracklets that didn't get matched
-        for i in 0..self.tracklets.len() {
-            if !tracked[i] {
-                trace!("Tracklet without match: {:#?}", self.tracklets[i]);
-            }
-        }
-
         // move tracklets that don't have lifespan to the removed tracklets
         // must iterate from the back
         for i in (0..self.tracklets.len()).rev() {
