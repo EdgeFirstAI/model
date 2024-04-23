@@ -38,7 +38,7 @@ fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
     let h = (vaal_box.ymax - vaal_box.ymin).max(EPSILON);
     let a = w / h;
 
-    return [x, y, a, h];
+    [x, y, a, h]
 }
 
 fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
@@ -54,8 +54,6 @@ fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
     vaal_box.xmax = x_ + w_ / 2.0;
     vaal_box.ymin = y_ - h_ / 2.0;
     vaal_box.ymax = y_ + h_ / 2.0;
-
-    return;
 }
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
@@ -82,7 +80,7 @@ fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
         return 0.0;
     }
 
-    return intersection / union;
+    intersection / union
 }
 
 fn box_cost(
@@ -113,9 +111,7 @@ fn box_cost(
     if iou < iou_threshold {
         return INVALID_MATCH;
     }
-    let cost = (1.5 - new_box.score) + (1.5 - iou);
-
-    cost
+    (1.5 - new_box.score) + (1.5 - iou)
 }
 
 impl ByteTrack {

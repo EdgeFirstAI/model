@@ -265,7 +265,7 @@ fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
             Err(_) => return (input_shape, input_type),
         };
     };
-    return (input_shape, input_type);
+    (input_shape, input_type)
 }
 
 pub fn build_model_info_msg(

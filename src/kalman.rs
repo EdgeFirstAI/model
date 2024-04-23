@@ -117,7 +117,7 @@ where
         let mean = self.update_matrix * self.mean;
         let covariance =
             self.update_matrix * self.covariance * self.update_matrix.transpose() + innovation_cov;
-        return (mean, covariance);
+        (mean, covariance)
     }
 
     pub fn update(&mut self, measurement: &[R; 4]) {
@@ -173,16 +173,14 @@ where
         }
         let d = measurements - mean_broadcast;
         match metric {
-            GatingDistanceMetric::Gaussian => {
-                return d.component_mul(&d).column_sum();
-            }
+            GatingDistanceMetric::Gaussian => d.component_mul(&d).column_sum(),
             GatingDistanceMetric::Mahalanobis => {
                 let cho_factor = match covariance.cholesky() {
                     None => return DVector::<R>::zeros(measurements.shape().0),
                     Some(v) => v,
                 };
                 let z = cho_factor.solve(&d.transpose());
-                return z.component_mul(&z).row_sum_tr();
+                z.component_mul(&z).row_sum_tr()
             }
         }
     }
