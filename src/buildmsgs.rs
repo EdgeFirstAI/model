@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use cdr::{CdrLe, Infinite};
 use deepviewrt::tensor::TensorType;
@@ -130,7 +130,7 @@ pub fn build_image_annotations_msg_and_encode(
             LabelSetting::Track => match &b.track {
                 None => format!("{:.2}", b.score),
                 // only shows first 8 characters of the UUID
-                Some(v) => format!("{}", v.uuid.to_string().split_at(8).0),
+                Some(v) => v.uuid.to_string().split_at(8).0.to_owned(),
             },
         };
 
@@ -160,8 +160,8 @@ pub fn build_image_annotations_msg_and_encode(
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     let ts: u128 = ts.into();
     Time {
-        sec: (ts / 1000_000_000) as i32,
-        nanosec: (ts % 1000_000_000) as u32,
+        sec: (ts / 1_000_000_000) as i32,
+        nanosec: (ts % 1_000_000_000) as u32,
     }
 }
 
@@ -240,11 +240,39 @@ fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
     }
 }
 
+fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
+    let mut input_shape = vec![0, 0, 0, 0];
+    let mut input_type = model_info::RAW;
+    if let Some(ctx) = model_ctx {
+        let model = match ctx.model() {
+            Ok(v) => v,
+            Err(_) => return (input_shape, input_type),
+        };
+
+        let inputs = match model.inputs() {
+            Ok(v) => v,
+            _ => return (input_shape, input_type),
+        };
+        let dvrt_ctx = match ctx.dvrt_context() {
+            Ok(v) => v,
+            Err(_) => return (input_shape, input_type),
+        };
+        match dvrt_ctx.tensor_index(inputs[0] as usize) {
+            Ok(tensor) => {
+                input_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+                input_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+            }
+            Err(_) => return (input_shape, input_type),
+        };
+    };
+    return (input_shape, input_type);
+}
+
 pub fn build_model_info_msg(
     in_time: Time,
     model_ctx: Option<&mut Context>,
     decoder_ctx: Option<&mut Context>,
-    path: &PathBuf,
+    path: &Path,
 ) -> ModelInfo {
     let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
@@ -252,18 +280,14 @@ pub fn build_model_info_msg(
         Some(_) => &decoder_ctx,
         None => &model_ctx,
     };
-    match output_ctx {
-        Some(ref ctx) => match ctx.output_tensor(0) {
-            Some(tensor) => {
-                output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-                output_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
-            }
-            None => {}
-        },
-        None => {}
+    if let Some(ctx) = output_ctx {
+        if let Some(tensor) = ctx.output_tensor(0) {
+            output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+            output_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+        }
     };
     let labels = match output_ctx {
-        Some(ref ctx) => ctx.labels().into_iter().map(|s| String::from(s)).collect(),
+        Some(ref ctx) => ctx.labels().into_iter().map(String::from).collect(),
         None => Vec::new(),
     };
 
@@ -294,34 +318,7 @@ pub fn build_model_info_msg(
     debug!("Model name = {}", model_name);
     let model_type = String::from("Detection");
 
-    let mut input_shape = vec![0, 0, 0, 0];
-    let mut input_type = model_info::RAW;
-
-    match model_ctx {
-        Some(ctx) => 'label: {
-            let model = match ctx.model() {
-                Ok(v) => v,
-                Err(_) => break 'label,
-            };
-
-            let inputs = match model.inputs() {
-                Ok(v) => v,
-                _ => break 'label,
-            };
-            let dvrt_ctx = match ctx.dvrt_context() {
-                Ok(v) => v,
-                Err(_) => break 'label,
-            };
-            match dvrt_ctx.tensor_index(inputs[0] as usize) {
-                Ok(tensor) => {
-                    input_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-                    input_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
-                }
-                Err(_) => break 'label,
-            };
-        }
-        None => {}
-    };
+    let (input_shape, input_type) = get_input_info(model_ctx);
 
     ModelInfo {
         header: Header {
