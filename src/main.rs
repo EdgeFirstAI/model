@@ -667,14 +667,12 @@ fn vaalbox_to_box2d(
     };
 
     trace!("Created box with label {}", label);
-    let track_info = match track {
-        None => None,
-        Some(v) => Some(Track {
-            uuid: v.uuid,
-            count: v.count,
-            created: v.created,
-        }),
-    };
+    let track_info = track.as_ref().map(|v| Track {
+        uuid: v.uuid,
+        count: v.count,
+        created: v.created,
+    });
+
     Box2D {
         xmin: b.xmin as f64,
         ymin: b.ymin as f64,
