@@ -11,7 +11,10 @@ use async_std::task::spawn;
 use clap::Parser;
 use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 use log::{debug, error, info, trace, warn};
-use os_clock::{self, Clock, MONOTONIC_CLOCK};
+use nix::{
+    sys::time::TimeValLike,
+    time::{clock_gettime, ClockId},
+};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     fs,
@@ -349,8 +352,8 @@ async fn main() {
             }
             new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, timestamp, track_info));
         }
-        let curr_time = match MONOTONIC_CLOCK.get_time() {
-            Ok(t) => t.as_nanos(),
+        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+            Ok(t) => t.num_nanoseconds() as u64,
             Err(e) => {
                 error!("Could not get Monotonic clock time: {:?}", e);
                 0
@@ -748,8 +751,8 @@ async fn heart_beat<'a>(
         };
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
-        let curr_time = match MONOTONIC_CLOCK.get_time() {
-            Ok(t) => t.as_nanos(),
+        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+            Ok(t) => t.num_nanoseconds() as u64,
             Err(e) => {
                 error!("Could not get Monotonic clock time: {:?}", e);
                 0
