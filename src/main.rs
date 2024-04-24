@@ -1,20 +1,31 @@
 // use serde::{Deserialize, Serialize};
-use crate::setup::*;
+
+mod buildmsgs;
+mod kalman;
 mod setup;
+mod tracker;
+
+use crate::{buildmsgs::*, setup::*, tracker::*};
 use async_pidfd::PidFd;
 use async_std::task::spawn;
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 use log::{debug, error, info, trace, warn};
+use nix::{
+    sys::time::TimeValLike,
+    time::{clock_gettime, ClockId},
+};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     fs,
     os::fd::AsRawFd,
+    path::PathBuf,
     process::Command,
     str::FromStr,
     sync::mpsc::{self, Receiver, TryRecvError},
-    time::{Duration, SystemTime},
+    time::{Duration, Instant},
 };
+use uuid::Uuid;
 use vaal::{self, Context, VAALBox};
 use zenoh::{
     config::Config,
@@ -22,23 +33,15 @@ use zenoh::{
     publication::Publisher,
     subscriber::FlumeSubscriber,
 };
-use zenoh_ros_type::{
-    builtin_interfaces::Time,
-    deepview_msgs::DeepviewDMABuf,
-    foxglove_msgs::{
-        point_annotation_type::{LINE_LOOP, UNKNOWN},
-        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
-        FoxgloveTextAnnotations,
-    },
-    sensor_msgs::CameraInfo,
-};
+
+mod fps;
 
 const NSEC_PER_MSEC: i64 = 1_000_000;
-const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 #[async_std::main]
 async fn main() {
-    let s = Settings::parse();
+    let mut s = Settings::parse();
+    validate_settings(&mut s);
     env_logger::init();
     let mut first_run = true;
 
@@ -48,7 +51,11 @@ async fn main() {
     config.set_mode(Some(mode)).unwrap();
     config.connect.endpoints = s.connect.iter().map(|v| v.parse().unwrap()).collect();
     config.listen.endpoints = s.listen.iter().map(|v| v.parse().unwrap()).collect();
-    let _ = config.scouting.multicast.set_enabled(Some(false));
+    let _ = config.scouting.multicast.set_enabled(Some(true));
+    let _ = config
+        .scouting
+        .multicast
+        .set_interface(Some("lo".to_string()));
     let _ = config.scouting.gossip.set_enabled(Some(true));
     let session = match zenoh::open(config.clone()).res_async().await {
         Ok(v) => v,
@@ -75,43 +82,80 @@ async fn main() {
         }
     };
 
-    let info_sub = session
-        .declare_subscriber(&s.info_topic)
+    let publ_model_info = match session
+        .declare_publisher(s.info_topic.clone())
         .res_async()
         .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &s.info_topic);
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring detection publisher {}: {:?}",
+                s.info_topic, e
+            );
+            return;
+        }
+    };
+
+    let publ_visual = if s.visualization {
+        match session
+            .declare_publisher(s.visual_topic.clone())
+            .res_async()
+            .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!(
+                    "Error while declaring detection publisher {}: {:?}",
+                    s.detect_topic, e
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
 
     let stream_width: f64;
     let stream_height: f64;
-    match info_sub.recv_timeout(Duration::from_secs(10)) {
-        Ok(v) => {
-            match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
-                Ok(v) => {
-                    stream_width = v.width as f64;
-                    stream_height = v.height as f64;
-                    info!(
-                        "Found stream resolution: {}x{}",
-                        stream_width, stream_height
-                    );
-                }
-                Err(e) => {
-                    warn!("Failed to deserialize camera info message: {:?}", e);
-                    warn!("Cannot determine stream resolution, using normalized coordinates");
-                    stream_width = 1.0;
-                    stream_height = 1.0;
-                }
-            };
+    if s.visualization {
+        let info_sub = session
+            .declare_subscriber(&s.camera_info_topic)
+            .res_async()
+            .await
+            .unwrap();
+        info!("Declared subscriber on {:?}", &s.camera_info_topic);
+        match info_sub.recv_timeout(Duration::from_secs(10)) {
+            Ok(v) => {
+                match cdr::deserialize::<CameraInfo>(&v.payload.contiguous()) {
+                    Ok(v) => {
+                        stream_width = v.width as f64;
+                        stream_height = v.height as f64;
+                        info!(
+                            "Found stream resolution: {}x{}",
+                            stream_width, stream_height
+                        );
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize camera info message: {:?}", e);
+                        warn!("Cannot determine stream resolution, using normalized coordinates");
+                        stream_width = 1.0;
+                        stream_height = 1.0;
+                    }
+                };
+            }
+            Err(e) => {
+                warn!("Failed to receive on {:?}: {:?}", s.camera_info_topic, e);
+                warn!("Cannot determine stream resolution, using normalized coordinates");
+                stream_width = 1.0;
+                stream_height = 1.0;
+            }
         }
-        Err(e) => {
-            warn!("Failed to receive on {:?}: {:?}", s.info_topic, e);
-            warn!("Cannot determine stream resolution, using normalized coordinates");
-            stream_width = 1.0;
-            stream_height = 1.0;
-        }
+        drop(info_sub);
+    } else {
+        stream_width = 1.0;
+        stream_height = 1.0;
     }
-    drop(info_sub);
-
     let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
         .res_async()
@@ -123,10 +167,11 @@ async fn main() {
     let heartbeat = spawn(heart_beat(
         sub_camera,
         publ_detect.clone(),
+        publ_model_info.clone(),
+        publ_visual.clone(),
         rx,
-        format!("Loading Model: {}", s.model.to_string_lossy()),
-        stream_width,
-        stream_height,
+        s.model.clone(),
+        (stream_width, stream_height),
     ));
 
     let mut backbone = match Context::new(&s.engine) {
@@ -156,7 +201,6 @@ async fn main() {
             return;
         }
     }
-
     let mut decoder = None;
 
     if s.decoder_model.is_some() {
@@ -196,6 +240,12 @@ async fn main() {
 
     drop(tx);
 
+    let mut model_info_msg = build_model_info_msg(
+        time_from_ns(0u32),
+        Some(&mut backbone),
+        decoder.as_mut(),
+        &s.model,
+    );
     let sub_camera = heartbeat.await;
 
     let model_name = match s.model.as_path().file_name() {
@@ -205,12 +255,14 @@ async fn main() {
             String::from("unknown_model_file")
         }
     };
-
+    let mut tracker = ByteTrack::new();
     let mut vaal_boxes: Vec<vaal::VAALBox> = Vec::with_capacity(s.max_boxes as usize);
     let timeout = Duration::from_millis(100);
+    let mut fps = fps::Fps::<90>::default();
+
     loop {
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(timeout) {
+        let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -230,17 +282,17 @@ async fn main() {
         };
         trace!("Recieved camera frame");
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
             Err(e) => {
                 error!(
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.src_pid, e
+                    dma_buf.pid, e
                 );
                 continue;
             }
         };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
             Ok(v) => v,
             Err(e) => {
                 error!(
@@ -250,17 +302,16 @@ async fn main() {
                 continue;
             }
         };
-        dma_buf.dma_fd = fd.as_raw_fd();
-        trace!("Opened DMA buffer from camera");
 
-        let boxes = match run_model(
-            &s,
+        dma_buf.fd = fd.as_raw_fd();
+        trace!("Opened DMA buffer from camera");
+        let model_start = Instant::now();
+        let n_boxes = match run_model(
             &dma_buf,
             &backbone,
             &mut decoder,
             &mut vaal_boxes,
-            stream_width,
-            stream_height,
+            fps.update(),
         ) {
             Ok(boxes) => boxes,
             Err(e) => {
@@ -268,36 +319,91 @@ async fn main() {
                 return;
             }
         };
+        let model_duration = model_start.elapsed().as_nanos();
+
         if first_run {
             info!(
                 "Successfully recieved camera frames and run model, found {:?} boxes",
-                boxes.len()
+                n_boxes
             );
             first_run = false;
         } else {
-            trace!("Detected {:?} boxes", boxes.len());
+            trace!("Detected {:?} boxes", n_boxes);
         }
+        let model = if decoder.is_some() {
+            decoder.as_ref().unwrap()
+        } else {
+            &backbone
+        };
+        let timestamp =
+            dma_buf.header.stamp.nanosec as u64 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
+        let tracks = if s.track {
+            tracker.update(&s, &mut vaal_boxes[0..n_boxes], timestamp)
+        } else {
+            vec![None; n_boxes]
+        };
 
-        let msg = build_image_annotations_msg(
-            &boxes,
+        let mut new_boxes: Vec<Box2D> = Vec::new();
+        for (vaal_box, track_info) in vaal_boxes.iter().take(n_boxes).zip(tracks.iter()) {
+            // when tracking is turned on, only send results for tracked boxes
+            if s.track && track_info.is_none() {
+                continue;
+            }
+            new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, timestamp, track_info));
+        }
+        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+            Ok(t) => t.num_nanoseconds() as u64,
+            Err(e) => {
+                error!("Could not get Monotonic clock time: {:?}", e);
+                0
+            }
+        };
+        let detect = build_detect_msg_and_encode(
+            &new_boxes,
             dma_buf.header.stamp.clone(),
-            stream_width,
-            stream_height,
-            &model_name,
+            time_from_ns(model_duration),
+            time_from_ns(curr_time),
         );
-
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "foxglove_msgs/msg/ImageAnnotations".into(),
-            ),
-        );
-        match publ_detect.put(encoded.clone()).res_async().await {
-            Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+        match publ_detect.put(detect).res_async().await {
+            Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
             Err(e) => {
                 error!(
                     "Error sending message on {}: {:?}",
                     publ_detect.key_expr(),
+                    e
+                )
+            }
+        }
+        if publ_visual.is_some() {
+            let publ_visual = publ_visual.as_ref().unwrap();
+            let annotations = build_image_annotations_msg_and_encode(
+                &new_boxes,
+                dma_buf.header.stamp.clone(),
+                stream_width,
+                stream_height,
+                &model_name,
+                s.labels,
+            );
+            match publ_visual.put(annotations).res_async().await {
+                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
+                }
+            }
+        }
+
+        let model_info =
+            update_model_info_msg_and_encode(dma_buf.header.stamp.clone(), &mut model_info_msg);
+        match publ_model_info.put(model_info).res_sync() {
+            Ok(_) => (),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_model_info.key_expr(),
                     e
                 )
             }
@@ -307,19 +413,16 @@ async fn main() {
 
 #[inline(always)]
 fn run_model(
-    s: &Settings,
-    dma_buf: &DeepviewDMABuf,
+    dma_buf: &DmaBuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
-    boxes: &mut Vec<vaal::VAALBox>,
-    stream_width: f64,
-    stream_height: f64,
-) -> Result<Vec<Box2D>, String> {
-    let fps = update_fps();
+    boxes: &mut Vec<VAALBox>,
+    fps: i32,
+) -> Result<usize, String> {
     let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
         None,
-        dma_buf.dma_fd,
+        dma_buf.fd,
         dma_buf.fourcc,
         dma_buf.width as i32,
         dma_buf.height as i32,
@@ -345,7 +448,7 @@ fn run_model(
 
             match backbone.load_frame_dmabuf(
                 None,
-                dma_buf.dma_fd,
+                dma_buf.fd,
                 dma_buf.fourcc,
                 dma_buf.width as i32,
                 dma_buf.height as i32,
@@ -478,119 +581,7 @@ fn run_model(
         );
     }
 
-    let model = if decoder.is_some() {
-        decoder.as_ref().unwrap()
-    } else {
-        backbone
-    };
-
-    let mut new_boxes: Vec<Box2D> = Vec::new();
-    for vaal_box in boxes.iter().take(n_boxes) {
-        new_boxes.push(vaalbox_to_box2d(
-            s,
-            vaal_box,
-            model,
-            stream_width,
-            stream_height,
-        ));
-    }
-
-    Ok(new_boxes)
-}
-
-fn build_image_annotations_msg(
-    boxes: &[Box2D],
-    timestamp: Time,
-    stream_width: f64,
-    stream_height: f64,
-    msg: &str,
-) -> FoxgloveImageAnnotations {
-    let mut annotations = FoxgloveImageAnnotations {
-        circles: Vec::new(),
-        points: Vec::new(),
-        texts: Vec::new(),
-    };
-    let white = FoxgloveColor {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    };
-    let transparent = FoxgloveColor {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.0,
-    };
-    let empty_points = FoxglovePointAnnotations {
-        timestamp: timestamp.clone(),
-        type_: UNKNOWN,
-        points: Vec::new(),
-        outline_color: white.clone(),
-        outline_colors: Vec::new(),
-        fill_color: transparent.clone(),
-        thickness: 2.0,
-    };
-
-    let empty_text = FoxgloveTextAnnotations {
-        timestamp: timestamp.clone(),
-        text: msg.to_owned(),
-        position: FoxglovePoint2 {
-            x: stream_width * 0.025,
-            y: stream_height * 0.95,
-        },
-        font_size: 0.015 * stream_width.max(stream_height),
-        text_color: white.clone(),
-        background_color: transparent.clone(),
-    };
-
-    annotations.points.push(empty_points);
-    annotations.texts.push(empty_text);
-    for b in boxes.iter() {
-        let outline_colors = vec![white.clone(), white.clone(), white.clone(), white.clone()];
-        let points = vec![
-            FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
-            },
-            FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymin,
-            },
-            FoxglovePoint2 {
-                x: b.xmax,
-                y: b.ymax,
-            },
-            FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymax,
-            },
-        ];
-        let points = FoxglovePointAnnotations {
-            timestamp: timestamp.clone(),
-            type_: LINE_LOOP,
-            points,
-            outline_color: white.clone(),
-            outline_colors,
-            fill_color: transparent.clone(),
-            thickness: 2.0,
-        };
-
-        let text = FoxgloveTextAnnotations {
-            timestamp: timestamp.clone(),
-            text: b.label.clone(),
-            position: FoxglovePoint2 {
-                x: b.xmin,
-                y: b.ymin,
-            },
-            font_size: 0.02 * stream_width.max(stream_height),
-            text_color: white.clone(),
-            background_color: transparent.clone(),
-        };
-        annotations.points.push(points);
-        annotations.texts.push(text);
-    }
-    annotations
+    Ok(n_boxes)
 }
 
 fn setup_context(context: &mut Context, s: &Settings) {
@@ -632,96 +623,79 @@ fn clear_cached_memory() -> Result<(), ()> {
     Ok(())
 }
 
-fn update_fps() -> i32 {
-    static mut PREVIOUS_TIME: Option<SystemTime> = None;
-    static mut FPS_HISTORY: [i32; 30] = [0; 30];
-    static mut FPS_INDEX: usize = 0;
-
-    let timestamp = SystemTime::now();
-    let frame_time = match unsafe { PREVIOUS_TIME } {
-        Some(prev_time) => timestamp.duration_since(prev_time).unwrap(),
-        None => timestamp.duration_since(SystemTime::UNIX_EPOCH).unwrap(),
-    };
-    unsafe {
-        PREVIOUS_TIME = Some(timestamp);
-    };
-    unsafe {
-        FPS_HISTORY[FPS_INDEX] = (NSEC_PER_SEC as u128 / frame_time.as_nanos()) as i32;
-    };
-    unsafe {
-        FPS_INDEX = (FPS_INDEX + 1) % 30;
-    };
-
-    let mut fps = 0;
-    unsafe {
-        for fps_history in &FPS_HISTORY {
-            fps += fps_history;
-        }
-    }
-    fps /= 30;
-    fps
-}
-
 pub struct Box2D {
-    #[doc = " left-most pixel coordinate of the bounding box."]
+    #[doc = " left-most coordinate of the bounding box."]
     pub xmin: f64,
-    #[doc = " top-most pixel coordinate of the bounding box."]
+    #[doc = " top-most coordinate of the bounding box."]
     pub ymin: f64,
-    #[doc = " right-most pixel coordinate of the bounding box."]
+    #[doc = " right-most coordinate of the bounding box."]
     pub xmax: f64,
-    #[doc = " bottom-most pixel coordinate of the bounding box."]
+    #[doc = " bottom-most coordinate of the bounding box."]
     pub ymax: f64,
     #[doc = " model-specific score for this detection, higher implies more confidence."]
     pub score: f64,
+    #[doc = " index of label for this detection"]
+    pub index: i32,
     #[doc = " label for this detection"]
     pub label: String,
+    #[doc = " timestamp"]
+    pub ts: u64,
+    #[doc = " tracking information for this detection"]
+    pub track: Option<Track>,
 }
 
+pub struct Track {
+    #[doc = " track UUID for this detection"]
+    pub uuid: Uuid,
+    #[doc = " number of detects this track has been seen for"]
+    pub count: i32,
+    #[doc = " when this track was first added"]
+    pub created: u64,
+}
 fn vaalbox_to_box2d(
     s: &Settings,
     b: &VAALBox,
     model: &Context,
-    stream_width: f64,
-    stream_height: f64,
+    ts: u64,
+    track: &Option<TrackInfo>,
 ) -> Box2D {
     let label_ind = b.label + s.label_offset;
-    let label = match s.labels {
-        LabelSetting::Index => label_ind.to_string(),
-        LabelSetting::Score => format!("{:.2}", b.score),
-        LabelSetting::Label => match model.label(label_ind) {
-            Ok(s) => String::from(s),
-            Err(_) => b.label.to_string(),
-        },
-        LabelSetting::LabelScore => {
-            format!(
-                "{} {:.2}",
-                match model.label(label_ind) {
-                    Ok(s) => String::from(s),
-                    Err(_) => label_ind.to_string(),
-                },
-                b.score
-            )
-        }
+    let label = match model.label(label_ind) {
+        Ok(s) => String::from(s),
+        Err(_) => b.label.to_string(),
     };
+
     trace!("Created box with label {}", label);
+    let track_info = track.as_ref().map(|v| Track {
+        uuid: v.uuid,
+        count: v.count,
+        created: v.created,
+    });
+
     Box2D {
-        xmin: b.xmin as f64 * stream_width,
-        ymin: b.ymin as f64 * stream_height,
-        xmax: b.xmax as f64 * stream_width,
-        ymax: b.ymax as f64 * stream_height,
+        xmin: b.xmin as f64,
+        ymin: b.ymin as f64,
+        xmax: b.xmax as f64,
+        ymax: b.ymax as f64,
         score: b.score as f64,
         label,
+        ts,
+        index: b.label,
+        track: track_info,
     }
 }
 
 async fn heart_beat<'a>(
     sub_camera: FlumeSubscriber<'a>,
     publ_detect: Publisher<'_>,
+    publ_model_info: Publisher<'_>,
+    publ_visual: Option<Publisher<'_>>,
     rx: Receiver<bool>,
-    msg: String,
-    stream_width: f64,
-    stream_height: f64,
+    model_path: PathBuf,
+    stream_dims: (f64, f64),
 ) -> FlumeSubscriber<'a> {
+    let mut model_info_msg = build_model_info_msg(time_from_ns(0u32), None, None, &model_path);
+    let msg = format!("Loading Model: {}", model_path.to_string_lossy());
     loop {
         match rx.try_recv() {
             Ok(_) => return sub_camera,
@@ -731,8 +705,7 @@ async fn heart_beat<'a>(
             },
         }
         let _ = sub_camera.drain();
-        let mut dma_buf: DeepviewDMABuf = match sub_camera.recv_timeout(Duration::from_millis(1000))
-        {
+        let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(Duration::from_millis(100)) {
             Ok(v) => match cdr::deserialize(&v.payload.contiguous()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -752,17 +725,17 @@ async fn heart_beat<'a>(
         };
         trace!("Recieved camera frame");
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.src_pid as i32) {
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
             Err(e) => {
                 error!(
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.src_pid, e
+                    dma_buf.pid, e
                 );
                 continue;
             }
         };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.dma_fd, GetFdFlags::empty()) {
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
             Ok(v) => v,
             Err(e) => {
                 error!(
@@ -772,24 +745,23 @@ async fn heart_beat<'a>(
                 continue;
             }
         };
-        dma_buf.dma_fd = fd.as_raw_fd();
+        dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
-
-        let image_annotations = build_image_annotations_msg(
+        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+            Ok(t) => t.num_nanoseconds() as u64,
+            Err(e) => {
+                error!("Could not get Monotonic clock time: {:?}", e);
+                0
+            }
+        };
+        let detect = build_detect_msg_and_encode(
             &Vec::new(),
-            dma_buf.header.stamp,
-            stream_width,
-            stream_height,
-            &msg,
+            dma_buf.header.stamp.clone(),
+            time_from_ns(0u32),
+            time_from_ns(curr_time),
         );
 
-        let encoded =
-            Value::from(cdr::serialize::<_, _, CdrLe>(&image_annotations, Infinite).unwrap())
-                .encoding(Encoding::WithSuffix(
-                    KnownEncoding::AppOctetStream,
-                    "foxglove_msgs/msg/ImageAnnotations".into(),
-                ));
-        match publ_detect.put(encoded).res_sync() {
+        match publ_detect.put(detect).res_sync() {
             Ok(_) => (),
             Err(e) => {
                 error!(
@@ -797,6 +769,42 @@ async fn heart_beat<'a>(
                     publ_detect.key_expr(),
                     e
                 )
+            }
+        }
+
+        let model_info =
+            update_model_info_msg_and_encode(dma_buf.header.stamp.clone(), &mut model_info_msg);
+        match publ_model_info.put(model_info).res_sync() {
+            Ok(_) => (),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_model_info.key_expr(),
+                    e
+                )
+            }
+        }
+
+        if publ_visual.is_some() {
+            let publ_visual = publ_visual.as_ref().unwrap();
+            let annotations = build_image_annotations_msg_and_encode(
+                &Vec::new(),
+                dma_buf.header.stamp.clone(),
+                stream_dims.0,
+                stream_dims.1,
+                &msg,
+                LabelSetting::Index,
+            );
+
+            match publ_visual.put(annotations).res_async().await {
+                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
+                }
             }
         }
     }
