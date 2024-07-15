@@ -26,7 +26,7 @@ vaal = "0.3.2"
 zenoh = "0.10.1-rc"
 cdr = "0.2.4"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-edgefirst-schemas = { version = "1.1" }
+edgefirst-schemas = { git = "https://github.com/MaivinAI/schemas.git", branch = "masks" }
 pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
 log = { version = "0.4", features = ["release_max_level_debug"] }
@@ -39,3 +39,7 @@ nix = { version = "0.28.0", features = ["time"] }
 [[bin]]
 name = "maivin-detect"
 path = "src/main.rs"
+
+[[bin]]
+name = "maivin-segmentation"
+path = "src/segmentation/main.rs"
