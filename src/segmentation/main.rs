@@ -6,8 +6,8 @@ use buildsegmentationmsgs::{
     build_model_info_msg, build_segmentation_msg, time_from_ns, update_model_info_msg_and_encode,
 };
 use clap::Parser;
-use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
-use log::{debug, error, info, trace, warn};
+use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf};
+use log::{debug, error, info, trace};
 use nix::{
     sys::time::TimeValLike,
     time::{clock_gettime, ClockId},
@@ -17,13 +17,11 @@ use setup::Settings;
 use std::{
     os::fd::AsRawFd,
     path::PathBuf,
-    process::Command,
     str::FromStr,
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
-use uuid::Uuid;
-use vaal::{self, Context, VAALBox};
+use vaal::{self, Context};
 use zenoh::{
     config::Config,
     prelude::{r#async::*, sync::SyncResolve},
@@ -37,7 +35,7 @@ const NSEC_PER_MSEC: i64 = 1_000_000;
 
 #[async_std::main]
 async fn main() {
-    let mut s = Settings::parse();
+    let s = Settings::parse();
     env_logger::init();
     let mut first_run = true;
 
@@ -93,9 +91,6 @@ async fn main() {
         }
     };
 
-    let stream_width: f64;
-    let stream_height: f64;
-
     let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
         .res_async()
@@ -146,17 +141,9 @@ async fn main() {
     let mut model_info_msg =
         build_model_info_msg(time_from_ns(0u32), Some(&mut backbone), None, &s.model);
     let sub_camera = heartbeat.await;
-
-    let model_name = match s.model.as_path().file_name() {
-        Some(v) => String::from(v.to_string_lossy()),
-        None => {
-            warn!("Cannot determine model file basename");
-            String::from("unknown_model_file")
-        }
-    };
     let timeout = Duration::from_millis(100);
     let mut fps = fps::Fps::<90>::default();
-
+    let mut start = Instant::now();
     loop {
         let _ = sub_camera.drain();
         let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
@@ -178,7 +165,8 @@ async fn main() {
             }
         };
         trace!("Recieved camera frame");
-
+        debug!("{:?} since last inference", start.elapsed());
+        start = Instant::now();
         let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
             Err(e) => {
@@ -213,7 +201,7 @@ async fn main() {
                 return;
             }
         };
-        let model_duration = model_start.elapsed().as_nanos();
+        let _model_duration = model_start.elapsed().as_nanos();
 
         if first_run {
             info!(
@@ -222,17 +210,24 @@ async fn main() {
             );
             first_run = false;
         }
-        let timestamp =
+        let _timestamp =
             dma_buf.header.stamp.nanosec as u64 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
 
-        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+        let _curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
             Ok(t) => t.num_nanoseconds() as u64,
             Err(e) => {
                 error!("Could not get Monotonic clock time: {:?}", e);
                 0
             }
         };
+        trace!("Model took {} ms", _model_duration as f64 / 1e6);
+        let msg_start = Instant::now();
         let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&mut backbone));
+        trace!(
+            "Msg serialization took {} ms",
+            msg_start.elapsed().as_millis()
+        );
+        let publ_start = Instant::now();
         match publ_detect.put(mask).res_async().await {
             Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
             Err(e) => {
@@ -243,6 +238,7 @@ async fn main() {
                 )
             }
         }
+        trace!("Msg sending took {} ms", publ_start.elapsed().as_millis());
 
         let model_info =
             update_model_info_msg_and_encode(dma_buf.header.stamp, &mut model_info_msg);
@@ -574,7 +570,7 @@ async fn heart_beat<'a>(
     model_path: PathBuf,
 ) -> FlumeSubscriber<'a> {
     let mut model_info_msg = build_model_info_msg(time_from_ns(0u32), None, None, &model_path);
-    let msg = format!("Loading Model: {}", model_path.to_string_lossy());
+    debug!("Loading Model: {}", model_path.to_string_lossy());
     loop {
         match rx.try_recv() {
             Ok(_) => return sub_camera,
@@ -629,13 +625,6 @@ check if current process is running with same permissions as camera:
         };
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
-        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
-            Ok(t) => t.num_nanoseconds() as u64,
-            Err(e) => {
-                error!("Could not get Monotonic clock time: {:?}", e);
-                0
-            }
-        };
         let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None);
 
         match publ_detect.put(mask).res_sync() {

@@ -1,50 +1,19 @@
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use cdr::{CdrLe, Infinite};
 use deepviewrt::tensor::TensorType;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, Mask, ModelInfo},
-    foxglove_msgs::{
-        point_annotation_type::{LINE_LOOP, UNKNOWN},
-        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
-        FoxgloveTextAnnotations,
-    },
+    edgefirst_msgs::{model_info, Mask, ModelInfo},
     std_msgs::Header,
 };
-use log::debug;
+use log::{debug, error, trace};
 use vaal::Context;
 use zenoh::{
     prelude::{Encoding, KnownEncoding},
     value::Value,
 };
 
-const WHITE: FoxgloveColor = FoxgloveColor {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
-const TRANSPARENT: FoxgloveColor = FoxgloveColor {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 0.0,
-};
-
-fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
-    const BYTES_PER_CHANNEL: u8 = 8;
-    const FACTOR: u32 = (1 << BYTES_PER_CHANNEL) - 1;
-
-    // only use the first 32 bits
-    let hexcode = (hexcode >> (128 - (4 * BYTES_PER_CHANNEL))) as u32;
-    FoxgloveColor {
-        r: ((hexcode >> (BYTES_PER_CHANNEL * 3)) & FACTOR) as f64 / FACTOR as f64,
-        g: ((hexcode >> (BYTES_PER_CHANNEL * 2)) & FACTOR) as f64 / FACTOR as f64,
-        b: ((hexcode >> BYTES_PER_CHANNEL) & FACTOR) as f64 / FACTOR as f64,
-        a: 1.0,
-    }
-}
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     let ts: u128 = ts.into();
     Time {
@@ -99,16 +68,28 @@ fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
     (input_shape, input_type)
 }
 
-pub fn build_segmentation_msg(in_time: Time, model_ctx: Option<&mut Context>) -> Value {
+pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -> Value {
     let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-    let mut mask = Vec::new();
-    if let Some(model) = model_ctx {
+    let clone_start = Instant::now();
+    let mask = if let Some(model) = model_ctx {
         if let Some(tensor) = model.output_tensor(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
             let data = tensor.mapro_u8().unwrap();
-            mask.clone_from_slice(&(*data));
+            let len = data.len();
+            let mut buffer = vec![0; len];
+
+            buffer.copy_from_slice(&(*data));
+
+            buffer
+        } else {
+            error!("Did not find model output");
+            Vec::new()
         }
-    }
+    } else {
+        Vec::new()
+    };
+    debug!("Clone takes {:?}", clone_start.elapsed());
+    let mask_start = Instant::now();
     let msg = Mask {
         height: output_shape[1],
         width: output_shape[2],
@@ -116,12 +97,16 @@ pub fn build_segmentation_msg(in_time: Time, model_ctx: Option<&mut Context>) ->
         encoding: "".to_string(),
         mask,
     };
-    Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+    debug!("Making mask struct takes {:?}", mask_start.elapsed());
+    let serialization_start = Instant::now();
+    let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
         Encoding::WithSuffix(
             KnownEncoding::AppOctetStream,
             "edgefirst_msgs/msg/Mask".into(),
         ),
-    )
+    );
+    debug!("Serialization takes {:?}", serialization_start.elapsed());
+    return val;
 }
 
 pub fn build_model_info_msg(
