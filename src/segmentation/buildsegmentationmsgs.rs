@@ -1,4 +1,4 @@
-use std::{path::Path, time::Instant};
+use std::{ops::Deref, path::Path, time::Instant};
 
 use cdr::{CdrLe, Infinite};
 use deepviewrt::tensor::TensorType;
@@ -8,6 +8,7 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use log::{debug, error, trace};
+use serde::{Deserialize, Serialize};
 use vaal::Context;
 use zenoh::{
     prelude::{Encoding, KnownEncoding},
@@ -68,7 +69,7 @@ fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
     (input_shape, input_type)
 }
 
-pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -> Value {
+pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -> Mask {
     let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
     let clone_start = Instant::now();
     let mask = if let Some(model) = model_ctx {
@@ -77,9 +78,7 @@ pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -
             let data = tensor.mapro_u8().unwrap();
             let len = data.len();
             let mut buffer = vec![0; len];
-
             buffer.copy_from_slice(&(*data));
-
             buffer
         } else {
             error!("Did not find model output");
@@ -98,15 +97,15 @@ pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -
         mask,
     };
     debug!("Making mask struct takes {:?}", mask_start.elapsed());
-    let serialization_start = Instant::now();
-    let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "edgefirst_msgs/msg/Mask".into(),
-        ),
-    );
-    debug!("Serialization takes {:?}", serialization_start.elapsed());
-    return val;
+    // let serialization_start = Instant::now();
+    // let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg,
+    // Infinite).unwrap()).encoding(     Encoding::WithSuffix(
+    //         KnownEncoding::AppOctetStream,
+    //         "edgefirst_msgs/msg/Mask".into(),
+    //     ),
+    // );
+    // debug!("Serialization takes {:?}", serialization_start.elapsed());
+    return msg;
 }
 
 pub fn build_model_info_msg(
