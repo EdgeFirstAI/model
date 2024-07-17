@@ -98,7 +98,7 @@ async fn main() {
         .unwrap();
     info!("Declared subscriber on {:?}", &s.camera_topic);
     let (mask_tx, mask_rx) = mpsc::channel();
-    spawn(serialize_and_publish(mask_rx, publ_detect));
+    spawn(serialize_and_publish(mask_rx, publ_detect, s.compression));
     let (heartbeat_tx, heartbeat_rx) = mpsc::channel();
     let heartbeat = spawn(heart_beat(
         sub_camera,
@@ -365,12 +365,20 @@ check if current process is running with same permissions as camera:
     }
 }
 
-async fn serialize_and_publish<T: Serialize>(rx: Receiver<T>, publ_detect: Publisher<'_>) {
+async fn serialize_and_publish(rx: Receiver<Mask>, publ_detect: Publisher<'_>, compression: bool) {
     loop {
-        let msg = match rx.recv() {
+        let mut msg = match rx.recv() {
             Ok(v) => v,
             Err(_) => return,
         };
+
+        if compression {
+            let compression_start = Instant::now();
+            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
+            msg.encoding = "zstd".to_string();
+            trace!("Compression takes {:?}", compression_start.elapsed());
+        }
+
         let serialization_start = Instant::now();
         let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
             Encoding::WithSuffix(

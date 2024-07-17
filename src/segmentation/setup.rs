@@ -44,4 +44,8 @@ pub struct Settings {
     /// engine for model context
     #[arg(long, env, default_value = "npu")]
     pub engine: String,
+
+    /// To use compression or not
+    #[arg(long, env)]
+    pub compression: bool,
 }

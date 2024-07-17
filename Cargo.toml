@@ -35,6 +35,7 @@ lapjv = "0.2.1"
 uuid = { version = "1.5.0", features = ["v4"] }
 nalgebra = "0.32"
 nix = { version = "0.28.0", features = ["time"] }
+zstd = "0.13"
 
 [[bin]]
 name = "maivin-detect"
