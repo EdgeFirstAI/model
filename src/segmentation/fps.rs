@@ -40,7 +40,7 @@ impl<const N: usize> Fps<N> {
     /// Update the FPS calculation and return the average FPS over the last N
     /// calls to this function.  Over the first N calls to this function the
     /// value will ramp up over N frames to the true average FPS.
-    pub fn update(&mut self) -> i32 {
+    pub fn update(&mut self) -> f32 {
         let timestamp = SystemTime::now();
         let frame_time = timestamp
             .duration_since(self.previous)
@@ -48,11 +48,11 @@ impl<const N: usize> Fps<N> {
         self.previous = timestamp;
         self.history[self.index] = (NSEC_PER_SEC as u128 / frame_time.as_nanos()) as i32;
         self.index = (self.index + 1) % N;
-        let fps = self.history.iter().sum::<i32>() / N as i32;
+        let fps = self.history.iter().sum::<i32>() as f32 / N as f32;
 
         if self.index == 0 {
             log::debug!(
-                "FPS AVG: {} MIN: {} MAX: {}",
+                "FPS AVG: {:.2} MIN: {} MAX: {}",
                 fps,
                 self.history.iter().min().unwrap(),
                 self.history.iter().max().unwrap()

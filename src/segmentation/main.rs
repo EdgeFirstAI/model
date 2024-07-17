@@ -6,16 +6,12 @@ use buildsegmentationmsgs::{
     build_model_info_msg, build_segmentation_msg, time_from_ns, update_model_info_msg_and_encode,
 };
 use cdr::{CdrLe, Infinite};
-use clap::{error, Parser};
+use clap::Parser;
 use edgefirst_schemas::{
     self,
     edgefirst_msgs::{DmaBuf, Mask},
 };
 use log::{debug, error, info, trace};
-use nix::{
-    sys::time::TimeValLike,
-    time::{clock_gettime, ClockId},
-};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use serde::Serialize;
 use setup::Settings;
@@ -23,7 +19,7 @@ use std::{
     os::fd::AsRawFd,
     path::PathBuf,
     str::FromStr,
-    sync::mpsc::{self, Receiver, RecvError, Sender, TryRecvError},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
     time::{Duration, Instant},
 };
 use vaal::{self, Context};
@@ -36,7 +32,6 @@ use zenoh::{
 mod buildsegmentationmsgs;
 mod fps;
 mod setup;
-const NSEC_PER_MSEC: i64 = 1_000_000;
 
 #[async_std::main]
 async fn main() {
@@ -171,7 +166,7 @@ async fn main() {
             }
         };
         trace!("Recieved camera frame");
-        debug!("{:?} since last inference", start.elapsed());
+        trace!("{:?} since last inference", start.elapsed());
         start = Instant::now();
         let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
             Ok(v) => v,
@@ -200,14 +195,14 @@ async fn main() {
         dma_buf.fd = fd.as_raw_fd();
         trace!("Opened DMA buffer from camera");
         let model_start = Instant::now();
-        let n_boxes = match run_model(&dma_buf, &backbone, fps.update()) {
-            Ok(boxes) => boxes,
+        match run_model(&dma_buf, &backbone, fps.update()) {
+            Ok(_) => {}
             Err(e) => {
                 error!("Failed to run model: {:?}", e);
                 return;
             }
         };
-        let model_duration = model_start.elapsed().as_nanos();
+        let model_duration = model_start.elapsed();
 
         if first_run {
             info!(
@@ -226,18 +221,18 @@ async fn main() {
         //         0
         //     }
         // };
-        trace!("Model took {} ms", model_duration as f64 / 1e6);
+        trace!("Model took {:?}", model_duration);
         let msg_start = Instant::now();
         let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&mut backbone));
-        trace!("Msg build took {} ms", msg_start.elapsed().as_millis());
+        trace!("Msg build took {:?}", msg_start.elapsed());
         let publ_start = Instant::now();
         if let Err(e) = mask_tx.send(mask) {
             error!("Publishing thread is not active: {:?}", e);
             return;
         }
-        debug!(
-            "Msg going to publishing thread took {} ms",
-            publ_start.elapsed().as_millis()
+        trace!(
+            "Msg going to publishing thread took {:?}",
+            publ_start.elapsed()
         );
 
         let model_info =
@@ -256,8 +251,8 @@ async fn main() {
 }
 
 #[inline(always)]
-fn run_model(dma_buf: &DmaBuf, backbone: &vaal::Context, fps: i32) -> Result<(), String> {
-    let start = vaal::clock_now();
+fn run_model(dma_buf: &DmaBuf, backbone: &vaal::Context, fps: f32) -> Result<(), String> {
+    let start = Instant::now();
     match backbone.load_frame_dmabuf(
         None,
         dma_buf.fd,
@@ -272,18 +267,16 @@ fn run_model(dma_buf: &DmaBuf, backbone: &vaal::Context, fps: i32) -> Result<(),
             trace!("Loaded frame into model");
         }
     };
-    let load_ns = vaal::clock_now() - start;
+    let load_time = start.elapsed();
 
-    let start = vaal::clock_now();
+    let start = Instant::now();
     if let Err(e) = backbone.run_model() {
         return Err(format!("Failed to run model: {}", e));
     }
-    let model_ns = vaal::clock_now() - start;
+    let model_time = start.elapsed();
     trace!(
-        "Model: FPS: {:>3}, load: {:>2.3} ms, infer: {:>2.3} ms",
-        fps,
-        load_ns as f64 / NSEC_PER_MSEC as f64,
-        model_ns as f64 / NSEC_PER_MSEC as f64,
+        "Model: FPS: {:.2}, load: {:?} ms, infer: {:?} ms",
+        fps, load_time, model_time,
     );
     Ok(())
 }
@@ -376,7 +369,7 @@ async fn serialize_and_publish<T: Serialize>(rx: Receiver<T>, publ_detect: Publi
     loop {
         let msg = match rx.recv() {
             Ok(v) => v,
-            Err(e) => return,
+            Err(_) => return,
         };
         let serialization_start = Instant::now();
         let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
@@ -385,7 +378,7 @@ async fn serialize_and_publish<T: Serialize>(rx: Receiver<T>, publ_detect: Publi
                 "edgefirst_msgs/msg/Mask".into(),
             ),
         );
-        debug!("Serialization takes {:?}", serialization_start.elapsed());
+        trace!("Serialization takes {:?}", serialization_start.elapsed());
 
         let publ_start = Instant::now();
         match publ_detect.put(val).res_async().await {
@@ -398,6 +391,6 @@ async fn serialize_and_publish<T: Serialize>(rx: Receiver<T>, publ_detect: Publi
                 )
             }
         }
-        debug!("Msg sending took {:?}", publ_start.elapsed());
+        trace!("Msg sending took {:?}", publ_start.elapsed());
     }
 }

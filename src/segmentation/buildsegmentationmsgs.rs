@@ -1,4 +1,4 @@
-use std::{ops::Deref, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 use cdr::{CdrLe, Infinite};
 use deepviewrt::tensor::TensorType;
@@ -8,7 +8,6 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use log::{debug, error, trace};
-use serde::{Deserialize, Serialize};
 use vaal::Context;
 use zenoh::{
     prelude::{Encoding, KnownEncoding},
@@ -87,7 +86,7 @@ pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -
     } else {
         Vec::new()
     };
-    debug!("Clone takes {:?}", clone_start.elapsed());
+    trace!("Clone takes {:?}", clone_start.elapsed());
     let mask_start = Instant::now();
     let msg = Mask {
         height: output_shape[1],
@@ -96,15 +95,7 @@ pub fn build_segmentation_msg(_in_time: Time, model_ctx: Option<&mut Context>) -
         encoding: "".to_string(),
         mask,
     };
-    debug!("Making mask struct takes {:?}", mask_start.elapsed());
-    // let serialization_start = Instant::now();
-    // let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg,
-    // Infinite).unwrap()).encoding(     Encoding::WithSuffix(
-    //         KnownEncoding::AppOctetStream,
-    //         "edgefirst_msgs/msg/Mask".into(),
-    //     ),
-    // );
-    // debug!("Serialization takes {:?}", serialization_start.elapsed());
+    trace!("Making mask struct takes {:?}", mask_start.elapsed());
     return msg;
 }
 
