@@ -13,7 +13,6 @@ use edgefirst_schemas::{
 };
 use log::{debug, error, info, trace};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use serde::Serialize;
 use setup::Settings;
 use std::{
     os::fd::AsRawFd,
