@@ -5,6 +5,7 @@ use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
 use vaal::VAALBox;
 
+#[allow(dead_code)]
 pub struct ByteTrack {
     // tracklets;
     pub tracklets: Vec<Tracklet>,

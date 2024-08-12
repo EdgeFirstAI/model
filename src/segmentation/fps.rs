@@ -3,8 +3,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const NSEC_PER_SEC: i64 = 1_000_000_000;
-
 /// A simple struct to calculate the average FPS over the last N frames.  To
 /// use, call the `update` method once per frame which returns the average FPS
 /// over the last N frames.
