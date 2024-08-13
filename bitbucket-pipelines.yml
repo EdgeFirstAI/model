@@ -13,6 +13,7 @@ definitions:
         name: Build
         runs-on:
           - 'self.hosted'
+        size: 2x
         caches:
           - apt-archives
           - cargo
