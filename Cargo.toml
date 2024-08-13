@@ -42,5 +42,5 @@ name = "maivin-detect"
 path = "src/main.rs"
 
 [[bin]]
-name = "maivin-segmentation"
+name = "maivin-segment"
 path = "src/segmentation/main.rs"

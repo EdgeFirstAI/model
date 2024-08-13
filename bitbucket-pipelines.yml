@@ -38,6 +38,7 @@ definitions:
           - cargo sonar --issues clippy,audit,outdated
         artifacts:
           - target/aarch64-unknown-linux-gnu/release/maivin-detect
+          - target/aarch64-unknown-linux-gnu/release/maivin-segment
           - sonar-issues.json
     - step: &sonar
         name: Code Sonar
@@ -68,11 +69,12 @@ pipelines:
           deployment: Production
           script:
             - cp target/aarch64-unknown-linux-gnu/release/maivin-detect maivin-detect-$BITBUCKET_TAG
+            - cp target/aarch64-unknown-linux-gnu/release/maivin-segment maivin-segment-$BITBUCKET_TAG
             - pipe: atlassian/bitbucket-upload-file:0.7.1
               variables:
                 BITBUCKET_USERNAME: au-zone-ci
                 BITBUCKET_APP_PASSWORD: $BITBUCKET_PASSWORD
-                FILENAME: "maivin-detect-$BITBUCKET_TAG"
+                FILENAME: "maivin-*-$BITBUCKET_TAG"
             - pipe: atlassian/aws-s3-deploy:1.6.0
               variables:
                 AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
@@ -80,4 +82,4 @@ pipelines:
                 AWS_DEFAULT_REGION: 'us-west-2'
                 S3_BUCKET: "maivin/services/detect"
                 LOCAL_PATH: "."
-                EXTRA_ARGS: "--exclude=* --include=maivin-detect-$BITBUCKET_TAG"
+                EXTRA_ARGS: "--exclude=* --include=maivin-*-$BITBUCKET_TAG"
