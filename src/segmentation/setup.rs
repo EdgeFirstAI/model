@@ -17,7 +17,7 @@ pub struct Settings {
     #[arg(short, long, default_value = "rt/camera/dma")]
     pub camera_topic: String,
 
-    /// zenoh key expression for publishing detection results
+    /// zenoh key expression for publishing mask results
     #[arg(short, long, default_value = "rt/detect/mask")]
     pub detect_topic: String,
 
@@ -45,7 +45,11 @@ pub struct Settings {
     #[arg(long, env, default_value = "npu")]
     pub engine: String,
 
-    /// To use compression or not
+    /// Enables publishing compressed mask
     #[arg(long, env)]
     pub compression: bool,
+
+    /// zenoh key expression for publishing compressed mask results
+    #[arg(short, long, default_value = "rt/detect/mask_compressed")]
+    pub detect_compressed_topic: String,
 }

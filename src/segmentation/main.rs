@@ -90,6 +90,25 @@ async fn main() {
         }
     };
 
+    let publ_detect_compressed = if s.compression {
+        match session
+            .declare_publisher(s.detect_compressed_topic.clone())
+            .res_async()
+            .await
+        {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error!(
+                    "Error while declaring detection publisher {}: {:?}",
+                    s.detect_topic, e
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let sub_camera: FlumeSubscriber<'_> = session
         .declare_subscriber(&s.camera_topic)
         .res_async()
@@ -97,7 +116,11 @@ async fn main() {
         .unwrap();
     info!("Declared subscriber on {:?}", &s.camera_topic);
     let (mask_tx, mask_rx) = mpsc::channel();
-    spawn(serialize_and_publish(mask_rx, publ_detect, s.compression));
+    spawn(serialize_and_publish(
+        mask_rx,
+        publ_detect,
+        publ_detect_compressed,
+    ));
     let (heartbeat_tx, heartbeat_rx) = mpsc::channel();
     let heartbeat = spawn(heart_beat(
         sub_camera,
@@ -364,19 +387,16 @@ check if current process is running with same permissions as camera:
     }
 }
 
-async fn serialize_and_publish(rx: Receiver<Mask>, publ_detect: Publisher<'_>, compression: bool) {
+async fn serialize_and_publish(
+    rx: Receiver<Mask>,
+    publ_detect: Publisher<'_>,
+    publ_detect_compressed: Option<Publisher<'_>>,
+) {
     loop {
         let mut msg = match rx.recv() {
             Ok(v) => v,
             Err(_) => return,
         };
-
-        if compression {
-            let compression_start = Instant::now();
-            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
-            msg.encoding = "zstd".to_string();
-            trace!("Compression takes {:?}", compression_start.elapsed());
-        }
 
         let serialization_start = Instant::now();
         let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
@@ -399,5 +419,38 @@ async fn serialize_and_publish(rx: Receiver<Mask>, publ_detect: Publisher<'_>, c
             }
         }
         trace!("Msg sending took {:?}", publ_start.elapsed());
+
+        if publ_detect_compressed.is_some() {
+            let publ_detect_compressed = publ_detect_compressed.as_ref().unwrap();
+            let compression_start = Instant::now();
+            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
+            msg.encoding = "zstd".to_string();
+            trace!("Compression takes {:?}", compression_start.elapsed());
+
+            let serialization_start = Instant::now();
+            let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+                Encoding::WithSuffix(
+                    KnownEncoding::AppOctetStream,
+                    "edgefirst_msgs/msg/Mask".into(),
+                ),
+            );
+            trace!("Serialization takes {:?}", serialization_start.elapsed());
+
+            let publ_start = Instant::now();
+            match publ_detect_compressed.put(val).res_async().await {
+                Ok(_) => trace!(
+                    "Sent Detect message on {}",
+                    publ_detect_compressed.key_expr()
+                ),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect_compressed.key_expr(),
+                        e
+                    )
+                }
+            }
+            trace!("Msg sending took {:?}", publ_start.elapsed());
+        }
     }
 }
