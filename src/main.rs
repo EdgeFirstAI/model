@@ -10,11 +10,10 @@ use async_pidfd::PidFd;
 use async_std::task::spawn;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use deepviewrt::model::Model;
 use edgefirst_schemas::{
     self,
     builtin_interfaces::Time,
-    edgefirst_msgs::{DmaBuf, Mask, Model as ModelMsg},
+    edgefirst_msgs::{DmaBuf, Mask},
     sensor_msgs::CameraInfo,
 };
 use log::{debug, error, info, trace, warn};
@@ -42,8 +41,6 @@ use zenoh::{
 };
 
 mod fps;
-
-const NSEC_PER_MSEC: i64 = 1_000_000;
 
 struct ModelType {
     segment_output_ind: Option<i32>,
@@ -400,7 +397,6 @@ async fn main() {
             let mut new_boxes = Vec::new();
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            let decode_start = Instant::now();
             track_boxes(
                 model,
                 &mut vaal_boxes,
@@ -519,7 +515,6 @@ fn run_model(
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
 ) -> Result<(), String> {
-    let start = vaal::clock_now();
     match backbone.load_frame_dmabuf(
         None,
         dma_buf.fd,
@@ -566,18 +561,12 @@ fn run_model(
             trace!("Loaded frame into model");
         }
     };
-    let load_ns = vaal::clock_now() - start;
 
-    let start = vaal::clock_now();
     if let Err(e) = backbone.run_model() {
         return Err(format!("Failed to run model: {}", e));
     }
-    let model_ns = vaal::clock_now() - start;
     trace!("Ran model inference");
 
-    let decoder_ns;
-
-    let start = vaal::clock_now();
     if decoder.is_some() {
         let decoder_: &mut Context = decoder.as_mut().unwrap();
         let model = match decoder_.model() {
@@ -620,7 +609,6 @@ fn run_model(
         }
         trace!("Copied backdone out_1 to decoder in_1");
 
-        let start = vaal::clock_now();
         let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
 
         if let Err(e) = out_2.dequantize(in_2) {
@@ -636,7 +624,6 @@ fn run_model(
         if let Err(e) = decoder_.run_model() {
             return Err(format!("Failed to run decoder model: {:?}", e));
         }
-        decoder_ns = vaal::clock_now() - start;
         trace!("Ran decoder model inference");
     }
 

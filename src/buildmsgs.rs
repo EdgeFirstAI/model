@@ -317,8 +317,13 @@ pub fn build_model_info_msg(
         None => String::from("Loading Model..."),
     };
     debug!("Model name = {}", model_name);
-    let model_type = String::from("Detection");
-
+    let mut model_types = Vec::new();
+    if model_type.segment_output_ind.is_some() {
+        model_types.push("Segmentation".to_string());
+    }
+    if model_type.detection {
+        model_types.push("Detection".to_string());
+    }
     let (input_shape, input_type) = get_input_info(model_ctx);
 
     ModelInfo {
@@ -333,7 +338,7 @@ pub fn build_model_info_msg(
         output_type,
         model_format,
         model_name,
-        model_type,
+        model_type: model_types.join(";"),
     }
 }
 
