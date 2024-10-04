@@ -15,16 +15,24 @@ pub enum LabelSetting {
 #[command(author, version, about, long_about = None)]
 pub struct Settings {
     /// zenoh key expression for camera DMA buffers
-    #[arg(short, long, default_value = "rt/camera/dma")]
+    #[arg(long, default_value = "rt/camera/dma")]
     pub camera_topic: String,
 
     /// zenoh key expression for publishing detection results
-    #[arg(short, long, default_value = "rt/detect/boxes2d")]
+    #[arg(long, default_value = "rt/model/boxes2d")]
     pub detect_topic: String,
 
     /// zenoh key expression for publishing model info
-    #[arg(long, default_value = "rt/detect/info")]
+    #[arg(long, default_value = "rt/model/info")]
     pub info_topic: String,
+
+    /// zenoh key expression for publishing mask results
+    #[arg(long, default_value = "rt/model/mask")]
+    pub mask_topic: String,
+
+    /// zenoh key expression for publishing compressed mask results
+    #[arg(long, default_value = "rt/model/mask_compressed")]
+    pub mask_compressed_topic: String,
 
     /// connect to zenoh endpoints
     #[arg(long, default_value = "tcp/127.0.0.1:7447")]
@@ -105,6 +113,10 @@ pub struct Settings {
     /// resolution info topic, needed for visualization message type
     #[arg(long, default_value = "rt/camera/info")]
     pub camera_info_topic: String,
+
+    /// Enables publishing compressed mask
+    #[arg(long, env)]
+    pub mask_compression: bool,
 }
 
 pub fn validate_settings(s: &mut Settings) {

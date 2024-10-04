@@ -19,7 +19,7 @@ use zenoh::{
     value::Value,
 };
 
-use crate::{Box2D, LabelSetting};
+use crate::{Box2D, LabelSetting, ModelType};
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -273,6 +273,7 @@ pub fn build_model_info_msg(
     model_ctx: Option<&mut Context>,
     decoder_ctx: Option<&mut Context>,
     path: &Path,
+    model_type: &ModelType,
 ) -> ModelInfo {
     let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
