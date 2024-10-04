@@ -107,7 +107,7 @@ pub struct Settings {
     pub visualization: bool,
 
     /// zenoh key expression for publishing foxglove visualization topic
-    #[arg(long, default_value = "rt/detect/visualization")]
+    #[arg(long, default_value = "rt/model/visualization")]
     pub visual_topic: String,
 
     /// resolution info topic, needed for visualization message type
