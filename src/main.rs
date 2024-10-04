@@ -927,7 +927,10 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
         detection: false,
     };
     // first: check if segmentation -> segmentation if output has 4 dimensions and
-    // the W/H is greater than 16
+    // the W/H is greater than 8
+    // this criteria is wider than the current criteria for MPK segmentation, but
+    // still ensures that detection outputs won't be mistaken for segmentation
+    // output.
     for i in 0..output_count {
         let output = match model.output_tensor(i) {
             Some(v) => v,
@@ -939,10 +942,10 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
         if shape.len() != 4 {
             continue;
         }
-        if shape[1] < 16 {
+        if shape[1] < 8 {
             continue;
         }
-        if shape[2] < 16 {
+        if shape[2] < 8 {
             continue;
         }
         segmentation_index.push(i);
