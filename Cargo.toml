@@ -1,5 +1,5 @@
 [package]
-name = "maivin-detect"
+name = "maivin-model"
 description = "Maivin Detection Service"
 repository = "https://bitbucket.org/au-zone/maivin-detect"
 version = "0.0.0"
@@ -26,7 +26,7 @@ vaal = "0.3.2"
 zenoh = "0.10.1-rc"
 cdr = "0.2.4"
 clap = { version = "4.4.18", features = ["derive", "env"] }
-edgefirst-schemas = { git = "https://github.com/MaivinAI/schemas.git", branch = "masks" }
+edgefirst-schemas = { version = "1.2.3" }
 pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
 log = { version = "0.4", features = ["release_max_level_debug"] }
@@ -38,9 +38,5 @@ nix = { version = "0.28.0", features = ["time"] }
 zstd = "0.13"
 
 [[bin]]
-name = "maivin-detect"
+name = "maivin-model"
 path = "src/main.rs"
-
-[[bin]]
-name = "maivin-segment"
-path = "src/segmentation/main.rs"

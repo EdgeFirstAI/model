@@ -1,11 +1,10 @@
-image: deepview/rust:latest
+image: deepview/rust:1.81.0
 
 clone:
   depth: full
 
 definitions:
   caches:
-    apt-archives: /var/cache/apt/archives
     cargo: /usr/local/cargo
     rust-target: $BITBUCKET_CLONE_DIR/target
   steps:
@@ -15,7 +14,6 @@ definitions:
           - 'self.hosted'
         size: 2x
         caches:
-          - apt-archives
           - cargo
           - rust-target
         script:
@@ -27,24 +25,19 @@ definitions:
               export VERSION=${BITBUCKET_TAG}
             fi
           - sed -i "s/0.0.0/$VERSION/g" Cargo.toml
-          - rm /etc/apt/apt.conf.d/docker-clean
-          - apt-get update
-          - apt-get upgrade -y
-          - cargo binstall -y cargo-sonar@0.19.0 cargo-audit@0.18.2
           - cargo build --target=aarch64-unknown-linux-gnu --config target.aarch64-unknown-linux-gnu.linker=\"aarch64-linux-gnu-gcc\" --release
           - cargo clippy --target=aarch64-unknown-linux-gnu --message-format=json > clippy.json || true
           - cargo audit --json > audit.json || true
           - cargo outdated --depth 1 --format json > outdated.json || true
-          - cargo sonar --issues clippy,audit,outdated
+          - cargo sonar --clippy-path clippy.json --audit-path audit.json --outdated-path outdated.json
         artifacts:
-          - target/aarch64-unknown-linux-gnu/release/maivin-detect
-          - target/aarch64-unknown-linux-gnu/release/maivin-segment
+          - target/aarch64-unknown-linux-gnu/release/maivin-model
           - sonar-issues.json
     - step: &sonar
         name: Code Sonar
         runs-on:
           - 'self.hosted'
-        image: sonarsource/sonar-scanner-cli:latest
+        image: sonarsource/sonar-scanner-cli:11
         script:
           - sonar-scanner
 pipelines:
@@ -68,18 +61,17 @@ pipelines:
           name: Deploy to Production
           deployment: Production
           script:
-            - cp target/aarch64-unknown-linux-gnu/release/maivin-detect maivin-detect-$BITBUCKET_TAG
-            - cp target/aarch64-unknown-linux-gnu/release/maivin-segment maivin-segment-$BITBUCKET_TAG
-            - pipe: atlassian/bitbucket-upload-file:0.7.1
+            - cp target/aarch64-unknown-linux-gnu/release/maivin-model maivin-model-$BITBUCKET_TAG
+            - pipe: atlassian/bitbucket-upload-file:0.7.3
               variables:
                 BITBUCKET_USERNAME: au-zone-ci
                 BITBUCKET_APP_PASSWORD: $BITBUCKET_PASSWORD
                 FILENAME: "maivin-*-$BITBUCKET_TAG"
-            - pipe: atlassian/aws-s3-deploy:1.6.0
+            - pipe: atlassian/aws-s3-deploy:1.6.1
               variables:
                 AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID
                 AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY
                 AWS_DEFAULT_REGION: 'us-west-2'
-                S3_BUCKET: "maivin/services/detect"
+                S3_BUCKET: "maivin/services/model"
                 LOCAL_PATH: "."
                 EXTRA_ARGS: "--exclude=* --include=maivin-*-$BITBUCKET_TAG"

@@ -19,7 +19,7 @@ use zenoh::{
     value::Value,
 };
 
-use crate::{Box2D, LabelSetting};
+use crate::{Box2D, LabelSetting, ModelType};
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -273,6 +273,7 @@ pub fn build_model_info_msg(
     model_ctx: Option<&mut Context>,
     decoder_ctx: Option<&mut Context>,
     path: &Path,
+    model_type: &ModelType,
 ) -> ModelInfo {
     let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
@@ -316,8 +317,13 @@ pub fn build_model_info_msg(
         None => String::from("Loading Model..."),
     };
     debug!("Model name = {}", model_name);
-    let model_type = String::from("Detection");
-
+    let mut model_types = Vec::new();
+    if model_type.segment_output_ind.is_some() {
+        model_types.push("Segmentation".to_string());
+    }
+    if model_type.detection {
+        model_types.push("Detection".to_string());
+    }
     let (input_shape, input_type) = get_input_info(model_ctx);
 
     ModelInfo {
@@ -332,7 +338,7 @@ pub fn build_model_info_msg(
         output_type,
         model_format,
         model_name,
-        model_type,
+        model_type: model_types.join(";"),
     }
 }
 

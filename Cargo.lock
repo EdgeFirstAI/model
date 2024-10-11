@@ -699,8 +699,9 @@ checksum = "0d6ef0072f8a535281e4876be788938b528e9a1d43900b82c2569af7da799125"
 
 [[package]]
 name = "edgefirst-schemas"
-version = "0.0.0"
-source = "git+https://github.com/MaivinAI/schemas.git?branch=masks#3d6a1506ddd1184e9cd26bb8b0ff76752228a9fc"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe4521b93f8f9b7f093b8681f1fb1723d6c2e9c5cc2df1036050285843d115a3"
 dependencies = [
  "serde",
  "serde_derive",
@@ -1362,7 +1363,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "maivin-detect"
+name = "maivin-model"
 version = "0.0.0"
 dependencies = [
  "async-pidfd",
@@ -2350,18 +2351,18 @@ checksum = "92d43fe69e652f3df9bdc2b85b2854a0825b86e4fb76bc44d945137d053639ca"
 
 [[package]]
 name = "serde"
-version = "1.0.198"
+version = "1.0.210"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9846a40c979031340571da2545a4e5b7c4163bdae79b301d5f86d03979451fcc"
+checksum = "c8e3592472072e6e22e0a54d5904d9febf8508f65fb8552499a1abc7d1078c3a"
 dependencies = [
  "serde_derive",
 ]
 
 [[package]]
 name = "serde_derive"
-version = "1.0.198"
+version = "1.0.210"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e88edab869b01783ba905e7d0153f9fc1a6505a96e4ad3018011eedb838566d9"
+checksum = "243902eda00fad750862fc144cea25caca5e20d615af0a81bee94ca738f1df1f"
 dependencies = [
  "proc-macro2",
  "quote",
