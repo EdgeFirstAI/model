@@ -495,7 +495,7 @@ fn track_boxes(
     };
 
     let tracks = if s.track {
-        tracker.update(&s, &mut boxes[0..n_boxes], timestamp)
+        tracker.update(s, &mut boxes[0..n_boxes], timestamp)
     } else {
         vec![None; n_boxes]
     };
@@ -505,7 +505,7 @@ fn track_boxes(
         if s.track && track_info.is_none() {
             continue;
         }
-        new_boxes.push(vaalbox_to_box2d(&s, vaal_box, model, timestamp, track_info));
+        new_boxes.push(vaalbox_to_box2d(s, vaal_box, model, timestamp, track_info));
     }
 }
 
@@ -897,7 +897,7 @@ pub fn build_segmentation_msg(
             let data = tensor.mapro_u8().unwrap();
             let len = data.len();
             let mut buffer = vec![0; len];
-            buffer.copy_from_slice(&(*data));
+            buffer.copy_from_slice(&data);
             buffer
         } else {
             error!("Did not find model output");
@@ -916,7 +916,7 @@ pub fn build_segmentation_msg(
         mask,
     };
     trace!("Making mask struct takes {:?}", mask_start.elapsed());
-    return msg;
+    msg
 }
 
 fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
@@ -953,7 +953,7 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
     if segmentation_index.len() > 1 {
         error!("Found more than 1 valid segmentation output tensors");
     }
-    if segmentation_index.len() > 0 {
+    if !segmentation_index.is_empty() {
         model_type.segment_output_ind = Some(segmentation_index[0]);
         info!("Model has segmentation output");
     }
