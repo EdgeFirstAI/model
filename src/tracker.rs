@@ -30,6 +30,20 @@ impl Tracklet {
         self.prev_boxes = *vaalbox;
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
+
+    pub fn get_predicted_location(&self) -> VAALBox {
+        let predicted_xyah = self.filter.mean.as_slice();
+        let mut expected = VAALBox {
+            xmin: 0.0,
+            xmax: 0.0,
+            ymin: 0.0,
+            ymax: 0.0,
+            score: self.prev_boxes.score,
+            label: self.prev_boxes.label,
+        };
+        xyah_to_vaalbox(predicted_xyah, &mut expected);
+        return expected;
+    }
 }
 
 fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
@@ -56,6 +70,8 @@ fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
     vaal_box.ymin = y_ - h_ / 2.0;
     vaal_box.ymax = y_ + h_ / 2.0;
 }
+
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
     pub uuid: Uuid,
@@ -291,6 +307,10 @@ impl ByteTrack {
             }
         }
         matched_info
+    }
+
+    pub fn get_tracklets(&self) -> &Vec<Tracklet> {
+        &self.tracklets
     }
 }
 

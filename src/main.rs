@@ -397,7 +397,7 @@ async fn main() {
             let mut new_boxes = Vec::new();
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            track_boxes(
+            run_detection(
                 model,
                 &mut vaal_boxes,
                 &mut tracker,
@@ -479,7 +479,7 @@ async fn main() {
     }
 }
 
-fn track_boxes(
+fn run_detection(
     model: &Context,
     boxes: &mut Vec<VAALBox>,
     tracker: &mut ByteTrack,
@@ -493,19 +493,19 @@ fn track_boxes(
             return error!("Failed to read bounding boxes from model: {:?}", e);
         }
     };
-
-    let tracks = if s.track {
-        tracker.update(s, &mut boxes[0..n_boxes], timestamp)
-    } else {
-        vec![None; n_boxes]
-    };
-
-    for (vaal_box, track_info) in boxes.iter().take(n_boxes).zip(tracks.iter()) {
-        // when tracking is turned on, only send results for tracked boxes
-        if s.track && track_info.is_none() {
-            continue;
+    if s.track {
+        let _ = tracker.update(s, &mut boxes[0..n_boxes], timestamp);
+        let tracks = tracker.get_tracklets();
+        for track in tracks {
+            let vaal_box = track.get_predicted_location();
+            let box_2d = vaalbox_to_box2d(s, &vaal_box, model, timestamp, Some(track));
+            new_boxes.push(box_2d);
         }
-        new_boxes.push(vaalbox_to_box2d(s, vaal_box, model, timestamp, track_info));
+    } else {
+        for vaal_box in boxes.iter().take(n_boxes) {
+            let box_2d = vaalbox_to_box2d(s, vaal_box, model, timestamp, None);
+            new_boxes.push(box_2d);
+        }
     }
 }
 
@@ -703,7 +703,7 @@ fn vaalbox_to_box2d(
     b: &VAALBox,
     model: &Context,
     ts: u64,
-    track: &Option<TrackInfo>,
+    track: Option<&Tracklet>,
 ) -> Box2D {
     let label_ind = b.label + s.label_offset;
     let label = match model.label(label_ind) {
@@ -713,7 +713,7 @@ fn vaalbox_to_box2d(
 
     trace!("Created box with label {}", label);
     let track_info = track.as_ref().map(|v| Track {
-        uuid: v.uuid,
+        uuid: v.id,
         count: v.count,
         created: v.created,
     });

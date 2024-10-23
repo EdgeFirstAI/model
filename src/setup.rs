@@ -85,7 +85,7 @@ pub struct Settings {
 
     /// number of seconds the tracked object can be missing for before being
     /// removed.
-    #[arg(long, env, default_value = "2.0")]
+    #[arg(long, env, default_value = "0.5")]
     pub track_extra_lifespan: f32,
 
     /// high score threshold for ByteTrack algorithm.
