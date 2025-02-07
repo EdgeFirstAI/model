@@ -1,10 +1,8 @@
-use std::path::Path;
-
 use cdr::{CdrLe, Infinite};
 use deepviewrt::tensor::TensorType;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, ModelInfo},
+    edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, Mask, ModelInfo},
     foxglove_msgs::{
         point_annotation_type::{LINE_LOOP, UNKNOWN},
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
@@ -12,14 +10,12 @@ use edgefirst_schemas::{
     },
     std_msgs::Header,
 };
-use log::debug;
+use log::{debug, error};
+use std::path::Path;
 use vaal::Context;
-use zenoh::{
-    prelude::{Encoding, KnownEncoding},
-    value::Value,
-};
+use zenoh::bytes::{Encoding, ZBytes};
 
-use crate::{Box2D, LabelSetting, ModelType};
+use crate::{args::LabelSetting, Box2D, ModelType};
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -27,6 +23,7 @@ const WHITE: FoxgloveColor = FoxgloveColor {
     b: 1.0,
     a: 1.0,
 };
+
 const TRANSPARENT: FoxgloveColor = FoxgloveColor {
     r: 0.0,
     g: 0.0,
@@ -47,14 +44,15 @@ fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
         a: 1.0,
     }
 }
+
 pub fn build_image_annotations_msg_and_encode(
     boxes: &[Box2D],
     timestamp: Time,
     stream_width: f64,
     stream_height: f64,
-    msg: &str,
+    text: &str,
     labels: LabelSetting,
-) -> Value {
+) -> (ZBytes, Encoding) {
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
         points: Vec::new(),
@@ -73,7 +71,7 @@ pub fn build_image_annotations_msg_and_encode(
 
     let empty_text = FoxgloveTextAnnotations {
         timestamp: timestamp.clone(),
-        text: msg.to_owned(),
+        text: text.to_owned(),
         position: FoxglovePoint2 {
             x: stream_width * 0.025,
             y: stream_height * 0.95,
@@ -149,12 +147,41 @@ pub fn build_image_annotations_msg_and_encode(
         annotations.texts.push(text);
     }
 
-    Value::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "foxglove_msgs/msg/ImageAnnotations".into(),
-        ),
-    )
+    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/ImageAnnotations");
+
+    (msg, enc)
+}
+
+pub fn build_segmentation_msg(
+    _in_time: Time,
+    model_ctx: Option<&Context>,
+    output_index: i32,
+) -> Mask {
+    let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
+    let mask = if let Some(model) = model_ctx {
+        if let Some(tensor) = model.output_tensor(output_index) {
+            output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+            let data = tensor.mapro_u8().unwrap();
+            let len = data.len();
+            let mut buffer = vec![0; len];
+            buffer.copy_from_slice(&data);
+            buffer
+        } else {
+            error!("Did not find model output");
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Mask {
+        height: output_shape[1],
+        width: output_shape[2],
+        length: 1,
+        encoding: "".to_string(),
+        mask,
+    }
 }
 
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
@@ -198,12 +225,7 @@ pub fn build_detect_msg_and_encode(
     in_time: Time,
     model_time: Time,
     curr_time: Time,
-) -> Value {
-    let mut new_boxes = Vec::new();
-    for b in boxes {
-        new_boxes.push(b.into());
-    }
-
+) -> (ZBytes, Encoding) {
     let detect = Detect {
         header: Header {
             stamp: in_time.clone(),
@@ -212,14 +234,12 @@ pub fn build_detect_msg_and_encode(
         input_timestamp: in_time,
         model_time,
         output_time: curr_time,
-        boxes: new_boxes,
+        boxes: boxes.iter().map(|b| b.into()).collect(),
     };
-    Value::from(cdr::serialize::<_, _, CdrLe>(&detect, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "edgefirst_msgs/msg/Detect".into(),
-        ),
-    )
+    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&detect, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
+
+    (msg, enc)
 }
 
 fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
@@ -340,16 +360,4 @@ pub fn build_model_info_msg(
         model_name,
         model_type: model_types.join(";"),
     }
-}
-
-//Updated the ModelInfo message with the given timestamp, and then encodes it
-// into a Zenoh Value
-pub fn update_model_info_msg_and_encode(timestamp: Time, msg: &mut ModelInfo) -> Value {
-    msg.header.stamp = timestamp;
-    Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "edgefirst_msgs/msg/ModelInfo".into(),
-        ),
-    )
 }
