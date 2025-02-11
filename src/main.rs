@@ -246,14 +246,26 @@ async fn main() {
     loop {
         let _ = sub_camera.drain();
         let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
-            Ok(v) => match cdr::deserialize(&v.unwrap().payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
+            Ok(msg) => match msg {
+                Some(v) => match cdr::deserialize(&v.payload().to_bytes()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(
+                            "Failed to deserialize message on {}: {:?}",
+                            sub_camera.key_expr(),
+                            e
+                        );
+                        continue;
+                    }
+                },
+                None => {
+                    warn!(
+                        "timeout receiving camera frame on {}",
+                        sub_camera.key_expr()
+                    );
                     continue;
                 }
             },
-
             Err(e) => {
                 error!(
                     "error receiving camera frame on {}: {:?}",
