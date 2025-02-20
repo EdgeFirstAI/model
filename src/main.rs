@@ -5,7 +5,7 @@ mod kalman;
 mod tracker;
 
 use crate::{buildmsgs::*, tracker::*};
-use args::{validate_settings, Args, LabelSetting};
+use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
@@ -27,6 +27,9 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
+use tracing::{info_span, instrument, Instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
+use tracy_client::frame_mark;
 use uuid::Uuid;
 use vaal::{self, Context, VAALBox};
 use zenoh::{
@@ -44,11 +47,32 @@ struct ModelType {
 
 #[tokio::main]
 async fn main() {
-    let mut args = Args::parse();
-    validate_settings(&mut args);
-    env_logger::init();
-    let mut first_run = true;
+    let args = Args::parse();
 
+    args.tracy.then(tracy_client::Client::start);
+
+    let stdout_log = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_filter(args.rust_log);
+
+    let journald = match tracing_journald::layer() {
+        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Err(_) => None,
+    };
+
+    let tracy = match args.tracy {
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        false => None,
+    };
+
+    let subscriber = Registry::default()
+        .with(stdout_log)
+        .with(journald)
+        .with(tracy);
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing_log::LogTracer::init().unwrap();
+
+    let mut first_run = true;
     let session = zenoh::open(args.clone()).await.unwrap();
 
     let stream_width: f64;
@@ -277,28 +301,35 @@ async fn main() {
         };
         trace!("Recieved camera frame");
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
+        let fd = match info_span!("dma_buf_open").in_scope(|| {
+            let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
                     "Error getting PID {:?}, please check if the camera process is running: {:?}",
                     dma_buf.pid, e
                 );
-                continue;
-            }
-        };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
+                    return Err(e);
+                }
+            };
+            let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
                     "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
                     e
                 );
-                continue;
-            }
-        };
+                    return Err(e);
+                }
+            };
 
+            Ok(fd)
+        }) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         dma_buf.fd = fd.as_raw_fd();
+
         trace!("Opened DMA buffer from camera");
         let model_start = Instant::now();
 
@@ -415,9 +446,12 @@ async fn main() {
                 )
             }
         }
+
+        args.tracy.then(frame_mark);
     }
 }
 
+#[instrument(skip_all)]
 fn run_detection(
     model: &Context,
     boxes: &mut Vec<VAALBox>,
@@ -433,13 +467,15 @@ fn run_detection(
         }
     };
     if args.track {
-        let _ = tracker.update(args, &mut boxes[0..n_boxes], timestamp);
-        let tracks = tracker.get_tracklets();
-        for track in tracks {
-            let vaal_box = track.get_predicted_location();
-            let box_2d = vaalbox_to_box2d(args, &vaal_box, model, timestamp, Some(track));
-            new_boxes.push(box_2d);
-        }
+        info_span!("tracker").in_scope(|| {
+            let _ = tracker.update(args, &mut boxes[0..n_boxes], timestamp);
+            let tracks = tracker.get_tracklets();
+            for track in tracks {
+                let vaal_box = track.get_predicted_location();
+                let box_2d = vaalbox_to_box2d(args, &vaal_box, model, timestamp, Some(track));
+                new_boxes.push(box_2d);
+            }
+        });
     } else {
         for vaal_box in boxes.iter().take(n_boxes) {
             let box_2d = vaalbox_to_box2d(args, vaal_box, model, timestamp, None);
@@ -449,122 +485,134 @@ fn run_detection(
 }
 
 #[inline(always)]
+#[instrument(skip_all)]
 fn run_model(
     dma_buf: &DmaBuf,
     backbone: &vaal::Context,
     decoder: &mut Option<vaal::Context>,
 ) -> Result<(), String> {
-    match backbone.load_frame_dmabuf(
-        None,
-        dma_buf.fd,
-        dma_buf.fourcc,
-        dma_buf.width as i32,
-        dma_buf.height as i32,
-        None,
-        0,
-    ) {
-        Err(vaal::Error::VAALError(e)) => {
-            //possible vaal error that we can handle
-            let poss_err = "attempted an operation which is unsupported on the current platform";
-            if e == poss_err {
-                error!(
-                    "Attemping to clear cache,\
-						   likely due to g2d alloc fail,\
-						   this should be fixed in VAAL"
-                );
-                match clear_cached_memory() {
-                    Ok(()) => error!("Cleared cached memory"),
-                    Err(()) => error!("Could not clear cached memory"),
+    info_span!("load_frame").in_scope(|| {
+        match backbone.load_frame_dmabuf(
+            None,
+            dma_buf.fd,
+            dma_buf.fourcc,
+            dma_buf.width as i32,
+            dma_buf.height as i32,
+            None,
+            0,
+        ) {
+            Err(vaal::Error::VAALError(e)) => {
+                //possible vaal error that we can handle
+                let poss_err =
+                    "attempted an operation which is unsupported on the current platform";
+                if e == poss_err {
+                    error!(
+                        "Attemping to clear cache,\
+                            likely due to g2d alloc fail,\
+                            this should be fixed in VAAL"
+                    );
+                    match clear_cached_memory() {
+                        Ok(()) => error!("Cleared cached memory"),
+                        Err(()) => error!("Could not clear cached memory"),
+                    }
+                } else {
+                    return Err(format!("Could not load frame {:?}", e));
                 }
-            } else {
-                return Err(format!("Could not load frame {:?}", e));
+
+                match backbone.load_frame_dmabuf(
+                    None,
+                    dma_buf.fd,
+                    dma_buf.fourcc,
+                    dma_buf.width as i32,
+                    dma_buf.height as i32,
+                    None,
+                    0,
+                ) {
+                    Err(e) => return Err(format!("Could not load frame {:?}", e)),
+                    Ok(_) => {
+                        trace!("Loaded frame into model")
+                    }
+                };
+            }
+            Err(e) => return Err(format!("Could not load frame {:?}", e)),
+            Ok(_) => {
+                trace!("Loaded frame into model");
+            }
+        }
+        Ok(())
+    })?;
+
+    info_span!("run_backbone").in_scope(|| {
+        if let Err(e) = backbone.run_model() {
+            return Err(format!("Failed to run model: {}", e));
+        }
+        trace!("Ran model inference");
+        Ok(())
+    })?;
+
+    info_span!("run_decoder").in_scope(|| {
+        if decoder.is_some() {
+            let decoder_: &mut Context = decoder.as_mut().unwrap();
+            let model = match decoder_.model() {
+                Ok(model) => model,
+                Err(e) => return Err(format!("Failed get decoder model: {:?}", e)),
+            };
+
+            let inputs_idx = match model.inputs() {
+                Ok(inputs) => inputs,
+                Err(e) => return Err(format!("Failed get decoder model input: {:?}", e)),
+            };
+
+            let context = decoder_.dvrt_context().unwrap();
+
+            let mut in_1_idx = inputs_idx[1];
+            let mut in_2_idx = inputs_idx[0];
+
+            let out_1 = backbone.output_tensor(0).unwrap();
+            let in_1 = context.tensor_index(in_1_idx as usize).unwrap();
+
+            let out_2 = backbone.output_tensor(1).unwrap();
+
+            let out_1_shape = out_1.shape();
+
+            let in_1_shape = in_1.shape();
+
+            if out_1_shape[1] != in_1_shape[1] && out_1_shape[2] != in_1_shape[2] {
+                std::mem::swap(&mut in_2_idx, &mut in_1_idx);
             }
 
-            match backbone.load_frame_dmabuf(
-                None,
-                dma_buf.fd,
-                dma_buf.fourcc,
-                dma_buf.width as i32,
-                dma_buf.height as i32,
-                None,
-                0,
-            ) {
-                Err(e) => return Err(format!("Could not load frame {:?}", e)),
-                Ok(_) => {
-                    trace!("Loaded frame into model")
-                }
-            };
-        }
-        Err(e) => return Err(format!("Could not load frame {:?}", e)),
-        Ok(_) => {
-            trace!("Loaded frame into model");
-        }
-    };
+            let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
 
-    if let Err(e) = backbone.run_model() {
-        return Err(format!("Failed to run model: {}", e));
-    }
-    trace!("Ran model inference");
+            if let Err(e) = out_1.dequantize(in_1) {
+                return Err(format!(
+                    "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}): {}",
+                    out_1.tensor_type(),
+                    in_1.tensor_type(),
+                    e
+                ));
+            }
+            trace!("Copied backdone out_1 to decoder in_1");
 
-    if decoder.is_some() {
-        let decoder_: &mut Context = decoder.as_mut().unwrap();
-        let model = match decoder_.model() {
-            Ok(model) => model,
-            Err(e) => return Err(format!("Failed get decoder model: {:?}", e)),
-        };
+            let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
 
-        let inputs_idx = match model.inputs() {
-            Ok(inputs) => inputs,
-            Err(e) => return Err(format!("Failed get decoder model input: {:?}", e)),
-        };
+            if let Err(e) = out_2.dequantize(in_2) {
+                return Err(format!(
+                    "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}): {}",
+                    out_2.tensor_type(),
+                    in_2.tensor_type(),
+                    e
+                ));
+            }
+            trace!("Copied backdone out_2 to decoder in_2");
 
-        let context = decoder_.dvrt_context().unwrap();
-
-        let mut in_1_idx = inputs_idx[1];
-        let mut in_2_idx = inputs_idx[0];
-
-        let out_1 = backbone.output_tensor(0).unwrap();
-        let in_1 = context.tensor_index(in_1_idx as usize).unwrap();
-
-        let out_2 = backbone.output_tensor(1).unwrap();
-
-        let out_1_shape = out_1.shape();
-
-        let in_1_shape = in_1.shape();
-
-        if out_1_shape[1] != in_1_shape[1] && out_1_shape[2] != in_1_shape[2] {
-            std::mem::swap(&mut in_2_idx, &mut in_1_idx);
+            if let Err(e) = decoder_.run_model() {
+                return Err(format!("Failed to run decoder model: {:?}", e));
+            }
+            trace!("Ran decoder model inference");
         }
 
-        let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
-
-        if let Err(e) = out_1.dequantize(in_1) {
-            return Err(format!(
-                "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}): {}",
-                out_1.tensor_type(),
-                in_1.tensor_type(),
-                e
-            ));
-        }
-        trace!("Copied backdone out_1 to decoder in_1");
-
-        let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
-
-        if let Err(e) = out_2.dequantize(in_2) {
-            return Err(format!(
-                "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}): {}",
-                out_2.tensor_type(),
-                in_2.tensor_type(),
-                e
-            ));
-        }
-        trace!("Copied backdone out_2 to decoder in_2");
-
-        if let Err(e) = decoder_.run_model() {
-            return Err(format!("Failed to run decoder model: {:?}", e));
-        }
-        trace!("Ran decoder model inference");
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -855,45 +903,61 @@ async fn mask_thread(
     publ_mask_compressed: Option<Publisher<'_>>,
 ) {
     loop {
-        let mut msg = match rx.recv() {
+        let msg = match rx.recv() {
             Ok(v) => v,
             Err(_) => return,
         };
 
-        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+        let mut msg_compressed = match publ_mask_compressed.is_some() {
+            true => Some(msg.clone()),
+            false => None,
+        };
 
-        match publ_mask.put(buf).encoding(enc).await {
-            Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
-            Err(e) => {
-                error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
-            }
-        }
-
-        if publ_mask_compressed.is_some() {
-            let publ_mask_compressed = publ_mask_compressed.as_ref().unwrap();
-            let compression_start = Instant::now();
-            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
-            msg.encoding = "zstd".to_string();
-            trace!("Compression takes {:?}", compression_start.elapsed());
-
-            let serialization_start = Instant::now();
+        let mask_span = info_span!("mask_publish");
+        let mask_task = async {
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-            trace!("Serialization takes {:?}", serialization_start.elapsed());
 
-            let publ_start = Instant::now();
-            match publ_mask_compressed.put(buf).encoding(enc).await {
-                Ok(_) => trace!("Sent Mask message on {}", publ_mask_compressed.key_expr()),
+            match publ_mask.put(buf).encoding(enc).await {
+                Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
                 Err(e) => {
-                    error!(
-                        "Error sending message on {}: {:?}",
-                        publ_mask_compressed.key_expr(),
-                        e
-                    )
+                    error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
                 }
             }
-            trace!("Msg sending took {:?}", publ_start.elapsed());
         }
+        .instrument(mask_span);
+
+        let mask_compressed_span = info_span!("mask_compressed_publish");
+        let mask_compressed_task = async {
+            if let Some(msg_compressed) = &mut msg_compressed {
+                let publ_mask_compressed = publ_mask_compressed.as_ref().unwrap();
+                let compression_start = Instant::now();
+                msg_compressed.mask = zstd::bulk::compress(&msg_compressed.mask, 1).unwrap();
+                msg_compressed.encoding = "zstd".to_string();
+                trace!("Compression takes {:?}", compression_start.elapsed());
+
+                let serialization_start = Instant::now();
+                let buf =
+                    ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg_compressed, Infinite).unwrap());
+                let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+                trace!("Serialization takes {:?}", serialization_start.elapsed());
+
+                let publ_start = Instant::now();
+                match publ_mask_compressed.put(buf).encoding(enc).await {
+                    Ok(_) => trace!("Sent Mask message on {}", publ_mask_compressed.key_expr()),
+                    Err(e) => {
+                        error!(
+                            "Error sending message on {}: {:?}",
+                            publ_mask_compressed.key_expr(),
+                            e
+                        )
+                    }
+                }
+                trace!("Msg sending took {:?}", publ_start.elapsed());
+            }
+        }
+        .instrument(mask_compressed_span);
+
+        tokio::join!(mask_task, mask_compressed_task);
     }
 }

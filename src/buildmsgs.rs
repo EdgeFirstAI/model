@@ -12,6 +12,7 @@ use edgefirst_schemas::{
 };
 use log::{debug, error};
 use std::path::Path;
+use tracing::instrument;
 use vaal::Context;
 use zenoh::bytes::{Encoding, ZBytes};
 
@@ -153,6 +154,7 @@ pub fn build_image_annotations_msg_and_encode(
     (msg, enc)
 }
 
+#[instrument(skip_all)]
 pub fn build_segmentation_msg(
     _in_time: Time,
     model_ctx: Option<&Context>,

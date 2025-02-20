@@ -1,8 +1,7 @@
-use std::path::PathBuf;
-
 use clap::Parser;
-use log::warn;
 use serde_json::json;
+use std::path::PathBuf;
+use tracing::level_filters::LevelFilter;
 use zenoh::config::{Config, WhatAmI};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
@@ -109,6 +108,14 @@ pub struct Args {
     #[arg(long, env)]
     pub mask_compression: bool,
 
+    /// Application log level
+    #[arg(long, env, default_value = "info")]
+    pub rust_log: LevelFilter,
+
+    /// Enable Tracy profiler broadcast
+    #[arg(long, env)]
+    pub tracy: bool,
+
     /// zenoh connection mode
     #[arg(long, env, default_value = "peer")]
     mode: WhatAmI,
@@ -157,12 +164,5 @@ impl From<Args> for Config {
             .unwrap();
 
         config
-    }
-}
-
-pub fn validate_settings(s: &mut Args) {
-    if !s.track && s.labels == LabelSetting::Track {
-        warn!("Tracking was not enabled, label setting will be changed from `track` to `score`");
-        s.labels = LabelSetting::Score;
     }
 }
