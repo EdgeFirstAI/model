@@ -27,7 +27,7 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
-use tracing::{info_span, instrument, Instrument};
+use tracing::{info_span, instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracy_client::frame_mark;
 use uuid::Uuid;
@@ -268,37 +268,32 @@ async fn main() {
     let mut fps = fps::Fps::<90>::default();
 
     loop {
-        let _ = sub_camera.drain();
-        let mut dma_buf: DmaBuf = match sub_camera.recv_timeout(timeout) {
-            Ok(msg) => match msg {
-                Some(v) => match cdr::deserialize(&v.payload().to_bytes()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!(
-                            "Failed to deserialize message on {}: {:?}",
-                            sub_camera.key_expr(),
-                            e
+        let dma_buf = if let Some(v) = sub_camera.drain().last() {
+            v
+        } else {
+            match sub_camera.recv_timeout(timeout) {
+                Ok(msg) => match msg {
+                    Some(v) => v,
+                    None => {
+                        warn!(
+                            "timeout receiving camera frame on {}",
+                            sub_camera.key_expr()
                         );
                         continue;
                     }
                 },
-                None => {
-                    warn!(
-                        "timeout receiving camera frame on {}",
-                        sub_camera.key_expr()
+                Err(e) => {
+                    error!(
+                        "error receiving camera frame on {}: {:?}",
+                        sub_camera.key_expr(),
+                        e
                     );
                     continue;
                 }
-            },
-            Err(e) => {
-                error!(
-                    "error receiving camera frame on {}: {:?}",
-                    sub_camera.key_expr(),
-                    e
-                );
-                continue;
             }
         };
+
+        let mut dma_buf: DmaBuf = cdr::deserialize(&dma_buf.payload().to_bytes()).unwrap();
         trace!("Recieved camera frame");
 
         let fd = match info_span!("dma_buf_open").in_scope(|| {
@@ -903,61 +898,34 @@ async fn mask_thread(
     publ_mask_compressed: Option<Publisher<'_>>,
 ) {
     loop {
-        let msg = match rx.recv() {
+        let mut msg = match rx.recv() {
             Ok(v) => v,
             Err(_) => return,
         };
 
-        let mut msg_compressed = match publ_mask_compressed.is_some() {
-            true => Some(msg.clone()),
-            false => None,
-        };
-
-        let mask_span = info_span!("mask_publish");
-        let mask_task = async {
+        let (buf, enc) = info_span!("mask_publish").in_scope(|| {
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+            (buf, enc)
+        });
 
-            match publ_mask.put(buf).encoding(enc).await {
-                Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
-                Err(e) => {
-                    error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
-                }
-            }
-        }
-        .instrument(mask_span);
+        let mask_task = publ_mask.put(buf).encoding(enc);
 
-        let mask_compressed_span = info_span!("mask_compressed_publish");
-        let mask_compressed_task = async {
-            if let Some(msg_compressed) = &mut msg_compressed {
-                let publ_mask_compressed = publ_mask_compressed.as_ref().unwrap();
-                let compression_start = Instant::now();
-                msg_compressed.mask = zstd::bulk::compress(&msg_compressed.mask, 1).unwrap();
-                msg_compressed.encoding = "zstd".to_string();
-                trace!("Compression takes {:?}", compression_start.elapsed());
+        if let Some(publ_mask_compressed) = &publ_mask_compressed {
+            let (buf, enc) = info_span!("mask_compressed_publish").in_scope(|| {
+                msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
+                msg.encoding = "zstd".to_string();
 
-                let serialization_start = Instant::now();
-                let buf =
-                    ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg_compressed, Infinite).unwrap());
+                let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
                 let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-                trace!("Serialization takes {:?}", serialization_start.elapsed());
 
-                let publ_start = Instant::now();
-                match publ_mask_compressed.put(buf).encoding(enc).await {
-                    Ok(_) => trace!("Sent Mask message on {}", publ_mask_compressed.key_expr()),
-                    Err(e) => {
-                        error!(
-                            "Error sending message on {}: {:?}",
-                            publ_mask_compressed.key_expr(),
-                            e
-                        )
-                    }
-                }
-                trace!("Msg sending took {:?}", publ_start.elapsed());
-            }
+                (buf, enc)
+            });
+
+            let mask_compressed_task = publ_mask_compressed.put(buf).encoding(enc);
+            tokio::try_join!(mask_task, mask_compressed_task).unwrap();
+        } else {
+            mask_task.await.unwrap();
         }
-        .instrument(mask_compressed_span);
-
-        tokio::join!(mask_task, mask_compressed_task);
     }
 }
