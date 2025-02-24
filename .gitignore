@@ -52,3 +52,8 @@ audit.json
 sonar-issues.json
 
 .vscode/
+.debug/
+
+kallsyms
+perf.data*
+uftrace.*

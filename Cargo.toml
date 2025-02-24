@@ -16,27 +16,56 @@ inherits = "release"
 strip = false
 debug = true
 
-[dependencies]
-async-std = {version = "1.12.0", features = ["attributes"] }
-deepviewrt = "0.5.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "0.8.10"
-vaal = "0.3.2"
-zenoh = "0.10.1-rc"
-cdr = "0.2.4"
-clap = { version = "4.4.18", features = ["derive", "env"] }
-edgefirst-schemas = { version = "1.2.3" }
-pidfd_getfd = "0.2.2"
-async-pidfd = "0.1.4"
-log = { version = "0.4", features = ["release_max_level_debug"] }
-env_logger = "0.11.2"
-lapjv = "0.2.1"
-uuid = { version = "1.5.0", features = ["v4"] }
-nalgebra = "0.32"
-nix = { version = "0.28.0", features = ["time"] }
-zstd = "0.13"
-
 [[bin]]
 name = "maivin-model"
 path = "src/main.rs"
+
+[features]
+default = ["tracy"]
+tracy = ["tracing-tracy/enable", "tracy-client/enable"]
+profiling = [
+    "tracing-tracy/sampling",
+    "tracing-tracy/system-tracing",
+    "tracy-client/sampling",
+    "tracy-client/system-tracing",
+]
+
+[dependencies]
+async-pidfd = "0.1.4"
+cdr = "0.2.4"
+clap = { version = "4.5.30", features = ["derive", "env"] }
+deepviewrt = "0.5.0"
+edgefirst-schemas = { version = "1.2.3" }
+env_logger = "0.11.6"
+lapjv = "0.2.1"
+log = { version = "0.4", features = ["release_max_level_debug"] }
+nalgebra = "0.32.6"
+nix = { version = "0.29.0", features = ["time"] }
+pidfd_getfd = "0.2.2"
+serde_json = "1.0.138"
+tokio = { version = "1.43.0", features = [
+    "rt-multi-thread",
+    "time",
+    "io-std",
+    "tracing",
+] }
+tracing = "0.1.41"
+tracing-journald = "0.3.1"
+tracing-log = "0.2.0"
+tracing-subscriber = "0.3.19"
+tracing-tracy = { version = "0.11.4", default-features = false, features = [
+    "manual-lifetime",
+    "broadcast",
+    "ondemand",
+    "fibers",
+] }
+tracy-client = { version = "0.18.0", default-features = false, features = [
+    "manual-lifetime",
+    "broadcast",
+    "ondemand",
+    "fibers",
+] }
+uuid = { version = "1.13.2", features = ["v4"] }
+vaal = "0.3.2"
+zenoh = "1.2.1"
+zstd = "0.13"

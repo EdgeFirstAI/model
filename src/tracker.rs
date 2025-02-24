@@ -1,4 +1,4 @@
-use crate::{kalman::ConstantVelocityXYAHModel2, setup::Settings};
+use crate::{args::Args, kalman::ConstantVelocityXYAHModel2};
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
@@ -24,9 +24,9 @@ pub struct Tracklet {
 }
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &VAALBox, s: &Settings, ts: u64) {
+    fn update(&mut self, vaalbox: &VAALBox, args: &Args, ts: u64) {
         self.count += 1;
-        self.expiry = ts + (s.track_extra_lifespan * 1e9) as u64;
+        self.expiry = ts + (args.track_extra_lifespan * 1e9) as u64;
         self.prev_boxes = *vaalbox;
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
@@ -42,7 +42,7 @@ impl Tracklet {
             label: self.prev_boxes.label,
         };
         xyah_to_vaalbox(predicted_xyah, &mut expected);
-        return expected;
+        expected
     }
 }
 
@@ -181,13 +181,13 @@ impl ByteTrack {
 
     pub fn update(
         &mut self,
-        s: &Settings,
+        args: &Args,
         boxes: &mut [VAALBox],
         timestamp: u64,
     ) -> Vec<Option<TrackInfo>> {
         self.frame_count += 1;
         let high_conf_ind = (0..boxes.len())
-            .filter(|x| boxes[*x].score >= s.track_high_conf)
+            .filter(|x| boxes[*x].score >= args.track_high_conf)
             .collect::<Vec<usize>>();
         let mut matched = vec![false; boxes.len()];
         let mut tracked = vec![false; self.tracklets.len()];
@@ -196,8 +196,13 @@ impl ByteTrack {
             for track in &mut self.tracklets {
                 track.filter.predict();
             }
-            let costs =
-                self.compute_costs(boxes, s.track_high_conf, s.track_iou, &matched, &tracked);
+            let costs = self.compute_costs(
+                boxes,
+                args.track_high_conf,
+                args.track_iou,
+                &matched,
+                &tracked,
+            );
             // With m boxes and n tracks, we compute a m x n array of costs for
             // association cost is based on distance computed by the Kalman Filter
             // Then we use lapjv (linear assignment) to minimize the cost of
@@ -226,14 +231,14 @@ impl ByteTrack {
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.tracklets[x].update(&observed_box, s, timestamp);
+                    self.tracklets[x].update(&observed_box, args, timestamp);
                 }
             }
         }
 
         // try to match unmatched tracklets to low score detections as well
         if !self.tracklets.is_empty() {
-            let costs = self.compute_costs(boxes, 0.0, s.track_iou, &matched, &tracked);
+            let costs = self.compute_costs(boxes, 0.0, args.track_iou, &matched, &tracked);
             let ans = lapjv(&costs).unwrap();
             for i in 0..ans.0.len() {
                 let x = ans.0[i];
@@ -264,7 +269,7 @@ impl ByteTrack {
                     let a_ = predicted_xyah[2];
                     let h_ = predicted_xyah[3];
 
-                    self.tracklets[x].update(&boxes[i], s, timestamp);
+                    self.tracklets[x].update(&boxes[i], args, timestamp);
 
                     let w_ = h_ * a_;
                     boxes[i].xmin = x_ - w_ / 2.0;
@@ -298,9 +303,9 @@ impl ByteTrack {
                     prev_boxes: boxes[i],
                     filter: ConstantVelocityXYAHModel2::new(
                         &vaalbox_to_xyah(&boxes[i]),
-                        s.track_update,
+                        args.track_update,
                     ),
-                    expiry: timestamp + (s.track_extra_lifespan * 1e9) as u64,
+                    expiry: timestamp + (args.track_extra_lifespan * 1e9) as u64,
                     count: 1,
                     created: timestamp,
                 });
