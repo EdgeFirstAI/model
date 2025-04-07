@@ -1,5 +1,6 @@
 mod args;
 mod buildmsgs;
+mod compress;
 mod fps;
 mod kalman;
 mod tracker;
@@ -9,6 +10,7 @@ use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use compress::mask_compress_thread;
 use edgefirst_schemas::{
     self,
     edgefirst_msgs::{DmaBuf, Mask},
@@ -121,7 +123,7 @@ async fn main() {
         .unwrap();
     info!("Declared subscriber on {:?}", &args.camera_topic);
 
-    let (tx, rx) = mpsc::channel(20);
+    let (tx, rx) = mpsc::channel(50);
     let heartbeat = tokio::spawn(heart_beat(
         session.clone(),
         args.clone(),
@@ -243,11 +245,15 @@ async fn main() {
         false => None,
     };
 
-    let (mask_tx, mask_rx) = mpsc::channel(20);
+    let (mask_tx, mask_rx) = mpsc::channel(50);
 
     let mask_compress_tx = if let Some(publ_mask_compressed) = publ_mask_compressed {
-        let (mask_compress_tx, mask_compress_rx) = mpsc::channel(20);
-        tokio::spawn(mask_compress_thread(mask_compress_rx, publ_mask_compressed));
+        let (mask_compress_tx, mask_compress_rx) = mpsc::channel(50);
+        tokio::spawn(mask_compress_thread(
+            mask_compress_rx,
+            publ_mask_compressed,
+            args.mask_compression_level,
+        ));
         Some(mask_compress_tx)
     } else {
         None
@@ -949,39 +955,6 @@ async fn mask_thread(
             Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
             Err(e) => {
                 error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
-            }
-        }
-    }
-}
-
-async fn mask_compress_thread(mut rx: Receiver<Mask>, publ_mask_compressed: Publisher<'_>) {
-    loop {
-        let mut msg = match drain_recv(&mut rx).await {
-            Some(v) => v,
-            None => return,
-        };
-
-        let (buf, enc) = info_span!("mask_compressed_publish").in_scope(|| {
-            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
-            msg.encoding = "zstd".to_string();
-
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-
-            (buf, enc)
-        });
-        let publ = publ_mask_compressed.put(buf).encoding(enc).await;
-        match publ {
-            Ok(_) => trace!(
-                "Sent compressed Mask message on {}",
-                publ_mask_compressed.key_expr()
-            ),
-            Err(e) => {
-                error!(
-                    "Error sending message on {}: {:?}",
-                    publ_mask_compressed.key_expr(),
-                    e
-                )
             }
         }
     }

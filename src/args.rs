@@ -108,6 +108,12 @@ pub struct Args {
     #[arg(long, env)]
     pub mask_compression: bool,
 
+    /// Set the mask zstd compression level. Valid from -7 to 22. A value of 0
+    /// will be the same as a value of 3. Lower values are faster but less
+    /// compressed.
+    #[arg(long, env, default_value = "1")]
+    pub mask_compression_level: i32,
+
     /// Application log level
     #[arg(long, env, default_value = "info")]
     pub rust_log: LevelFilter,
