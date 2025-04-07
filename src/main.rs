@@ -863,7 +863,7 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
             }
         };
         let shape = output.shape();
-        if shape.len() != 4 {
+        if output.dims() != 4 {
             continue;
         }
         if shape[1] < 8 {
@@ -872,6 +872,7 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
         if shape[2] < 8 {
             continue;
         }
+        info!("segmentation output shape: {:?}", shape);
         segmentation_index.push(i);
     }
     if segmentation_index.len() > 1 {
