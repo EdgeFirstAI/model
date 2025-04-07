@@ -24,9 +24,9 @@ use std::{
     fs,
     os::fd::AsRawFd,
     process::Command,
-    sync::mpsc::{self, Receiver, TryRecvError},
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc::{self, error::TryRecvError, Receiver, Sender};
 use tracing::{info_span, instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracy_client::frame_mark;
@@ -121,7 +121,7 @@ async fn main() {
         .unwrap();
     info!("Declared subscriber on {:?}", &args.camera_topic);
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel(20);
     let heartbeat = tokio::spawn(heart_beat(
         session.clone(),
         args.clone(),
@@ -243,8 +243,17 @@ async fn main() {
         false => None,
     };
 
-    let (mask_tx, mask_rx) = mpsc::channel();
-    tokio::spawn(mask_thread(mask_rx, publ_mask, publ_mask_compressed));
+    let (mask_tx, mask_rx) = mpsc::channel(20);
+
+    let mask_compress_tx = if let Some(publ_mask_compressed) = publ_mask_compressed {
+        let (mask_compress_tx, mask_compress_rx) = mpsc::channel(20);
+        tokio::spawn(mask_compress_thread(mask_compress_rx, publ_mask_compressed));
+        Some(mask_compress_tx)
+    } else {
+        None
+    };
+
+    tokio::spawn(mask_thread(mask_rx, publ_mask, mask_compress_tx));
 
     let mut model_info_msg = build_model_info_msg(
         time_from_ns(0u32),
@@ -344,7 +353,7 @@ async fn main() {
 
         if let Some(i) = model_type.segment_output_ind {
             let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(model), i);
-            match mask_tx.send(masks) {
+            match mask_tx.send(masks).await {
                 Ok(_) => {}
                 Err(e) => {
                     error! {"Cannot send to mask publishing thread {:?}", e};
@@ -717,7 +726,7 @@ async fn heart_beat(
     session: Session,
     args: Args,
     sub_camera: Subscriber<FifoChannelHandler<Sample>>,
-    rx: Receiver<bool>,
+    mut rx: Receiver<bool>,
     stream_dims: (f64, f64),
 ) -> Subscriber<FifoChannelHandler<Sample>> {
     let model_path = args.model.clone();
@@ -893,15 +902,33 @@ fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
     Ok(model_type)
 }
 
+// If the receiver is empty, waits for the next message, otherwise returns the
+// most recent message on this receiver. If the receiver is closed, returns None
+async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
+    let mut msg = match rx.try_recv() {
+        Err(TryRecvError::Empty) => {
+            return rx.recv().await;
+        }
+        Err(_) => {
+            return None;
+        }
+        Ok(v) => v,
+    };
+    while let Ok(v) = rx.try_recv() {
+        msg = v;
+    }
+    Some(msg)
+}
+
 async fn mask_thread(
-    rx: Receiver<Mask>,
+    mut rx: Receiver<Mask>,
     publ_mask: Publisher<'_>,
-    publ_mask_compressed: Option<Publisher<'_>>,
+    mask_compress_tx: Option<Sender<Mask>>,
 ) {
     loop {
-        let mut msg = match rx.recv() {
-            Ok(v) => v,
-            Err(_) => return,
+        let msg = match drain_recv(&mut rx).await {
+            Some(v) => v,
+            None => return,
         };
 
         let (buf, enc) = info_span!("mask_publish").in_scope(|| {
@@ -909,24 +936,53 @@ async fn mask_thread(
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
             (buf, enc)
         });
-
-        let mask_task = publ_mask.put(buf).encoding(enc);
-
-        if let Some(publ_mask_compressed) = &publ_mask_compressed {
-            let (buf, enc) = info_span!("mask_compressed_publish").in_scope(|| {
-                msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
-                msg.encoding = "zstd".to_string();
-
-                let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-                let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-
-                (buf, enc)
-            });
-
-            let mask_compressed_task = publ_mask_compressed.put(buf).encoding(enc);
-            tokio::try_join!(mask_task, mask_compressed_task).unwrap();
+        let publ = if let Some(mask_compress_tx) = mask_compress_tx.as_ref() {
+            let mask_task = publ_mask.put(buf).encoding(enc);
+            let mask_send = mask_compress_tx.send(msg);
+            let (publ, _send) = tokio::join!(mask_task, mask_send);
+            publ
         } else {
-            mask_task.await.unwrap();
+            publ_mask.put(buf).encoding(enc).await
+        };
+
+        match publ {
+            Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
+            Err(e) => {
+                error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
+            }
+        }
+    }
+}
+
+async fn mask_compress_thread(mut rx: Receiver<Mask>, publ_mask_compressed: Publisher<'_>) {
+    loop {
+        let mut msg = match drain_recv(&mut rx).await {
+            Some(v) => v,
+            None => return,
+        };
+
+        let (buf, enc) = info_span!("mask_compressed_publish").in_scope(|| {
+            msg.mask = zstd::bulk::compress(&msg.mask, 1).unwrap();
+            msg.encoding = "zstd".to_string();
+
+            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+            (buf, enc)
+        });
+        let publ = publ_mask_compressed.put(buf).encoding(enc).await;
+        match publ {
+            Ok(_) => trace!(
+                "Sent compressed Mask message on {}",
+                publ_mask_compressed.key_expr()
+            ),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_mask_compressed.key_expr(),
+                    e
+                )
+            }
         }
     }
 }
