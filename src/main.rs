@@ -952,7 +952,7 @@ async fn mask_thread(
         if !mask_classes.is_empty() {
             let mask = info_span!("mask_slice")
                 .in_scope(|| slice_mask(&msg.mask, &mask_shape, &mask_classes));
-            println!("Slice takes {:?}", start.elapsed());
+            trace!("Slice takes {:?}", start.elapsed());
             msg.mask = mask;
         }
 
