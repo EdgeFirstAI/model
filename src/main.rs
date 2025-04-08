@@ -937,7 +937,6 @@ async fn mask_thread(
     publ_mask: Publisher<'_>,
     mask_compress_tx: Option<Sender<Mask>>,
 ) {
-    println!("mask_classes={:?}", mask_classes);
     loop {
         let mut msg = match drain_recv(&mut rx).await {
             Some(v) => v,
@@ -950,10 +949,12 @@ async fn mask_thread(
             msg.width as usize,
             msg.mask.len() / msg.height as usize / msg.width as usize,
         ];
-        let mask =
-            info_span!("mask_slice").in_scope(|| slice_mask(msg.mask, &mask_shape, &mask_classes));
-        println!("Slice takes {:?}", start.elapsed());
-        msg.mask = mask;
+        if !mask_classes.is_empty() {
+            let mask = info_span!("mask_slice")
+                .in_scope(|| slice_mask(&msg.mask, &mask_shape, &mask_classes));
+            println!("Slice takes {:?}", start.elapsed());
+            msg.mask = mask;
+        }
 
         let (buf, enc) = info_span!("mask_publish").in_scope(|| {
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());

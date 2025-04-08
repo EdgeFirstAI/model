@@ -186,14 +186,13 @@ pub fn build_segmentation_msg(
     }
 }
 
-pub fn slice_mask(mask: Vec<u8>, shape: &[usize; 3], classes: &[usize]) -> Vec<u8> {
-    if classes.is_empty() {
-        return mask;
-    }
+pub fn slice_mask(mask: &[u8], shape: &[usize; 3], classes: &[usize]) -> Vec<u8> {
     let mut new_mask = vec![0; shape[0] * shape[1] * classes.len()];
     for i in 0..shape[0] * shape[1] {
         for (ind, j) in classes.iter().enumerate() {
-            new_mask[i * classes.len() + ind] = mask[i * shape[2] + j];
+            if *j < shape[2] {
+                new_mask[i * classes.len() + ind] = mask[i * shape[2] + j];
+            }
         }
     }
     new_mask
@@ -388,7 +387,7 @@ mod test {
             0,1,2,      0,1,2,      0,1,2,      0,11,2,      17,1,2,
         ];
         let output_shape = [2, 5, 3];
-        let mask_ = slice_mask(mask.clone(), &output_shape, &[0]);
+        let mask_ = slice_mask(&mask, &output_shape, &[0]);
         assert_eq!(
             mask_,
             vec![0, 0, 0, 99, 0, 0, 0, 0, 0, 17,],
@@ -397,7 +396,7 @@ mod test {
             vec![0, 0, 0, 99, 0, 0, 0, 0, 0, 17,]
         );
 
-        let mask_ = slice_mask(mask.clone(), &output_shape, &[1]);
+        let mask_ = slice_mask(&mask, &output_shape, &[1]);
         assert_eq!(
             mask_,
             vec![1, 1, 1, 1, 1, 1, 1, 1, 11, 1,],
@@ -406,7 +405,7 @@ mod test {
             vec![1, 1, 1, 1, 1, 1, 1, 1, 11, 1,]
         );
 
-        let mask_ = slice_mask(mask.clone(), &output_shape, &[0, 2]);
+        let mask_ = slice_mask(&mask, &output_shape, &[0, 2]);
         assert_eq!(
             mask_,
             vec![0, 2, 0, 2, 0, 2, 99, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 17, 2],

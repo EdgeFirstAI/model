@@ -115,7 +115,8 @@ pub struct Args {
     pub mask_compression_level: i32,
 
     /// The classes that will be output in the mask. Leave empty to keep all
-    /// classes. Otherwise input the classes as space seperated integers
+    /// classes. Otherwise input the classes as space seperated integers.
+    /// Classes with index too high will be ignored.
     #[arg(long, env, hide_short_help = true, value_parser=parse_classes, default_value="")]
     pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
                                              * processing on Vec. This allows us to parse "" as
