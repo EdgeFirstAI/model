@@ -11,8 +11,8 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use log::{debug, error};
-use std::{path::Path, time::Instant};
-use tracing::{info_span, instrument};
+use std::path::Path;
+use tracing::instrument;
 use vaal::Context;
 use zenoh::bytes::{Encoding, ZBytes};
 
@@ -177,30 +177,6 @@ pub fn build_segmentation_msg(
         Vec::new()
     };
 
-    if output_shape[1] == 0 || output_shape[2] == 0 {
-        return Mask {
-            height: output_shape[1],
-            width: output_shape[2],
-            length: 1,
-            encoding: "".to_string(),
-            mask,
-        };
-    }
-    let indexes = [];
-    let start = Instant::now();
-    println!("Output shape: {:?}", output_shape);
-    let mask = info_span!("mask_slice").in_scope(|| {
-        slice_mask(
-            mask,
-            &[
-                output_shape[1] as usize,
-                output_shape[2] as usize,
-                output_shape[3] as usize,
-            ],
-            &indexes,
-        )
-    });
-    println!("Slice takes {:?}", start.elapsed());
     Mask {
         height: output_shape[1],
         width: output_shape[2],

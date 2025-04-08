@@ -114,6 +114,13 @@ pub struct Args {
     #[arg(long, env, default_value = "1")]
     pub mask_compression_level: i32,
 
+    /// The classes that will be output in the mask. Leave empty to keep all
+    /// classes. Otherwise input the classes as space seperated integers
+    #[arg(long, env, hide_short_help = true, value_parser=parse_classes, default_value="")]
+    pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
+                                             * processing on Vec. This allows us to parse "" as
+                                             * Vec::new(). */
+
     /// Application log level
     #[arg(long, env, default_value = "info")]
     pub rust_log: LevelFilter,
@@ -137,6 +144,18 @@ pub struct Args {
     /// disable zenoh multicast scouting
     #[arg(long, env)]
     no_multicast_scouting: bool,
+}
+
+fn parse_classes(arg: &str) -> Result<Vec<usize>, std::num::ParseIntError> {
+    if arg.is_empty() {
+        return Ok(Vec::new());
+    }
+    let args = arg.split(" ");
+    let mut ret = Vec::new();
+    for a in args {
+        ret.push(a.parse()?);
+    }
+    Ok(ret)
 }
 
 impl From<Args> for Config {

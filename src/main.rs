@@ -259,7 +259,12 @@ async fn main() {
         None
     };
 
-    tokio::spawn(mask_thread(mask_rx, publ_mask, mask_compress_tx));
+    tokio::spawn(mask_thread(
+        mask_rx,
+        args.mask_classes.clone(),
+        publ_mask,
+        mask_compress_tx,
+    ));
 
     let mut model_info_msg = build_model_info_msg(
         time_from_ns(0u32),
@@ -928,14 +933,27 @@ async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
 
 async fn mask_thread(
     mut rx: Receiver<Mask>,
+    mask_classes: Vec<usize>,
     publ_mask: Publisher<'_>,
     mask_compress_tx: Option<Sender<Mask>>,
 ) {
+    println!("mask_classes={:?}", mask_classes);
     loop {
-        let msg = match drain_recv(&mut rx).await {
+        let mut msg = match drain_recv(&mut rx).await {
             Some(v) => v,
             None => return,
         };
+
+        let start = Instant::now();
+        let mask_shape = [
+            msg.height as usize,
+            msg.width as usize,
+            msg.mask.len() / msg.height as usize / msg.width as usize,
+        ];
+        let mask =
+            info_span!("mask_slice").in_scope(|| slice_mask(msg.mask, &mask_shape, &mask_classes));
+        println!("Slice takes {:?}", start.elapsed());
+        msg.mask = mask;
 
         let (buf, enc) = info_span!("mask_publish").in_scope(|| {
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
