@@ -186,18 +186,6 @@ pub fn build_segmentation_msg(
     }
 }
 
-pub fn slice_mask(mask: &[u8], shape: &[usize; 3], classes: &[usize]) -> Vec<u8> {
-    let mut new_mask = vec![0; shape[0] * shape[1] * classes.len()];
-    for i in 0..shape[0] * shape[1] {
-        for (ind, j) in classes.iter().enumerate() {
-            if *j < shape[2] {
-                new_mask[i * classes.len() + ind] = mask[i * shape[2] + j];
-            }
-        }
-    }
-    new_mask
-}
-
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     let ts: u128 = ts.into();
     Time {
@@ -373,45 +361,5 @@ pub fn build_model_info_msg(
         model_format,
         model_name,
         model_type: model_types.join(";"),
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    #[test]
-    fn test_slice() {
-        #[rustfmt::skip]
-        let mask = vec![
-            0,1,2,      0,1,2,      0,1,2,      99,1,2,      0,1,2,
-            0,1,2,      0,1,2,      0,1,2,      0,11,2,      17,1,2,
-        ];
-        let output_shape = [2, 5, 3];
-        let mask_ = slice_mask(&mask, &output_shape, &[0]);
-        assert_eq!(
-            mask_,
-            vec![0, 0, 0, 99, 0, 0, 0, 0, 0, 17,],
-            "Mask is {:?} but should be {:?}",
-            mask_,
-            vec![0, 0, 0, 99, 0, 0, 0, 0, 0, 17,]
-        );
-
-        let mask_ = slice_mask(&mask, &output_shape, &[1]);
-        assert_eq!(
-            mask_,
-            vec![1, 1, 1, 1, 1, 1, 1, 1, 11, 1,],
-            "Mask is {:?} but should be {:?}",
-            mask_,
-            vec![1, 1, 1, 1, 1, 1, 1, 1, 11, 1,]
-        );
-
-        let mask_ = slice_mask(&mask, &output_shape, &[0, 2]);
-        assert_eq!(
-            mask_,
-            vec![0, 2, 0, 2, 0, 2, 99, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 17, 2],
-            "Mask is {:?} but should be {:?}",
-            mask_,
-            vec![0, 2, 0, 2, 0, 2, 99, 2, 0, 2, 0, 2, 0, 2, 0, 2, 0, 2, 17, 2]
-        );
     }
 }

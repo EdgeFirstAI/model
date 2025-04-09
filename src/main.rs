@@ -1,8 +1,8 @@
 mod args;
 mod buildmsgs;
-mod compress;
 mod fps;
 mod kalman;
+mod masks;
 mod tracker;
 
 use crate::{buildmsgs::*, tracker::*};
@@ -10,13 +10,9 @@ use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use compress::mask_compress_thread;
-use edgefirst_schemas::{
-    self,
-    edgefirst_msgs::{DmaBuf, Mask},
-    sensor_msgs::CameraInfo,
-};
+use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 use log::{debug, error, info, trace, warn};
+use masks::{mask_compress_thread, mask_thread};
 use nix::{
     sys::time::TimeValLike,
     time::{clock_gettime, ClockId},
@@ -28,7 +24,7 @@ use std::{
     process::Command,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc::{self, error::TryRecvError, Receiver, Sender};
+use tokio::sync::mpsc::{self, error::TryRecvError, Receiver};
 use tracing::{info_span, instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracy_client::frame_mark;
@@ -37,7 +33,7 @@ use vaal::{self, Context, VAALBox};
 use zenoh::{
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
-    pubsub::{Publisher, Subscriber},
+    pubsub::Subscriber,
     sample::Sample,
     Session,
 };
@@ -929,52 +925,4 @@ async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
         msg = v;
     }
     Some(msg)
-}
-
-async fn mask_thread(
-    mut rx: Receiver<Mask>,
-    mask_classes: Vec<usize>,
-    publ_mask: Publisher<'_>,
-    mask_compress_tx: Option<Sender<Mask>>,
-) {
-    loop {
-        let mut msg = match drain_recv(&mut rx).await {
-            Some(v) => v,
-            None => return,
-        };
-
-        let start = Instant::now();
-        let mask_shape = [
-            msg.height as usize,
-            msg.width as usize,
-            msg.mask.len() / msg.height as usize / msg.width as usize,
-        ];
-        if !mask_classes.is_empty() {
-            let mask = info_span!("mask_slice")
-                .in_scope(|| slice_mask(&msg.mask, &mask_shape, &mask_classes));
-            trace!("Slice takes {:?}", start.elapsed());
-            msg.mask = mask;
-        }
-
-        let (buf, enc) = info_span!("mask_publish").in_scope(|| {
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-            (buf, enc)
-        });
-        let publ = if let Some(mask_compress_tx) = mask_compress_tx.as_ref() {
-            let mask_task = publ_mask.put(buf).encoding(enc);
-            let mask_send = mask_compress_tx.send(msg);
-            let (publ, _send) = tokio::join!(mask_task, mask_send);
-            publ
-        } else {
-            publ_mask.put(buf).encoding(enc).await
-        };
-
-        match publ {
-            Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
-            Err(e) => {
-                error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)
-            }
-        }
-    }
 }
