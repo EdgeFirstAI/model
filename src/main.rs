@@ -1,8 +1,11 @@
 mod args;
 mod buildmsgs;
 mod fps;
+mod image;
 mod kalman;
 mod masks;
+mod model;
+mod tflite_model;
 mod tracker;
 
 use crate::{buildmsgs::*, tracker::*};

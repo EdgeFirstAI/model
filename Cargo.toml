@@ -69,3 +69,10 @@ uuid = { version = "1.13.2", features = ["v4"] }
 vaal = "0.3.2"
 zenoh = "1.2.1"
 zstd = "0.13"
+
+tflitec-sys = { path = "./tflitec-sys" }
+g2d-sys = {version = "1.0.0", path = "g2d-sys"}
+libloading = "0.8.6"
+dma-buf = "0.4.0"
+dma-heap = "0.4.0"
+derive_more = { version = "2.0.1", features = ["error"] }
