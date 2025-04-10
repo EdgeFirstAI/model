@@ -573,7 +573,7 @@ fn run_model(
                 Err(e) => return Err(format!("Failed get decoder model: {:?}", e)),
             };
 
-            let inputs_idx = match model.inputs() {
+            let inputs_idx = match vaal::deepviewrt::model::inputs(model) {
                 Ok(inputs) => inputs,
                 Err(e) => return Err(format!("Failed get decoder model input: {:?}", e)),
             };

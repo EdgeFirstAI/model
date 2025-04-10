@@ -290,7 +290,7 @@ fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
             Err(_) => return (input_shape, input_type),
         };
 
-        let inputs = match model.inputs() {
+        let inputs = match vaal::deepviewrt::model::inputs(model) {
             Ok(v) => v,
             _ => return (input_shape, input_type),
         };
@@ -348,13 +348,15 @@ pub fn build_model_info_msg(
     let model_name = match model_ctx {
         Some(ref ctx) if ctx.model().is_err() => String::from("No Model"),
         Some(ref ctx)
-            if ctx.model().unwrap().name().is_err()
-                || ctx.model().unwrap().name().unwrap().is_empty() =>
+            if !vaal::deepviewrt::model::name(ctx.model().unwrap())
+                .is_ok_and(|x| !x.is_empty()) =>
         {
             //the path cannot end with a `..` otherwise the model would not have loaded
             path.file_name().unwrap().to_string_lossy().into_owned()
         }
-        Some(ref ctx) => ctx.model().unwrap().name().unwrap().to_owned(),
+        Some(ref ctx) => vaal::deepviewrt::model::name(ctx.model().unwrap())
+            .unwrap()
+            .to_owned(),
         None => String::from("Loading Model..."),
     };
     debug!("Model name = {}", model_name);

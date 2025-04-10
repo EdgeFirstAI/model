@@ -1,11 +1,13 @@
-use deepviewrt::{
-    context::Context,
-    engine::Engine,
-    model,
-    tensor::{Tensor, TensorType},
-};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use std::{error::Error, io, path::Path};
+use vaal::{
+    deepviewrt::{
+        engine::Engine,
+        model,
+        tensor::{Tensor, TensorType},
+    },
+    Context, VAALBox,
+};
 
 use crate::{
     image::{Image, ImageManager, Rotation, RGBA},
@@ -20,18 +22,24 @@ pub struct RtmModel {
 impl RtmModel {
     pub fn load_model_from_mem_with_engine<P: AsRef<Path> + Into<Vec<u8>>>(
         mem: Vec<u8>,
-        engine: Option<P>,
+        engine: &str,
     ) -> Result<RtmModel, Box<dyn Error>> {
-        let engine = if let Some(p) = engine {
-            Some(Engine::new(p)?)
-        } else {
-            None
-        };
-        let mut ctx = Context::new(engine, model::memory_size(&mem), 4096 * 1024)?;
-        let inp_shape = ctx.input(0)?.shape();
-        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBA)?;
-        ctx.load_model(mem)?;
+        // let engine = if let Some(p) = engine {
+        //     Some(Engine::new(p)?)
+        // } else {
+        //     None
+        // };
+        // let mut ctx = Context::new(engine, model::memory_size(&mem), 4096 *
+        // 1024)?; let inp_shape = ctx.input(0)?.shape();
+        // let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32,
+        // RGBA)?; ctx.load_model(mem)?;
 
+        // let rtm_model = RtmModel { ctx, img };
+        // Ok(rtm_model)
+        let mut ctx = vaal::Context::new(engine)?;
+        ctx.load_model(mem)?;
+        let inp_shape = ctx.dvrt_context()?.input(0)?.shape();
+        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBA)?;
         let rtm_model = RtmModel { ctx, img };
         Ok(rtm_model)
     }
@@ -52,16 +60,17 @@ impl Model for RtmModel {
     }
 
     fn run_model(&mut self) -> Result<(), ModelError> {
-        Ok(self.ctx.run()?)
+        Ok(self.ctx.run_model()?)
     }
 
     fn input_count(&self) -> Result<usize, ModelError> {
-        Ok(model::inputs(self.ctx.model())?.len())
+        Ok(model::inputs(self.ctx.model()?)?.len())
     }
 
     fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
         Ok(self
             .ctx
+            .dvrt_context_const()?
             .input(index)?
             .shape()
             .iter()
@@ -76,7 +85,7 @@ impl Model for RtmModel {
         data_channels: usize,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {
-        let tensor = self.ctx.input_mut(index)?;
+        let tensor = self.ctx.dvrt_context()?.input_mut(index)?;
         let tensor_vol = tensor.volume() as usize;
         let tensor_channels = *tensor.shape().last().unwrap_or(&3) as usize;
         match tensor.tensor_type() {
@@ -150,12 +159,13 @@ impl Model for RtmModel {
     }
 
     fn output_count(&self) -> Result<usize, ModelError> {
-        Ok(model::outputs(self.ctx.model())?.len())
+        Ok(model::outputs(self.ctx.model()?)?.len())
     }
 
     fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
         Ok(self
             .ctx
+            .dvrt_context_const()?
             .output(index)?
             .shape()
             .iter()
@@ -164,7 +174,7 @@ impl Model for RtmModel {
     }
 
     fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
-        let tensor = self.ctx.output(index)?;
+        let tensor = self.ctx.dvrt_context_const()?.output(index)?;
         let t = tensor.mapro()?;
         let len = tensor.volume() as usize;
         if len != buffer.len() {
@@ -180,6 +190,35 @@ impl Model for RtmModel {
     }
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        todo!()
+        let mut vaal_boxes = Vec::new();
+        let len = boxes.len();
+        for _ in 0..boxes.len() {
+            vaal_boxes.push(VAALBox {
+                xmin: 0.0,
+                ymin: 0.0,
+                xmax: 0.0,
+                ymax: 0.0,
+                score: 0.0,
+                label: 0,
+            });
+        }
+        let box_count = self.ctx.boxes(&mut vaal_boxes, len)?;
+        for i in 0..box_count {
+            boxes[i] = vaal_boxes[i].into();
+        }
+        Ok(box_count)
+    }
+}
+
+impl From<VAALBox> for DetectBox {
+    fn from(value: VAALBox) -> Self {
+        DetectBox {
+            xmin: value.xmin,
+            ymin: value.ymin,
+            xmax: value.xmax,
+            ymax: value.ymax,
+            score: value.score,
+            label: value.label,
+        }
     }
 }

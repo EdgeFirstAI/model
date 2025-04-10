@@ -96,6 +96,24 @@ impl From<deepviewrt::error::Error> for ModelError {
     }
 }
 
+impl From<vaal::error::Error> for ModelError {
+    fn from(value: vaal::error::Error) -> Self {
+        ModelError {
+            kind: ModelErrorKind::RtmError,
+            source: Box::from(value),
+        }
+    }
+}
+
+impl From<vaal::deepviewrt::error::Error> for ModelError {
+    fn from(value: vaal::deepviewrt::error::Error) -> Self {
+        ModelError {
+            kind: ModelErrorKind::RtmError,
+            source: Box::from(value),
+        }
+    }
+}
+
 impl Error for ModelError {}
 
 pub trait Model {
