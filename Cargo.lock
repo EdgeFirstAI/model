@@ -552,7 +552,16 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4e6852a4ce843155f582ce1eaa1f217c98f2fb632036fa23880ef8bc18b5a12"
 dependencies = [
- "deepviewrt-sys",
+ "deepviewrt-sys 0.5.0",
+]
+
+[[package]]
+name = "deepviewrt"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdafd7511a5de56df61169bc4dd30cb80be3b3c4c9073f40f92045d910ea8f31"
+dependencies = [
+ "deepviewrt-sys 0.7.3",
 ]
 
 [[package]]
@@ -560,6 +569,15 @@ name = "deepviewrt-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d368cf2f773e1467f291c573d6ee738e01670c9e01281141a34b87139ac176aa"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "deepviewrt-sys"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c10196ef09be2b96a799194884373c5ecfe05ab8f840eeefc6b7015e81f02a"
 dependencies = [
  "libc",
 ]
@@ -1356,7 +1374,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7093f0ea0bab1f9b0cd14e68ed428d1bf8efa4fab86597e9490ccc98d9eec83"
 dependencies = [
  "log",
- "ndarray",
+ "ndarray 0.13.1",
  "num-traits",
 ]
 
@@ -1464,7 +1482,7 @@ dependencies = [
  "async-pidfd",
  "cdr",
  "clap",
- "deepviewrt",
+ "deepviewrt 0.7.3",
  "derive_more",
  "dma-buf",
  "dma-heap",
@@ -1475,6 +1493,7 @@ dependencies = [
  "libloading",
  "log",
  "nalgebra",
+ "ndarray 0.16.1",
  "nix 0.29.0",
  "pidfd_getfd",
  "serde_json",
@@ -1598,6 +1617,21 @@ dependencies = [
  "num-complex 0.2.4",
  "num-integer",
  "num-traits",
+ "rawpointer",
+]
+
+[[package]]
+name = "ndarray"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
+dependencies = [
+ "matrixmultiply 0.3.9",
+ "num-complex 0.4.6",
+ "num-integer",
+ "num-traits",
+ "portable-atomic",
+ "portable-atomic-util",
  "rawpointer",
 ]
 
@@ -2050,6 +2084,21 @@ dependencies = [
  "log",
  "pin-project-lite",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "portable-atomic"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8a2f0d8d040d7848a709caf78912debcc3f33ee4b3cac47d73d1e1069e83507"
+dependencies = [
+ "portable-atomic",
 ]
 
 [[package]]
@@ -3289,7 +3338,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed86310e34cc2b46ed0f1599265d9fcb8d3abfeca5e3afcd9e244c44b4f64a4f"
 dependencies = [
- "deepviewrt",
+ "deepviewrt 0.5.0",
  "vaal-sys",
 ]
 

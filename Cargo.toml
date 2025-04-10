@@ -34,7 +34,7 @@ profiling = [
 async-pidfd = "0.1.4"
 cdr = "0.2.4"
 clap = { version = "4.5.30", features = ["derive", "env"] }
-deepviewrt = "0.5.0"
+deepviewrt = "0.7.3"
 edgefirst-schemas = { version = "1.2.3" }
 env_logger = "0.11.6"
 lapjv = "0.2.1"
@@ -66,7 +66,7 @@ tracy-client = { version = "0.18.0", default-features = false, features = [
     "fibers",
 ] }
 uuid = { version = "1.13.2", features = ["v4"] }
-vaal = "0.3.2"
+vaal = "0.3.4"
 zenoh = "1.2.1"
 zstd = "0.13"
 
@@ -76,3 +76,4 @@ libloading = "0.8.6"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 derive_more = { version = "2.0.1", features = ["error"] }
+ndarray = "0.16.1"

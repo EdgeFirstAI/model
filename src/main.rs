@@ -5,6 +5,7 @@ mod image;
 mod kalman;
 mod masks;
 mod model;
+mod rtm_model;
 mod tflite_model;
 mod tracker;
 

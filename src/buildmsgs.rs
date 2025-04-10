@@ -244,23 +244,42 @@ pub fn build_detect_msg_and_encode(
     (msg, enc)
 }
 
-fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
+fn tensor_type_to_model_info_datatype(t: usize) -> u8 {
     match t {
-        TensorType::RAW => model_info::RAW,
-        TensorType::STR => model_info::STRING,
-        TensorType::I8 => model_info::INT8,
-        TensorType::U8 => model_info::UINT8,
-        TensorType::I16 => model_info::INT16,
-        TensorType::U16 => model_info::UINT16,
-        TensorType::F16 => model_info::FLOAT16,
-        TensorType::I32 => model_info::INT32,
-        TensorType::U32 => model_info::UINT32,
-        TensorType::F32 => model_info::FLOAT32,
-        TensorType::I64 => model_info::INT64,
-        TensorType::U64 => model_info::UINT64,
-        TensorType::F64 => model_info::FLOAT64,
+        val if val == TensorType::RAW as usize => model_info::RAW,
+        val if val == TensorType::RAW as usize => model_info::STRING,
+        val if val == TensorType::I8 as usize => model_info::INT8,
+        val if val == TensorType::U8 as usize => model_info::UINT8,
+        val if val == TensorType::I16 as usize => model_info::INT16,
+        val if val == TensorType::U16 as usize => model_info::UINT16,
+        val if val == TensorType::F16 as usize => model_info::FLOAT16,
+        val if val == TensorType::I32 as usize => model_info::INT32,
+        val if val == TensorType::U32 as usize => model_info::UINT32,
+        val if val == TensorType::F32 as usize => model_info::FLOAT32,
+        val if val == TensorType::I64 as usize => model_info::INT64,
+        val if val == TensorType::U64 as usize => model_info::UINT64,
+        val if val == TensorType::F64 as usize => model_info::FLOAT64,
+        _ => model_info::RAW,
     }
 }
+
+// fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
+//     match t {
+//         TensorType::RAW => model_info::RAW,
+//         TensorType::STR => model_info::STRING,
+//         TensorType::I8 => model_info::INT8,
+//         TensorType::U8 => model_info::UINT8,
+//         TensorType::I16 => model_info::INT16,
+//         TensorType::U16 => model_info::UINT16,
+//         TensorType::F16 => model_info::FLOAT16,
+//         TensorType::I32 => model_info::INT32,
+//         TensorType::U32 => model_info::UINT32,
+//         TensorType::F32 => model_info::FLOAT32,
+//         TensorType::I64 => model_info::INT64,
+//         TensorType::U64 => model_info::UINT64,
+//         TensorType::F64 => model_info::FLOAT64,
+//     }
+// }
 
 fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
     let mut input_shape = vec![0, 0, 0, 0];
@@ -282,7 +301,7 @@ fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
         match dvrt_ctx.tensor_index(inputs[0] as usize) {
             Ok(tensor) => {
                 input_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-                input_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+                input_type = tensor_type_to_model_info_datatype(tensor.tensor_type() as usize);
             }
             Err(_) => return (input_shape, input_type),
         };
@@ -306,7 +325,7 @@ pub fn build_model_info_msg(
     if let Some(ctx) = output_ctx {
         if let Some(tensor) = ctx.output_tensor(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-            output_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
+            output_type = tensor_type_to_model_info_datatype(tensor.tensor_type() as usize);
         }
     };
     let labels = match output_ctx {

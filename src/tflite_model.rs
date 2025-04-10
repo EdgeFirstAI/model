@@ -1,6 +1,6 @@
 use crate::{
     image::{Image, ImageManager, Rotation, RGBA},
-    model::{DetectBox, Model, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET},
+    model::{DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET},
 };
 use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask};
@@ -27,51 +27,6 @@ use tflitec_sys::{
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
 pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
-
-#[derive(Debug)]
-struct ModelError {
-    kind: ModelErrorKind,
-    source: Box<dyn std::error::Error>,
-}
-
-#[derive(Debug)]
-enum ModelErrorKind {
-    IoError,
-    TFLiteError,
-    Other,
-}
-
-impl fmt::Display for ModelErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl fmt::Display for ModelError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl From<std::io::Error> for ModelError {
-    fn from(value: std::io::Error) -> Self {
-        ModelError {
-            kind: ModelErrorKind::IoError,
-            source: Box::from(value),
-        }
-    }
-}
-
-impl From<TfLiteError> for ModelError {
-    fn from(value: TfLiteError) -> Self {
-        ModelError {
-            kind: ModelErrorKind::TFLiteError,
-            source: Box::from(value),
-        }
-    }
-}
-
-impl Error for ModelError {}
 
 struct TFLiteLib {
     tflite_lib: TFLiteLib_,
@@ -154,31 +109,29 @@ impl<'a> TFLiteModel<'a> {
 }
 
 impl<'a> Model for TFLiteModel<'a> {
-    type ModelError = ModelError;
-
     fn load_frame_dmabuf(
         &mut self,
         dmabuf: &DmaBuf,
         img_mgr: &ImageManager,
         preprocessing: Preprocessing,
-    ) -> Result<(), Self::ModelError> {
+    ) -> Result<(), ModelError> {
         let image = dmabuf.try_into()?;
         img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
         let mut dest_mapped = self.img.mmap();
         let data = dest_mapped.as_slice_mut();
-        self.load_input(0, data, preprocessing)?;
+        self.load_input(0, data, 4, preprocessing)?;
         Ok(())
     }
 
-    fn run_model(&mut self) -> Result<(), Self::ModelError> {
+    fn run_model(&mut self) -> Result<(), ModelError> {
         Ok(self.model.invoke()?)
     }
 
-    fn input_count(&self) -> Result<usize, Self::ModelError> {
+    fn input_count(&self) -> Result<usize, ModelError> {
         Ok(self.inputs.len())
     }
 
-    fn input_shape(&self, index: usize) -> Result<Vec<usize>, Self::ModelError> {
+    fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
         TFLiteModel::input_shape(&self.model, index)
     }
 
@@ -186,20 +139,20 @@ impl<'a> Model for TFLiteModel<'a> {
         &mut self,
         index: usize,
         data: &[u8],
+        data_channels: usize,
         preprocessing: Preprocessing,
-    ) -> Result<(), Self::ModelError> {
+    ) -> Result<(), ModelError> {
         let tensor = match self.inputs.get_mut(index) {
             Some(v) => v,
             None => {
                 let e = io::Error::other(format!(
                     "Tried to access input tensor {index} of {}",
-                    self.outputs.len()
+                    self.inputs.len()
                 ))
                 .into();
                 return Err(e);
             }
         };
-        const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
         let tensor_vol = tensor.volume()?;
         let tensor_channels = { *tensor.shape()?.last().unwrap_or(&3) };
         match tensor.tensor_type() {
@@ -207,7 +160,7 @@ impl<'a> Model for TFLiteModel<'a> {
                 let tensor_mapped = tensor.maprw()?;
                 for i in 0..tensor_vol / tensor_channels {
                     for j in 0..tensor_channels {
-                        tensor_mapped[i * tensor_channels + j] = data[i * DATA_CHANNELS + j];
+                        tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j];
                     }
                 }
             }
@@ -220,7 +173,7 @@ impl<'a> Model for TFLiteModel<'a> {
                 for i in 0..tensor_vol / tensor_channels {
                     for j in 0..tensor_channels {
                         tensor_mapped[i * tensor_channels + j] =
-                            (data[i * DATA_CHANNELS + j] as i16 - 128) as i8;
+                            (data[i * data_channels + j] as i16 - 128) as i8;
                     }
                 }
             }
@@ -233,7 +186,7 @@ impl<'a> Model for TFLiteModel<'a> {
                         for i in 0..tensor_vol / tensor_channels {
                             for j in 0..tensor_channels {
                                 tensor_mapped[i * tensor_channels + j] =
-                                    data[i * DATA_CHANNELS + j] as f32;
+                                    data[i * data_channels + j] as f32;
                             }
                         }
                     }
@@ -241,7 +194,7 @@ impl<'a> Model for TFLiteModel<'a> {
                         for i in 0..tensor_vol / tensor_channels {
                             for j in 0..tensor_channels {
                                 tensor_mapped[i * tensor_channels + j] =
-                                    data[i * DATA_CHANNELS + j] as f32 / 255.0;
+                                    data[i * data_channels + j] as f32 / 255.0;
                             }
                         }
                     }
@@ -249,7 +202,7 @@ impl<'a> Model for TFLiteModel<'a> {
                         for i in 0..tensor_vol / tensor_channels {
                             for j in 0..tensor_channels {
                                 tensor_mapped[i * tensor_channels + j] =
-                                    data[i * DATA_CHANNELS + j] as f32 / 127.5 - 1.0;
+                                    data[i * data_channels + j] as f32 / 127.5 - 1.0;
                             }
                         }
                     }
@@ -257,7 +210,7 @@ impl<'a> Model for TFLiteModel<'a> {
                         for i in 0..tensor_vol / tensor_channels {
                             for j in 0..tensor_channels {
                                 tensor_mapped[i * tensor_channels + j] =
-                                    (data[i * DATA_CHANNELS + j] as f32 - RGB_MEANS_IMAGENET[j])
+                                    (data[i * data_channels + j] as f32 - RGB_MEANS_IMAGENET[j])
                                         / RGB_STDS_IMAGENET[j];
                             }
                         }
@@ -281,7 +234,7 @@ impl<'a> Model for TFLiteModel<'a> {
         Ok(())
     }
 
-    fn output_shape(&self, index: usize) -> Result<Vec<usize>, Self::ModelError> {
+    fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
             None => {
@@ -296,7 +249,7 @@ impl<'a> Model for TFLiteModel<'a> {
         Ok(tensor.shape()?)
     }
 
-    fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), Self::ModelError> {
+    fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
             None => {
@@ -322,11 +275,11 @@ impl<'a> Model for TFLiteModel<'a> {
         Ok(())
     }
 
-    fn output_count(&self) -> Result<usize, Self::ModelError> {
+    fn output_count(&self) -> Result<usize, ModelError> {
         Ok(self.outputs.len())
     }
 
-    fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, Self::ModelError> {
+    fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
         todo!()
     }
 }
