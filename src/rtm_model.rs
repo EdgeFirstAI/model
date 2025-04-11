@@ -1,11 +1,8 @@
-use async_pidfd::PidFd;
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
-use log::{error, trace};
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use std::{error::Error, io, path::Path};
+use log::trace;
+use std::{error::Error, io};
 use vaal::{
     deepviewrt::{
-        engine::Engine,
         model,
         tensor::{Tensor, TensorType},
     },
@@ -14,7 +11,7 @@ use vaal::{
 
 use crate::{
     args::Args,
-    image::{Image, ImageManager, Rotation, RGBA, RGBX},
+    image::{Image, ImageManager, Rotation, RGBX},
     model::{
         DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
@@ -24,19 +21,19 @@ use crate::{
 impl From<TensorType> for DataType {
     fn from(value: TensorType) -> Self {
         match value {
-            TensorType::RAW => DataType::RAW,
-            TensorType::STR => DataType::STRING,
-            TensorType::I8 => DataType::INT8,
-            TensorType::U8 => DataType::UINT8,
-            TensorType::I16 => DataType::INT16,
-            TensorType::U16 => DataType::UINT16,
-            TensorType::I32 => DataType::INT32,
-            TensorType::U32 => DataType::UINT32,
-            TensorType::I64 => DataType::INT64,
-            TensorType::U64 => DataType::UINT64,
-            TensorType::F16 => DataType::FLOAT16,
-            TensorType::F32 => DataType::FLOAT32,
-            TensorType::F64 => DataType::FLOAT64,
+            TensorType::RAW => DataType::Raw,
+            TensorType::STR => DataType::String,
+            TensorType::I8 => DataType::Int8,
+            TensorType::U8 => DataType::UInt8,
+            TensorType::I16 => DataType::Int16,
+            TensorType::U16 => DataType::UInt16,
+            TensorType::I32 => DataType::Int32,
+            TensorType::U32 => DataType::UInt32,
+            TensorType::I64 => DataType::Int64,
+            TensorType::U64 => DataType::UInt64,
+            TensorType::F16 => DataType::Float16,
+            TensorType::F32 => DataType::Float32,
+            TensorType::F64 => DataType::Float64,
         }
     }
 }
@@ -91,7 +88,6 @@ impl RtmModel {
     }
 }
 
-use std::os::fd::AsRawFd;
 impl Model for RtmModel {
     fn load_frame_dmabuf(
         &mut self,

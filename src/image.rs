@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
@@ -323,24 +324,6 @@ impl Image {
         format_row_stride(self.format, self.width) * self.height as usize
     }
 }
-
-// impl TryFrom<&Image> for Frame {
-//     type Error = Box<dyn Error>;
-
-//     fn try_from(img: &Image) -> Result<Self, Self::Error> {
-//         let frame = Frame::new(
-//             img.width(),
-//             img.height(),
-//             0,
-//             img.format().to_string().as_str(),
-//         )?;
-//         match frame.attach(img.fd().as_raw_fd(), 0, 0) {
-//             Ok(_) => (),
-//             Err(e) => return Err(e),
-//         }
-//         Ok(frame)
-//     }
-// }
 
 impl TryFrom<&DmaBufMsg> for Image {
     type Error = io::Error;

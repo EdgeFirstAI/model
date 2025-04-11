@@ -27,9 +27,8 @@ use nix::{
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use rtm_model::RtmModel;
 use std::{
-    fs,
     os::fd::AsRawFd,
-    process::{Command, ExitCode},
+    process::ExitCode,
     time::{Duration, Instant},
 };
 use tflite_model::{TFLiteLib, DEFAULT_NPU_DELEGATE_PATH, DEFAULT_TFLITEC_PATH};
@@ -38,7 +37,6 @@ use tracing::{info_span, instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracy_client::frame_mark;
 use uuid::Uuid;
-use vaal::{self, Context};
 use zenoh::{
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
@@ -479,9 +477,9 @@ fn run_detection(
             let _ = tracker.update(args, &mut boxes[0..n_boxes], timestamp);
             let tracks = tracker.get_tracklets();
             for track in tracks {
-                let vaal_box: DetectBox = track.get_predicted_location();
+                let detect_box: DetectBox = track.get_predicted_location();
                 let box_2d =
-                    detectbox_to_boxwithtrack(args, &vaal_box, labels, timestamp, Some(track));
+                    detectbox_to_boxwithtrack(args, &detect_box, labels, timestamp, Some(track));
                 new_boxes.push(box_2d);
             }
         });
@@ -733,8 +731,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
         info!("Model has segmentation output");
     }
 
-    // if there are any leftover outputs, assume it is a detection model and
-    // vaal_boxes will decode it
+    // if there are any leftover outputs, assume it is a detection model `boxes`
     if segmentation_index.len() < output_count {
         model_type.detection = true;
         info!("Model has detection output");
@@ -742,56 +739,6 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
 
     Ok(model_type)
 }
-
-// fn identify_model(model: &Context) -> Result<ModelType, vaal::Error> {
-//     let output_count = model.output_count()?;
-//     let mut segmentation_index = Vec::new();
-//     let mut model_type = ModelType {
-//         segment_output_ind: None,
-//         detection: false,
-//     };
-//     // first: check if segmentation -> segmentation if output has 4
-// dimensions and     // the W/H is greater than 8
-//     // this criteria is wider than the current criteria for MPK segmentation,
-// but     // still ensures that detection outputs won't be mistaken for
-// segmentation     // output.
-//     for i in 0..output_count {
-//         let output = match model.output_tensor(i) {
-//             Some(v) => v,
-//             None => {
-//                 continue;
-//             }
-//         };
-//         let shape = output.shape();
-//         if output.dims() != 4 {
-//             continue;
-//         }
-//         if shape[1] < 8 {
-//             continue;
-//         }
-//         if shape[2] < 8 {
-//             continue;
-//         }
-//         info!("segmentation output shape: {:?}", shape);
-//         segmentation_index.push(i);
-//     }
-//     if segmentation_index.len() > 1 {
-//         error!("Found more than 1 valid segmentation output tensors");
-//     }
-//     if !segmentation_index.is_empty() {
-//         model_type.segment_output_ind = Some(segmentation_index[0]);
-//         info!("Model has segmentation output");
-//     }
-
-//     // if there are any leftover outputs, assume it is a detection model and
-//     // vaal_boxes will decode it
-//     if segmentation_index.len() < output_count as usize {
-//         model_type.detection = true;
-//         info!("Model has detection output");
-//     }
-
-//     Ok(model_type)
-// }
 
 // If the receiver is empty, waits for the next message, otherwise returns the
 // most recent message on this receiver. If the receiver is closed, returns None

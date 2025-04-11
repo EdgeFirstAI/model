@@ -1,8 +1,6 @@
 use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::EnvFilter;
 use zenoh::config::{Config, WhatAmI};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]

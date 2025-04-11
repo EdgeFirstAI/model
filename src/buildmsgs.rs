@@ -1,5 +1,4 @@
 use cdr::{CdrLe, Infinite};
-use deepviewrt::tensor::TensorType;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, Mask, ModelInfo},
@@ -13,7 +12,6 @@ use edgefirst_schemas::{
 use log::{debug, error};
 use std::path::Path;
 use tracing::instrument;
-use vaal::Context;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{
@@ -252,19 +250,19 @@ pub fn build_detect_msg_and_encode(
 
 fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {
     match t {
-        DataType::RAW => model_info::RAW,
-        DataType::INT8 => model_info::INT8,
-        DataType::UINT8 => model_info::UINT8,
-        DataType::INT16 => model_info::INT16,
-        DataType::UINT16 => model_info::UINT16,
-        DataType::FLOAT16 => model_info::FLOAT16,
-        DataType::INT32 => model_info::INT32,
-        DataType::UINT32 => model_info::UINT32,
-        DataType::FLOAT32 => model_info::FLOAT32,
-        DataType::INT64 => model_info::INT64,
-        DataType::UINT64 => model_info::UINT64,
-        DataType::FLOAT64 => model_info::FLOAT64,
-        DataType::STRING => model_info::STRING,
+        DataType::Raw => model_info::RAW,
+        DataType::Int8 => model_info::INT8,
+        DataType::UInt8 => model_info::UINT8,
+        DataType::Int16 => model_info::INT16,
+        DataType::UInt16 => model_info::UINT16,
+        DataType::Float16 => model_info::FLOAT16,
+        DataType::Int32 => model_info::INT32,
+        DataType::UInt32 => model_info::UINT32,
+        DataType::Float32 => model_info::FLOAT32,
+        DataType::Int64 => model_info::INT64,
+        DataType::UInt64 => model_info::UINT64,
+        DataType::Float64 => model_info::FLOAT64,
+        DataType::String => model_info::STRING,
     }
 }
 
@@ -323,7 +321,7 @@ pub fn build_model_info_msg(
             Ok(v) => v,
             Err(e) => {
                 error!("Cannot get output data type of model: {:?}", e);
-                DataType::RAW
+                DataType::Raw
             }
         };
         output_type = tensor_type_to_model_info_datatype(model_output_type);
@@ -349,7 +347,7 @@ pub fn build_model_info_msg(
     };
 
     let model_name = match model_ctx {
-        Some(ref ctx) if ctx.model_name().is_ok_and(|n| !n.is_empty()) => ctx.model_name().unwrap(),
+        Some(ctx) if ctx.model_name().is_ok_and(|n| !n.is_empty()) => ctx.model_name().unwrap(),
         Some(_) => path
             .file_name()
             .unwrap_or_default()

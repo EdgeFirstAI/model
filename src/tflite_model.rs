@@ -8,7 +8,6 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use log::{debug, error, info, trace};
 use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
@@ -29,6 +28,7 @@ impl TFLiteLib {
         Ok(TFLiteLib { tflite_lib })
     }
 
+    #[allow(dead_code)]
     pub fn load_model_from_mem(&self, mem: Vec<u8>) -> Result<TFLiteModel, Box<dyn Error>> {
         self.load_model_from_mem_with_delegate(mem, None::<String>)
     }
@@ -53,27 +53,27 @@ impl TFLiteLib {
 impl From<TensorType> for DataType {
     fn from(value: TensorType) -> Self {
         match value {
-            TensorType::UnknownType => DataType::RAW,
-            TensorType::NoType => DataType::RAW,
-            TensorType::Float32 => DataType::FLOAT32,
-            TensorType::Int32 => DataType::INT32,
-            TensorType::UInt8 => DataType::UINT8,
-            TensorType::Int64 => DataType::INT64,
-            TensorType::String => DataType::STRING,
-            TensorType::Bool => DataType::RAW,
-            TensorType::Int16 => DataType::INT16,
-            TensorType::Complex64 => DataType::RAW,
-            TensorType::Int8 => DataType::INT8,
-            TensorType::Float16 => DataType::FLOAT16,
-            TensorType::Float64 => DataType::FLOAT64,
-            TensorType::Complex128 => DataType::RAW,
-            TensorType::UInt64 => DataType::UINT64,
-            TensorType::Resource => DataType::RAW,
-            TensorType::Variant => DataType::RAW,
-            TensorType::UInt32 => DataType::UINT32,
-            TensorType::UInt16 => DataType::UINT16,
-            TensorType::Int4 => DataType::RAW,
-            TensorType::BFloat16 => DataType::RAW,
+            TensorType::UnknownType => DataType::Raw,
+            TensorType::NoType => DataType::Raw,
+            TensorType::Float32 => DataType::Float32,
+            TensorType::Int32 => DataType::Int32,
+            TensorType::UInt8 => DataType::UInt8,
+            TensorType::Int64 => DataType::Int64,
+            TensorType::String => DataType::String,
+            TensorType::Bool => DataType::Raw,
+            TensorType::Int16 => DataType::Int16,
+            TensorType::Complex64 => DataType::Raw,
+            TensorType::Int8 => DataType::Int8,
+            TensorType::Float16 => DataType::Float16,
+            TensorType::Float64 => DataType::Float64,
+            TensorType::Complex128 => DataType::Raw,
+            TensorType::UInt64 => DataType::UInt64,
+            TensorType::Resource => DataType::Raw,
+            TensorType::Variant => DataType::Raw,
+            TensorType::UInt32 => DataType::UInt32,
+            TensorType::UInt16 => DataType::UInt16,
+            TensorType::Int4 => DataType::Raw,
+            TensorType::BFloat16 => DataType::Raw,
         }
     }
 }
@@ -128,7 +128,7 @@ impl<'a> TFLiteModel<'a> {
         self.iou_threshold = args.iou;
     }
 
-    fn output_data_ref<'b, T>(&'b self, index: usize) -> Result<&'b [T], ModelError> {
+    fn output_data_ref<T>(&self, index: usize) -> Result<&[T], ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
             None => {
@@ -146,8 +146,8 @@ impl<'a> TFLiteModel<'a> {
 
     fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
         match self.output_type(index)? {
-            DataType::RAW => todo!(),
-            DataType::INT8 => {
+            DataType::Raw => todo!(),
+            DataType::Int8 => {
                 let data: &[i8] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -155,7 +155,7 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
                     .collect())
             }
-            DataType::UINT8 => {
+            DataType::UInt8 => {
                 let data: &[u8] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -163,7 +163,7 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
                     .collect())
             }
-            DataType::INT16 => {
+            DataType::Int16 => {
                 let data: &[i16] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -171,7 +171,7 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
                     .collect())
             }
-            DataType::UINT16 => {
+            DataType::UInt16 => {
                 let data: &[u16] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -179,8 +179,8 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
                     .collect())
             }
-            DataType::FLOAT16 => todo!(),
-            DataType::INT32 => {
+            DataType::Float16 => todo!(),
+            DataType::Int32 => {
                 let data: &[i32] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -188,7 +188,7 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
                     .collect())
             }
-            DataType::UINT32 => {
+            DataType::UInt32 => {
                 let data: &[u32] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
                 Ok(data
@@ -196,11 +196,11 @@ impl<'a> TFLiteModel<'a> {
                     .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
                     .collect())
             }
-            DataType::FLOAT32 => todo!(),
-            DataType::INT64 => todo!(),
-            DataType::UINT64 => todo!(),
-            DataType::FLOAT64 => todo!(),
-            DataType::STRING => todo!(),
+            DataType::Float32 => todo!(),
+            DataType::Int64 => todo!(),
+            DataType::UInt64 => todo!(),
+            DataType::Float64 => todo!(),
+            DataType::String => todo!(),
         }
     }
 

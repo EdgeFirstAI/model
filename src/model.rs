@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, path::Path};
+use std::{error::Error, fmt};
 
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use tflitec_sys::TfLiteError;
@@ -59,7 +59,7 @@ impl<'a> SupportedModel<'a> {
     }
 }
 
-impl<'a> Model for SupportedModel<'a> {
+impl Model for SupportedModel<'_> {
     fn load_frame_dmabuf(
         &mut self,
         dmabuf: &DmaBuf,
@@ -171,10 +171,9 @@ pub struct ModelError {
 
 #[derive(Debug)]
 enum ModelErrorKind {
-    IoError,
-    TFLiteError,
-    RtmError,
-    Other,
+    Io,
+    TFLite,
+    Rtm,
 }
 
 impl fmt::Display for ModelErrorKind {
@@ -185,14 +184,14 @@ impl fmt::Display for ModelErrorKind {
 
 impl fmt::Display for ModelError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "kind: {:?}, source: {:?}", self.kind, self.source)
     }
 }
 
 impl From<std::io::Error> for ModelError {
     fn from(value: std::io::Error) -> Self {
         ModelError {
-            kind: ModelErrorKind::IoError,
+            kind: ModelErrorKind::Io,
             source: Box::from(value),
         }
     }
@@ -201,7 +200,7 @@ impl From<std::io::Error> for ModelError {
 impl From<TfLiteError> for ModelError {
     fn from(value: TfLiteError) -> Self {
         ModelError {
-            kind: ModelErrorKind::TFLiteError,
+            kind: ModelErrorKind::TFLite,
             source: Box::from(value),
         }
     }
@@ -210,7 +209,7 @@ impl From<TfLiteError> for ModelError {
 impl From<deepviewrt::error::Error> for ModelError {
     fn from(value: deepviewrt::error::Error) -> Self {
         ModelError {
-            kind: ModelErrorKind::RtmError,
+            kind: ModelErrorKind::Rtm,
             source: Box::from(value),
         }
     }
@@ -219,7 +218,7 @@ impl From<deepviewrt::error::Error> for ModelError {
 impl From<vaal::error::Error> for ModelError {
     fn from(value: vaal::error::Error) -> Self {
         ModelError {
-            kind: ModelErrorKind::RtmError,
+            kind: ModelErrorKind::Rtm,
             source: Box::from(value),
         }
     }
@@ -228,7 +227,7 @@ impl From<vaal::error::Error> for ModelError {
 impl From<vaal::deepviewrt::error::Error> for ModelError {
     fn from(value: vaal::deepviewrt::error::Error) -> Self {
         ModelError {
-            kind: ModelErrorKind::RtmError,
+            kind: ModelErrorKind::Rtm,
             source: Box::from(value),
         }
     }
@@ -237,29 +236,22 @@ impl From<vaal::deepviewrt::error::Error> for ModelError {
 impl Error for ModelError {}
 
 pub enum DataType {
-    RAW = 0,
-    INT8 = 1,
-    UINT8 = 2,
-    INT16 = 3,
-    UINT16 = 4,
-    FLOAT16 = 5,
-    INT32 = 6,
-    UINT32 = 7,
-    FLOAT32 = 8,
-    INT64 = 9,
-    UINT64 = 10,
-    FLOAT64 = 11,
-    STRING = 12,
+    Raw = 0,
+    Int8 = 1,
+    UInt8 = 2,
+    Int16 = 3,
+    UInt16 = 4,
+    Float16 = 5,
+    Int32 = 6,
+    UInt32 = 7,
+    Float32 = 8,
+    Int64 = 9,
+    UInt64 = 10,
+    Float64 = 11,
+    String = 12,
 }
 
 pub trait Model {
-    // fn load_model(&mut self, model: &[u8]) -> Result<(), Self::ModelError>;
-
-    // fn load_model_file<P: AsRef<Path>>(&mut self, path: P) -> Result<(),
-    // Self::ModelError> {     let data = std::fs::read(path)?;
-    //     self.load_model(&data)
-    // }
-
     fn model_name(&self) -> Result<String, ModelError>;
 
     fn load_frame_dmabuf(
