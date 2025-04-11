@@ -6,10 +6,12 @@
 use delegate::Delegate;
 use std::{error::Error, fmt, os::raw::c_void, path::Path, ptr};
 use tensor::{Tensor, TensorMut};
+
 include!("ffi.rs");
 
 pub mod delegate;
 pub mod tensor;
+pub use libloading::Error as LibloadingError;
 #[macro_use]
 extern crate num_derive;
 
@@ -89,7 +91,7 @@ pub struct TFLiteLib {
 }
 
 impl TFLiteLib {
-    pub fn new<P>(path: P) -> Result<Self, libloading::Error>
+    pub fn new<P>(path: P) -> Result<Self, LibloadingError>
     where
         P: AsRef<Path>,
     {

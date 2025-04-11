@@ -206,15 +206,6 @@ impl From<TfLiteError> for ModelError {
     }
 }
 
-impl From<deepviewrt::error::Error> for ModelError {
-    fn from(value: deepviewrt::error::Error) -> Self {
-        ModelError {
-            kind: ModelErrorKind::Rtm,
-            source: Box::from(value),
-        }
-    }
-}
-
 impl From<vaal::error::Error> for ModelError {
     fn from(value: vaal::error::Error) -> Self {
         ModelError {

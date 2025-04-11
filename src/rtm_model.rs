@@ -51,7 +51,7 @@ impl RtmModel {
         let mut ctx = vaal::Context::new(engine)?;
         ctx.load_model(mem)?;
         let drvt = ctx.dvrt_context_const()?;
-        let inps = deepviewrt::model::inputs(ctx.model()?)?;
+        let inps = model::inputs(ctx.model()?)?;
         let inp_shape = drvt.tensor_index(inps[0] as usize)?.shape();
         let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let rtm_model = RtmModel { ctx, img };
@@ -72,7 +72,7 @@ impl RtmModel {
     }
 
     pub fn get_input_tensor(&self, index: usize) -> Result<&Tensor, ModelError> {
-        let inps = deepviewrt::model::inputs(self.ctx.model()?)?;
+        let inps = model::inputs(self.ctx.model()?)?;
         Ok(self
             .ctx
             .dvrt_context_const()?
@@ -80,7 +80,7 @@ impl RtmModel {
     }
 
     pub fn get_input_tensor_mut(&mut self, index: usize) -> Result<&mut Tensor, ModelError> {
-        let inps = deepviewrt::model::inputs(self.ctx.model()?)?;
+        let inps = model::inputs(self.ctx.model()?)?;
         Ok(self
             .ctx
             .dvrt_context()?

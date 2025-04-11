@@ -12,7 +12,7 @@ use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
     tensor::{Tensor, TensorMut, TensorType},
-    Interpreter, TFLiteLib as TFLiteLib_,
+    Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
@@ -23,7 +23,7 @@ pub struct TFLiteLib {
 }
 
 impl TFLiteLib {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, libloading::Error> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, LibloadingError> {
         let tflite_lib = TFLiteLib_::new(path)?;
         Ok(TFLiteLib { tflite_lib })
     }

@@ -548,27 +548,11 @@ checksum = "575f75dfd25738df5b91b8e43e14d44bda14637a58fae779fd2b064f8bf3e010"
 
 [[package]]
 name = "deepviewrt"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#543a895a22244fc5ca389488f3ef655189e9f02c"
-dependencies = [
- "deepviewrt-sys 0.0.0",
-]
-
-[[package]]
-name = "deepviewrt"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdafd7511a5de56df61169bc4dd30cb80be3b3c4c9073f40f92045d910ea8f31"
 dependencies = [
- "deepviewrt-sys 0.7.3",
-]
-
-[[package]]
-name = "deepviewrt-sys"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#543a895a22244fc5ca389488f3ef655189e9f02c"
-dependencies = [
- "libc",
+ "deepviewrt-sys",
 ]
 
 [[package]]
@@ -702,29 +686,6 @@ name = "either"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
-
-[[package]]
-name = "env_filter"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186e05a59d4c50738528153b83b0b0194d3a29507dfec16eccd4b342903397d0"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcaee3d8e3cfc3fd92428d477bc97fc29ec8716d180c0d74c643bb26166660e0"
-dependencies = [
- "anstream",
- "anstyle",
- "env_filter",
- "humantime",
- "log",
-]
 
 [[package]]
 name = "equivalent"
@@ -921,7 +882,6 @@ name = "g2d-sys"
 version = "1.0.0"
 dependencies = [
  "dma-buf",
- "libc",
  "libloading",
  "nix 0.28.0",
 ]
@@ -1460,14 +1420,11 @@ dependencies = [
  "async-pidfd",
  "cdr",
  "clap",
- "deepviewrt 0.7.3",
  "dma-buf",
  "dma-heap",
  "edgefirst-schemas",
- "env_logger",
  "g2d-sys",
  "lapjv",
- "libloading",
  "log",
  "nalgebra",
  "ndarray 0.16.1",
@@ -2935,7 +2892,6 @@ dependencies = [
 name = "tflitec-sys"
 version = "1.0.0"
 dependencies = [
- "libc",
  "libloading",
  "num",
  "num-derive",
@@ -3389,16 +3345,16 @@ dependencies = [
 [[package]]
 name = "vaal"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1830c019819fb779ec8f8b6e26727d14a63d3951"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1cd5efa6c226641f571972570c98dbb50d783857"
 dependencies = [
- "deepviewrt 0.0.0",
+ "deepviewrt",
  "vaal-sys",
 ]
 
 [[package]]
 name = "vaal-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1830c019819fb779ec8f8b6e26727d14a63d3951"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1cd5efa6c226641f571972570c98dbb50d783857"
 dependencies = [
  "libc",
 ]
