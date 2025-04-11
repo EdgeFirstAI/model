@@ -1,4 +1,7 @@
+use async_pidfd::PidFd;
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
+use log::{error, trace};
+use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{error::Error, io, path::Path};
 use vaal::{
     deepviewrt::{
@@ -10,9 +13,33 @@ use vaal::{
 };
 
 use crate::{
-    image::{Image, ImageManager, Rotation, RGBA},
-    model::{DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET},
+    args::Args,
+    image::{Image, ImageManager, Rotation, RGBA, RGBX},
+    model::{
+        DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
+        RGB_STDS_IMAGENET,
+    },
 };
+
+impl From<TensorType> for DataType {
+    fn from(value: TensorType) -> Self {
+        match value {
+            TensorType::RAW => DataType::RAW,
+            TensorType::STR => DataType::STRING,
+            TensorType::I8 => DataType::INT8,
+            TensorType::U8 => DataType::UINT8,
+            TensorType::I16 => DataType::INT16,
+            TensorType::U16 => DataType::UINT16,
+            TensorType::I32 => DataType::INT32,
+            TensorType::U32 => DataType::UINT32,
+            TensorType::I64 => DataType::INT64,
+            TensorType::U64 => DataType::UINT64,
+            TensorType::F16 => DataType::FLOAT16,
+            TensorType::F32 => DataType::FLOAT32,
+            TensorType::F64 => DataType::FLOAT64,
+        }
+    }
+}
 
 pub struct RtmModel {
     ctx: Context,
@@ -20,31 +47,51 @@ pub struct RtmModel {
 }
 
 impl RtmModel {
-    pub fn load_model_from_mem_with_engine<P: AsRef<Path> + Into<Vec<u8>>>(
+    pub fn load_model_from_mem_with_engine(
         mem: Vec<u8>,
         engine: &str,
     ) -> Result<RtmModel, Box<dyn Error>> {
-        // let engine = if let Some(p) = engine {
-        //     Some(Engine::new(p)?)
-        // } else {
-        //     None
-        // };
-        // let mut ctx = Context::new(engine, model::memory_size(&mem), 4096 *
-        // 1024)?; let inp_shape = ctx.input(0)?.shape();
-        // let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32,
-        // RGBA)?; ctx.load_model(mem)?;
-
-        // let rtm_model = RtmModel { ctx, img };
-        // Ok(rtm_model)
         let mut ctx = vaal::Context::new(engine)?;
         ctx.load_model(mem)?;
-        let inp_shape = ctx.dvrt_context()?.input(0)?.shape();
-        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBA)?;
+        let drvt = ctx.dvrt_context_const()?;
+        let inps = deepviewrt::model::inputs(ctx.model()?)?;
+        let inp_shape = drvt.tensor_index(inps[0] as usize)?.shape();
+        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let rtm_model = RtmModel { ctx, img };
         Ok(rtm_model)
     }
+
+    pub fn setup_context(&mut self, args: &Args) {
+        self.ctx
+            .parameter_seti("max_detection", &[args.max_boxes as i32])
+            .unwrap();
+        self.ctx
+            .parameter_setf("score_threshold", &[args.threshold])
+            .unwrap();
+        self.ctx
+            .parameter_setf("iou_threshold", &[args.iou])
+            .unwrap();
+        self.ctx.parameter_sets("nms_type", "standard").unwrap();
+    }
+
+    pub fn get_input_tensor(&self, index: usize) -> Result<&Tensor, ModelError> {
+        let inps = deepviewrt::model::inputs(self.ctx.model()?)?;
+        Ok(self
+            .ctx
+            .dvrt_context_const()?
+            .tensor_index(inps[index] as usize)?)
+    }
+
+    pub fn get_input_tensor_mut(&mut self, index: usize) -> Result<&mut Tensor, ModelError> {
+        let inps = deepviewrt::model::inputs(self.ctx.model()?)?;
+        Ok(self
+            .ctx
+            .dvrt_context()?
+            .tensor_index_mut(inps[index] as usize)?)
+    }
 }
 
+use std::os::fd::AsRawFd;
 impl Model for RtmModel {
     fn load_frame_dmabuf(
         &mut self,
@@ -52,30 +99,72 @@ impl Model for RtmModel {
         img_mgr: &ImageManager,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {
-        let image = dmabuf.try_into()?;
-        img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
-        let mut dest_mapped = self.img.mmap();
-        let data = dest_mapped.as_slice_mut();
-        self.load_input(0, data, 4, preprocessing)
+        trace!("load_frame_dmabuf");
+        let mut dma_buf = dmabuf.clone();
+        // let image: Image = dmabuf.try_into()?;
+        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                    dma_buf.pid, e
+                );
+                return Err(e.into());
+            }
+        };
+        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                        "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+                        e
+                    );
+                return Err(e.into());
+            }
+        };
+
+        dma_buf.fd = fd.as_raw_fd();
+
+        self.ctx.load_frame_dmabuf(
+            None,
+            dma_buf.fd,
+            dma_buf.fourcc,
+            dma_buf.width as i32,
+            dma_buf.height as i32,
+            None,
+            0,
+        )?;
+        // self.ctx.load_frame_dmabuf(
+        //     None,
+        //     image.raw_fd(),
+        //     image.format().into(),
+        //     image.width() as i32,
+        //     image.height() as i32,
+        //     None,
+        //     0,
+        // )?;
+        Ok(())
+        // img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
+        // let mut dest_mapped = self.img.mmap();
+        // let data = dest_mapped.as_slice_mut();
+        // self.load_input(0, data, 4, preprocessing)
     }
 
     fn run_model(&mut self) -> Result<(), ModelError> {
+        trace!("run_model");
         Ok(self.ctx.run_model()?)
     }
 
     fn input_count(&self) -> Result<usize, ModelError> {
+        trace!("input_count");
         Ok(model::inputs(self.ctx.model()?)?.len())
     }
 
     fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
-        Ok(self
-            .ctx
-            .dvrt_context_const()?
-            .input(index)?
-            .shape()
-            .iter()
-            .map(|f| *f as usize)
-            .collect())
+        trace!("input_shape");
+        let tensor = self.get_input_tensor(index)?;
+        let inp_shape = tensor.shape();
+        Ok(inp_shape.iter().map(|f| *f as usize).collect())
     }
 
     fn load_input(
@@ -85,9 +174,15 @@ impl Model for RtmModel {
         data_channels: usize,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {
-        let tensor = self.ctx.dvrt_context()?.input_mut(index)?;
+        trace!("load_input");
+        let tensor = self.get_input_tensor_mut(index)?;
+        let tensor_shape = tensor.shape();
         let tensor_vol = tensor.volume() as usize;
-        let tensor_channels = *tensor.shape().last().unwrap_or(&3) as usize;
+        let tensor_channels = *tensor_shape.last().unwrap_or(&3) as usize;
+        println!(
+            "tensor_vol = {tensor_vol} tensor_channels = {tensor_channels} tensor_shape = {:?}",
+            tensor_shape
+        );
         match tensor.tensor_type() {
             TensorType::U8 => {
                 let mut tensor_mapped = tensor.maprw()?;
@@ -159,22 +254,40 @@ impl Model for RtmModel {
     }
 
     fn output_count(&self) -> Result<usize, ModelError> {
+        trace!("output_count");
         Ok(model::outputs(self.ctx.model()?)?.len())
     }
 
     fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
-        Ok(self
-            .ctx
-            .dvrt_context_const()?
-            .output(index)?
-            .shape()
-            .iter()
-            .map(|f| *f as usize)
-            .collect())
+        trace!("output_shape");
+        let output = match self.ctx.output_tensor(index as i32) {
+            Some(v) => v,
+            None => {
+                let e = io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    model::outputs(self.ctx.model()?)?.len()
+                ))
+                .into();
+                return Err(e);
+            }
+        };
+        let shape = output.shape();
+        Ok(shape.iter().map(|f| *f as usize).collect())
     }
 
     fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
-        let tensor = self.ctx.dvrt_context_const()?.output(index)?;
+        trace!("output_data");
+        let tensor = match self.ctx.output_tensor(index as i32) {
+            Some(v) => v,
+            None => {
+                let e = io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    model::outputs(self.ctx.model()?)?.len()
+                ))
+                .into();
+                return Err(e);
+            }
+        };
         let t = tensor.mapro()?;
         let len = tensor.volume() as usize;
         if len != buffer.len() {
@@ -190,6 +303,7 @@ impl Model for RtmModel {
     }
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+        println!("boxes");
         let mut vaal_boxes = Vec::new();
         let len = boxes.len();
         for _ in 0..boxes.len() {
@@ -202,11 +316,45 @@ impl Model for RtmModel {
                 label: 0,
             });
         }
+
         let box_count = self.ctx.boxes(&mut vaal_boxes, len)?;
         for i in 0..box_count {
             boxes[i] = vaal_boxes[i].into();
         }
+
         Ok(box_count)
+    }
+
+    fn input_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {
+        trace!("input_type");
+        let tensor = self.get_input_tensor(index)?;
+        Ok(tensor.tensor_type().into())
+    }
+
+    fn output_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {
+        trace!("output_type");
+        let tensor = match self.ctx.output_tensor(index as i32) {
+            Some(v) => v,
+            None => {
+                let e = io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    model::outputs(self.ctx.model()?)?.len()
+                ))
+                .into();
+                return Err(e);
+            }
+        };
+        Ok(tensor.tensor_type().into())
+    }
+
+    fn labels(&self) -> Result<Vec<String>, ModelError> {
+        trace!("labels");
+        Ok(self.ctx.labels().iter().map(|s| s.to_string()).collect())
+    }
+
+    fn model_name(&self) -> Result<String, ModelError> {
+        trace!("model_name");
+        Ok(model::name(self.ctx.model()?)?.to_string())
     }
 }
 

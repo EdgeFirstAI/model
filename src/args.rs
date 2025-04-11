@@ -2,6 +2,7 @@ use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
 use tracing::level_filters::LevelFilter;
+use tracing_subscriber::EnvFilter;
 use zenoh::config::{Config, WhatAmI};
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
@@ -58,7 +59,7 @@ pub struct Args {
 
     /// max boxes for detections
     #[arg(long, env, default_value = "100")]
-    pub max_boxes: i32,
+    pub max_boxes: usize,
 
     /// Label offset for detections
     #[arg(long, env, default_value = "0")]
@@ -122,10 +123,9 @@ pub struct Args {
                                              * processing on Vec. This allows us to parse "" as
                                              * Vec::new(). */
 
-    /// Application log level
-    #[arg(long, env, default_value = "info")]
-    pub rust_log: LevelFilter,
-
+    // /// Application log level
+    // #[arg(long, env, default_value = "info")]
+    // pub rust_log: EnvFilter,
     /// Enable Tracy profiler broadcast
     #[arg(long, env)]
     pub tracy: bool,

@@ -1,9 +1,8 @@
-use crate::{args::Args, kalman::ConstantVelocityXYAHModel2};
+use crate::{args::Args, kalman::ConstantVelocityXYAHModel2, model::DetectBox};
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
-use vaal::VAALBox;
 
 #[allow(dead_code)]
 pub struct ByteTrack {
@@ -16,7 +15,7 @@ pub struct ByteTrack {
 #[derive(Debug, Clone)]
 pub struct Tracklet {
     pub id: Uuid,
-    pub prev_boxes: vaal::VAALBox,
+    pub prev_boxes: DetectBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
     pub expiry: u64,
     pub count: i32,
@@ -24,16 +23,16 @@ pub struct Tracklet {
 }
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &VAALBox, args: &Args, ts: u64) {
+    fn update(&mut self, vaalbox: &DetectBox, args: &Args, ts: u64) {
         self.count += 1;
         self.expiry = ts + (args.track_extra_lifespan * 1e9) as u64;
         self.prev_boxes = *vaalbox;
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
 
-    pub fn get_predicted_location(&self) -> VAALBox {
+    pub fn get_predicted_location(&self) -> DetectBox {
         let predicted_xyah = self.filter.mean.as_slice();
-        let mut expected = VAALBox {
+        let mut expected = DetectBox {
             xmin: 0.0,
             xmax: 0.0,
             ymin: 0.0,
@@ -46,7 +45,7 @@ impl Tracklet {
     }
 }
 
-fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
+fn vaalbox_to_xyah(vaal_box: &DetectBox) -> [f32; 4] {
     let x = (vaal_box.xmax + vaal_box.xmin) / 2.0;
     let y = (vaal_box.ymax + vaal_box.ymin) / 2.0;
     let w = (vaal_box.xmax - vaal_box.xmin).max(EPSILON);
@@ -56,7 +55,7 @@ fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
     [x, y, a, h]
 }
 
-fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
+fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut DetectBox) {
     if xyah.len() < 4 {
         return;
     }
@@ -81,7 +80,7 @@ pub struct TrackInfo {
 const INVALID_MATCH: f32 = 1000000.0;
 const EPSILON: f32 = 0.00001;
 
-fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
+fn iou(box1: &DetectBox, box2: &DetectBox) -> f32 {
     let intersection = (box1.xmax.min(box2.xmax) - box1.xmin.max(box2.xmin)).max(0.0)
         * (box1.ymax.min(box2.ymax) - box1.ymin.max(box2.ymin)).max(0.0);
 
@@ -102,7 +101,7 @@ fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
 
 fn box_cost(
     track: &Tracklet,
-    new_box: &VAALBox,
+    new_box: &DetectBox,
     distance: f32,
     score_threshold: f32,
     iou_threshold: f32,
@@ -115,7 +114,7 @@ fn box_cost(
 
     // use iou between predicted box and real box:
     let predicted_xyah = track.filter.mean.as_slice();
-    let mut expected = VAALBox {
+    let mut expected = DetectBox {
         xmin: 0.0,
         xmax: 0.0,
         ymin: 0.0,
@@ -143,7 +142,7 @@ impl ByteTrack {
 
     fn compute_costs(
         &mut self,
-        boxes: &[VAALBox],
+        boxes: &[DetectBox],
         score_threshold: f32,
         iou_threshold: f32,
         box_filter: &[bool],
@@ -182,7 +181,7 @@ impl ByteTrack {
     pub fn update(
         &mut self,
         args: &Args,
-        boxes: &mut [VAALBox],
+        boxes: &mut [DetectBox],
         timestamp: u64,
     ) -> Vec<Option<TrackInfo>> {
         self.frame_count += 1;
@@ -321,13 +320,14 @@ impl ByteTrack {
 
 #[cfg(test)]
 mod tests {
-    use vaal::VAALBox;
+
+    use crate::model::DetectBox;
 
     use super::{vaalbox_to_xyah, xyah_to_vaalbox};
 
     #[test]
     fn filter() {
-        let box1 = VAALBox {
+        let box1 = DetectBox {
             xmin: 0.02135,
             xmax: 0.12438,
             ymin: 0.0134,
@@ -336,7 +336,7 @@ mod tests {
             label: 0,
         };
         let xyah = vaalbox_to_xyah(&box1);
-        let mut box2 = VAALBox {
+        let mut box2 = DetectBox {
             xmin: 0.0,
             xmax: 0.0,
             ymin: 0.0,

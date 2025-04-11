@@ -16,7 +16,7 @@ use std::{
     ffi::c_void,
     io,
     os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd},
+        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
         unix::io::OwnedFd,
     },
     ptr::null_mut,
@@ -348,12 +348,12 @@ impl TryFrom<&DmaBufMsg> for Image {
     fn try_from(dma_buf: &DmaBufMsg) -> Result<Self, io::Error> {
         let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
         let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
-
+        let fourcc = dma_buf.fourcc.into();
         Ok(Image {
             fd: fd.into(),
             width: dma_buf.width,
-            height: dma_buf.width,
-            format: dma_buf.fourcc.into(),
+            height: dma_buf.height,
+            format: fourcc,
         })
     }
 }
