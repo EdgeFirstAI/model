@@ -235,6 +235,7 @@ impl From<vaal::deepviewrt::error::Error> for ModelError {
 
 impl Error for ModelError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataType {
     Raw = 0,
     Int8 = 1,

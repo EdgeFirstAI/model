@@ -378,6 +378,7 @@ impl Model for TFLiteModel<'_> {
             .into());
         }
         buffer.copy_from_slice(data);
+
         Ok(())
     }
 

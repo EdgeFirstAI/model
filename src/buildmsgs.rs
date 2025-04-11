@@ -169,14 +169,38 @@ pub fn build_segmentation_msg(
             Err(e) => error!("Could not get output shape: {:?}", e),
         }
         let len = output_shape.iter().product();
-        let mut buffer = vec![0; len];
-        if let Err(e) = model.output_data(output_index, &mut buffer) {
-            error!(
-                "Could not get output data from segmentation tensor: {:?}",
-                e
-            );
+
+        let output_type = match model.output_type(output_index) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get output type: {:?}", e);
+                DataType::UInt8
+            }
+        };
+
+        match output_type {
+            DataType::Int8 => {
+                let mut buffer = vec![0i8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!(
+                        "Could not get output data from segmentation tensor: {:?}",
+                        e
+                    );
+                }
+                buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
+            }
+            DataType::UInt8 => {
+                let mut buffer = vec![0u8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!(
+                        "Could not get output data from segmentation tensor: {:?}",
+                        e
+                    );
+                }
+                buffer
+            }
+            _ => todo!(),
         }
-        buffer
     } else {
         Vec::new()
     };
