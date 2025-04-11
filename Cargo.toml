@@ -75,6 +75,9 @@ g2d-sys = {version = "1.0.0", path = "g2d-sys"}
 libloading = "0.8.6"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
-derive_more = { version = "2.0.1", features = ["error"] }
+
+
+[dev-dependencies]
+rand = "0.9.0"
 ndarray = { version = "0.16.1", features = ["rayon"] }
 ndarray-stats = "0.6.0"

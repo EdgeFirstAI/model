@@ -1,11 +1,6 @@
 use std::time::Instant;
 
 use log::debug;
-use ndarray::{
-    parallel::prelude::{IntoParallelIterator, ParallelIterator},
-    ArrayView2, Zip,
-};
-use ndarray_stats::QuantileExt as _;
 
 use crate::model::DetectBox;
 
@@ -39,17 +34,24 @@ pub fn decode_boxes(
     boxes: &[f32],
     num_classes: usize,
 ) -> Vec<(usize, f32, [f32; 4])> {
-    let scores = ArrayView2::from_shape([scores.len() / num_classes, num_classes], scores).unwrap();
-    let boxes = ArrayView2::from_shape([boxes.len() / 4, 4], boxes).unwrap();
-    Zip::from(scores.rows())
-        .and(boxes.rows())
-        .into_par_iter()
-        .filter(|(score, _)| *score.max().unwrap() > threshold)
-        .map(|(score, bbox)| {
-            let label = score.argmax().unwrap();
-            (label, score[label], [bbox[0], bbox[1], bbox[2], bbox[3]])
-        })
-        .collect()
+    assert_eq!(scores.len() / num_classes, boxes.len() / 4);
+    let box_count = scores.len() / num_classes;
+    let mut out = Vec::new();
+    for i in 0..box_count {
+        let mut score = 0.0;
+        let mut label = 0;
+        for j in 0..num_classes {
+            if scores[i * num_classes + j] > score {
+                score = scores[i * num_classes + j];
+                label = j;
+            }
+        }
+        let bbox = &boxes[i * 4..(i + 1) * 4];
+        if score > threshold {
+            out.push((label, score, [bbox[0], bbox[1], bbox[2], bbox[3]]));
+        }
+    }
+    out
 }
 
 pub fn nms(iou: f32, mut boxes: Vec<(usize, f32, [f32; 4])>) -> Vec<(usize, f32, [f32; 4])> {
@@ -95,4 +97,49 @@ fn jaccard(a: [f32; 4], b: [f32; 4]) -> f32 {
     let union = area_a + area_b - intersection;
 
     intersection / union
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::nms::decode_boxes;
+
+    use ndarray::{
+        parallel::prelude::{IntoParallelIterator, ParallelIterator},
+        ArrayView2, Zip,
+    };
+    use ndarray_stats::QuantileExt as _;
+    use rand::random;
+    pub fn decode_boxes1(
+        threshold: f32,
+        scores: &[f32],
+        boxes: &[f32],
+        num_classes: usize,
+    ) -> Vec<(usize, f32, [f32; 4])> {
+        let scores =
+            ArrayView2::from_shape([scores.len() / num_classes, num_classes], scores).unwrap();
+        let boxes = ArrayView2::from_shape([boxes.len() / 4, 4], boxes).unwrap();
+        Zip::from(scores.rows())
+            .and(boxes.rows())
+            .into_par_iter()
+            .filter(|(score, _)| *score.max().unwrap() > threshold)
+            .map(|(score, bbox)| {
+                let label = score.argmax().unwrap();
+                (label, score[label], [bbox[0], bbox[1], bbox[2], bbox[3]])
+            })
+            .collect()
+    }
+
+    #[test]
+    fn box_decoding() {
+        const NUM_BOXES: usize = 6009;
+        const NUM_CLASSES: usize = 10;
+        let box_data: [f32; NUM_BOXES * 4] = random();
+        let score_data: [f32; NUM_BOXES * NUM_CLASSES] = random();
+        let decoded_boxes_ndarray = decode_boxes1(0.5, &score_data, &box_data, NUM_CLASSES);
+        let decoded_boxes = decode_boxes(0.5, &score_data, &box_data, NUM_CLASSES);
+        assert_eq!(
+            decoded_boxes_ndarray, decoded_boxes,
+            "Decoded boxes were not equal"
+        );
+    }
 }
