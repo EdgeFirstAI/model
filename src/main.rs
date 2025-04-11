@@ -5,6 +5,7 @@ mod image;
 mod kalman;
 mod masks;
 mod model;
+mod nms;
 mod rtm_model;
 mod tflite_model;
 mod tracker;
@@ -174,7 +175,7 @@ async fn main() -> ExitCode {
                 None
             };
 
-            let model = match _tflite
+            let mut model = match _tflite
                 .as_ref()
                 .unwrap()
                 .load_model_from_mem_with_delegate(model_data, delegate)
@@ -185,6 +186,7 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
+            model.setup_context(&args);
             SupportedModel::from_tflite_model(model)
         }
         Some(v) if v == "rtm" => {
@@ -209,83 +211,6 @@ async fn main() -> ExitCode {
         }
     };
     info!("Loaded model");
-    // let mut backbone = match Context::new(&args.engine) {
-    //     Ok(v) => {
-    //         debug!("Opened VAAL Context on {}", args.engine);
-    //         v
-    //     }
-    //     Err(e) => {
-    //         error!("Could not open VAAL Context on {}, {:?}", args.engine, e);
-    //         return;
-    //     }
-    // };
-    // let filename = match args.model.to_str() {
-    //     Some(v) => v,
-    //     None => {
-    //         error!(
-    //             "Cannot use file {:?}, please use only utf8 characters in file
-    // path",             args.model
-    //         );
-    //         return;
-    //     }
-    // };
-    // match backbone.load_model_file(filename) {
-    //     Ok(_) => info!("Loaded backbone model {:?}", filename),
-    //     Err(e) => {
-    //         error!("Could not load model file {}: {:?}", filename, e);
-    //         return;
-    //     }
-    // }
-    // let mut decoder = None;
-    // let model_type;
-    // if args.decoder_model.is_some() {
-    //     let decoder_device = "cpu";
-    //     let mut decoder_ctx = match Context::new(decoder_device) {
-    //         Ok(v) => {
-    //             debug!("Opened VAAL Context on {}", decoder_device);
-    //             v
-    //         }
-    //         Err(e) => {
-    //             error!("Could not open VAAL Context on {}, {:?}", decoder_device,
-    // e);             return;
-    //         }
-    //     };
-    //     setup_context(&mut decoder_ctx, &args);
-    //     let decoder_file = match args.decoder_model.as_ref().unwrap().to_str() {
-    //         Some(v) => v,
-    //         None => {
-    //             error!(
-    //                 "Cannot use file {:?}, please use only utf8 characters in
-    // file path",                 args.decoder_model.as_ref().unwrap()
-    //             );
-    //             return;
-    //         }
-    //     };
-    //     match decoder_ctx.load_model_file(decoder_file) {
-    //         Ok(_) => info!("Loaded decoder model {:?}", decoder_file),
-    //         Err(e) => {
-    //             error!("Could not load decoder file {}: {:?}", decoder_file, e);
-    //             return;
-    //         }
-    //     }
-    //     model_type = match identify_model(&decoder_ctx) {
-    //         Ok(v) => v,
-    //         Err(e) => {
-    //             error!("Could not identify model type: {:?}", e);
-    //             return;
-    //         }
-    //     };
-    //     decoder = Some(decoder_ctx);
-    // } else {
-    //     model_type = match identify_model(&backbone) {
-    //         Ok(v) => v,
-    //         Err(e) => {
-    //             error!("Could not identify model type: {:?}", e);
-    //             return;
-    //         }
-    //     };
-    //     setup_context(&mut backbone, &args);
-    // }
 
     let model_type = match identify_model(&model) {
         Ok(v) => v,
@@ -419,35 +344,6 @@ async fn main() -> ExitCode {
             Ok(_) => trace!("Loaded frame into model"),
             Err(e) => error!("Could not load frame into model: {:?}", e),
         }
-        // let fd = match info_span!("dma_buf_open").in_scope(|| {
-        //     let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
-        //         Ok(v) => v,
-        //         Err(e) => {
-        //             error!(
-        //             "Error getting PID {:?}, please check if the camera process is
-        // running: {:?}",             dma_buf.pid, e
-        //         );
-        //             return Err(e);
-        //         }
-        //     };
-        //     let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd,
-        // GetFdFlags::empty()) {         Ok(v) => v,
-        //         Err(e) => {
-        //             error!(
-        //             "Error getting Camera DMA file descriptor, please check if
-        // current process is running with same permissions as camera: {:?}",
-        //             e
-        //         );
-        //             return Err(e);
-        //         }
-        //     };
-
-        //     Ok(fd)
-        // }) {
-        //     Ok(v) => v,
-        //     Err(_) => continue,
-        // };
-        // dma_buf.fd = fd.as_raw_fd();
 
         let model_start = Instant::now();
 
@@ -597,166 +493,6 @@ fn run_detection(
     }
     new_boxes
 }
-
-#[inline(always)]
-#[instrument(skip_all)]
-fn run_model(
-    dma_buf: &DmaBuf,
-    backbone: &vaal::Context,
-    decoder: &mut Option<vaal::Context>,
-) -> Result<(), String> {
-    info_span!("load_frame").in_scope(|| {
-        match backbone.load_frame_dmabuf(
-            None,
-            dma_buf.fd,
-            dma_buf.fourcc,
-            dma_buf.width as i32,
-            dma_buf.height as i32,
-            None,
-            0,
-        ) {
-            Err(vaal::Error::VAALError(e)) => {
-                //possible vaal error that we can handle
-                let poss_err =
-                    "attempted an operation which is unsupported on the current platform";
-                if e == poss_err {
-                    error!(
-                        "Attemping to clear cache,\
-                            likely due to g2d alloc fail,\
-                            this should be fixed in VAAL"
-                    );
-                    match clear_cached_memory() {
-                        Ok(()) => error!("Cleared cached memory"),
-                        Err(()) => error!("Could not clear cached memory"),
-                    }
-                } else {
-                    return Err(format!("Could not load frame {:?}", e));
-                }
-
-                match backbone.load_frame_dmabuf(
-                    None,
-                    dma_buf.fd,
-                    dma_buf.fourcc,
-                    dma_buf.width as i32,
-                    dma_buf.height as i32,
-                    None,
-                    0,
-                ) {
-                    Err(e) => return Err(format!("Could not load frame {:?}", e)),
-                    Ok(_) => {
-                        trace!("Loaded frame into model")
-                    }
-                };
-            }
-            Err(e) => return Err(format!("Could not load frame {:?}", e)),
-            Ok(_) => {
-                trace!("Loaded frame into model");
-            }
-        }
-        Ok(())
-    })?;
-
-    info_span!("run_backbone").in_scope(|| {
-        if let Err(e) = backbone.run_model() {
-            return Err(format!("Failed to run model: {}", e));
-        }
-        trace!("Ran model inference");
-        Ok(())
-    })?;
-
-    info_span!("run_decoder").in_scope(|| {
-        if decoder.is_some() {
-            let decoder_: &mut Context = decoder.as_mut().unwrap();
-            let model = match decoder_.model() {
-                Ok(model) => model,
-                Err(e) => return Err(format!("Failed get decoder model: {:?}", e)),
-            };
-
-            let inputs_idx = match vaal::deepviewrt::model::inputs(model) {
-                Ok(inputs) => inputs,
-                Err(e) => return Err(format!("Failed get decoder model input: {:?}", e)),
-            };
-
-            let context = decoder_.dvrt_context().unwrap();
-
-            let mut in_1_idx = inputs_idx[1];
-            let mut in_2_idx = inputs_idx[0];
-
-            let out_1 = backbone.output_tensor(0).unwrap();
-            let in_1 = context.tensor_index(in_1_idx as usize).unwrap();
-
-            let out_2 = backbone.output_tensor(1).unwrap();
-
-            let out_1_shape = out_1.shape();
-
-            let in_1_shape = in_1.shape();
-
-            if out_1_shape[1] != in_1_shape[1] && out_1_shape[2] != in_1_shape[2] {
-                std::mem::swap(&mut in_2_idx, &mut in_1_idx);
-            }
-
-            let in_1 = context.tensor_index_mut(in_1_idx as usize).unwrap();
-
-            if let Err(e) = out_1.dequantize(in_1) {
-                return Err(format!(
-                    "Failed to copy backbone out_1 ({:?}) to decoder in_1 ({:?}): {}",
-                    out_1.tensor_type(),
-                    in_1.tensor_type(),
-                    e
-                ));
-            }
-            trace!("Copied backdone out_1 to decoder in_1");
-
-            let in_2 = context.tensor_index_mut(in_2_idx as usize).unwrap();
-
-            if let Err(e) = out_2.dequantize(in_2) {
-                return Err(format!(
-                    "Failed to copy backbone out_2 ({:?}) to decoder in_2 ({:?}): {}",
-                    out_2.tensor_type(),
-                    in_2.tensor_type(),
-                    e
-                ));
-            }
-            trace!("Copied backdone out_2 to decoder in_2");
-
-            if let Err(e) = decoder_.run_model() {
-                return Err(format!("Failed to run decoder model: {:?}", e));
-            }
-            trace!("Ran decoder model inference");
-        }
-
-        Ok(())
-    })?;
-
-    Ok(())
-}
-
-/*
-    This function clears cached memory pages
-*/
-fn clear_cached_memory() -> Result<(), ()> {
-    match Command::new("sync").output() {
-        Ok(output) => {
-            match output.status.code() {
-                Some(0) => {}
-                _ => {
-                    error!("sync command Failed");
-                    error!("stdout {:?}", output.stdout);
-                    error!("stderr {:?}", output.stderr);
-                    return Err(());
-                }
-            };
-        }
-        Err(e) => {
-            error!("Unable to run sync");
-            error!("{:?}", e);
-            return Err(());
-        }
-    };
-    fs::write("/proc/sys/vm/drop_caches", "1").unwrap();
-    Ok(())
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct BoxWithTrack {
     #[doc = " left-most coordinate of the bounding box."]
@@ -770,7 +506,7 @@ pub struct BoxWithTrack {
     #[doc = " model-specific score for this detection, higher implies more confidence."]
     pub score: f64,
     #[doc = " index of label for this detection"]
-    pub index: i32,
+    pub index: usize,
     #[doc = " label for this detection"]
     pub label: String,
     #[doc = " timestamp"]
@@ -795,7 +531,7 @@ fn detectbox_to_boxwithtrack(
     ts: u64,
     track: Option<&Tracklet>,
 ) -> BoxWithTrack {
-    let label_ind = b.label + args.label_offset;
+    let label_ind = b.label as i32 + args.label_offset;
     let label = match labels.get(label_ind as usize) {
         Some(s) => s.clone(),
         None => b.label.to_string(),

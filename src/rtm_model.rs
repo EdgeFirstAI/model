@@ -320,7 +320,7 @@ impl From<VAALBox> for DetectBox {
             xmax: value.xmax,
             ymax: value.ymax,
             score: value.score,
-            label: value.label,
+            label: value.label as usize,
         }
     }
 }

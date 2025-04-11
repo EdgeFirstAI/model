@@ -1,9 +1,11 @@
 use crate::{
+    args::Args,
     image::{Image, ImageManager, Rotation, RGBX},
     model::{
         DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
     },
+    nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::{debug, error, info, trace};
@@ -81,6 +83,8 @@ pub struct TFLiteModel<'a> {
     img: Image,
     inputs: Vec<TensorMut<'a>>,
     outputs: Vec<Tensor<'a>>,
+    score_threshold: f32,
+    iou_threshold: f32,
 }
 
 impl<'a> TFLiteModel<'a> {
@@ -111,10 +115,93 @@ impl<'a> TFLiteModel<'a> {
             img,
             inputs: Vec::new(),
             outputs: Vec::new(),
+            score_threshold: 0.5,
+            iou_threshold: 0.5,
         };
         m.init_tensors()?;
         m.run_model()?;
         Ok(m)
+    }
+
+    pub fn setup_context(&mut self, args: &Args) {
+        self.score_threshold = args.threshold;
+        self.iou_threshold = args.iou;
+    }
+
+    fn output_data_ref<'b, T>(&'b self, index: usize) -> Result<&'b [T], ModelError> {
+        let tensor = match self.outputs.get(index) {
+            Some(v) => v,
+            None => {
+                let e = io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    self.outputs.len()
+                ))
+                .into();
+                return Err(e);
+            }
+        };
+        let data = tensor.mapro()?;
+        Ok(data)
+    }
+
+    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
+        match self.output_type(index)? {
+            DataType::RAW => todo!(),
+            DataType::INT8 => {
+                let data: &[i8] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .collect())
+            }
+            DataType::UINT8 => {
+                let data: &[u8] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .collect())
+            }
+            DataType::INT16 => {
+                let data: &[i16] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .collect())
+            }
+            DataType::UINT16 => {
+                let data: &[u16] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .collect())
+            }
+            DataType::FLOAT16 => todo!(),
+            DataType::INT32 => {
+                let data: &[i32] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
+                    .collect())
+            }
+            DataType::UINT32 => {
+                let data: &[u32] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
+                    .collect())
+            }
+            DataType::FLOAT32 => todo!(),
+            DataType::INT64 => todo!(),
+            DataType::UINT64 => todo!(),
+            DataType::FLOAT64 => todo!(),
+            DataType::STRING => todo!(),
+        }
     }
 
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
@@ -173,7 +260,6 @@ impl Model for TFLiteModel<'_> {
         };
         let tensor_vol = tensor.volume()?;
         let tensor_shape = tensor.shape()?;
-        println!("tensor_shape = {:?}", tensor_shape);
         let tensor_channels = { *tensor_shape.last().unwrap_or(&3) };
         match tensor.tensor_type() {
             TensorType::UInt8 => {
@@ -300,7 +386,33 @@ impl Model for TFLiteModel<'_> {
     }
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        Ok(0)
+        let mut box_ind = None;
+        let mut score_ind = None;
+        let mut num_classes = None;
+        for i in 0..self.output_count()? {
+            let shape = self.output_shape(i)?;
+            if shape.len() == 3 {
+                score_ind = Some(i);
+                num_classes = Some(*shape.last().unwrap());
+            } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
+                box_ind = Some(i);
+            }
+        }
+        if box_ind.is_none() || score_ind.is_none() {
+            return Ok(0);
+        }
+
+        let box_data = self.dequant_output(box_ind.unwrap())?;
+        let score_data = self.dequant_output(score_ind.unwrap())?;
+        let n_boxes = decode_boxes_and_nms(
+            self.score_threshold,
+            self.iou_threshold,
+            &score_data,
+            &box_data,
+            num_classes.unwrap(),
+            boxes,
+        );
+        Ok(n_boxes)
     }
 
     fn input_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {

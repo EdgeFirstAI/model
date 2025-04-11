@@ -76,4 +76,5 @@ libloading = "0.8.6"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 derive_more = { version = "2.0.1", features = ["error"] }
-ndarray = "0.16.1"
+ndarray = { version = "0.16.1", features = ["rayon"] }
+ndarray-stats = "0.6.0"

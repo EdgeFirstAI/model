@@ -349,6 +349,7 @@ impl TryFrom<&DmaBufMsg> for Image {
         let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
         let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
         let fourcc = dma_buf.fourcc.into();
+        // println!("src fourcc: {:?}", fourcc);
         Ok(Image {
             fd: fd.into(),
             width: dma_buf.width,

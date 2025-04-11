@@ -10,6 +10,8 @@ use crate::{
     TfLiteType_kTfLiteUInt32, TfLiteType_kTfLiteUInt64, TfLiteType_kTfLiteUInt8,
     TfLiteType_kTfLiteVariant,
 };
+
+pub use crate::TfLiteQuantizationParams;
 use std::{ffi::CStr, ptr};
 
 #[derive(Copy, Clone, PartialEq, Eq, FromPrimitive, Debug)]
@@ -125,6 +127,10 @@ impl<'a> TensorMut<'a> {
         }
         Ok(unsafe { std::slice::from_raw_parts(ptr, volume as usize) })
     }
+
+    pub fn get_quantization_params(&self) -> TfLiteQuantizationParams {
+        unsafe { self.lib.TfLiteTensorQuantizationParams(self.ptr.as_ptr()) }
+    }
 }
 
 pub struct Tensor<'a> {
@@ -199,6 +205,10 @@ impl<'a> Tensor<'a> {
             return Err(TfLiteError::new("Tensor data is NULL"));
         }
         Ok(unsafe { std::slice::from_raw_parts(ptr, volume as usize) })
+    }
+
+    pub fn get_quantization_params(&self) -> TfLiteQuantizationParams {
+        unsafe { self.lib.TfLiteTensorQuantizationParams(self.ptr) }
     }
 }
 
