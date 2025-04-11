@@ -1,29 +1,13 @@
 use crate::{
-    image::{Image, ImageManager, Rotation, RGBA, RGBX},
+    image::{Image, ImageManager, Rotation, RGBX},
     model::{
         DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
     },
-    ModelType,
 };
-use cdr::{CdrLe, Infinite};
-use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask};
+use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::{debug, error, info, trace};
-use std::{
-    error::Error,
-    ffi::c_void,
-    fmt,
-    fs::read,
-    io,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::io::OwnedFd,
-    },
-    path::Path,
-    process,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
     tensor::{Tensor, TensorMut, TensorType},

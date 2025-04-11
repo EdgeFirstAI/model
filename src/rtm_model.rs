@@ -100,54 +100,12 @@ impl Model for RtmModel {
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {
         trace!("load_frame_dmabuf");
-        let mut dma_buf = dmabuf.clone();
-        // let image: Image = dmabuf.try_into()?;
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.pid, e
-                );
-                return Err(e.into());
-            }
-        };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                        "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-                        e
-                    );
-                return Err(e.into());
-            }
-        };
-
-        dma_buf.fd = fd.as_raw_fd();
-
-        self.ctx.load_frame_dmabuf(
-            None,
-            dma_buf.fd,
-            dma_buf.fourcc,
-            dma_buf.width as i32,
-            dma_buf.height as i32,
-            None,
-            0,
-        )?;
-        // self.ctx.load_frame_dmabuf(
-        //     None,
-        //     image.raw_fd(),
-        //     image.format().into(),
-        //     image.width() as i32,
-        //     image.height() as i32,
-        //     None,
-        //     0,
-        // )?;
+        let image: Image = dmabuf.try_into()?;
+        img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
+        let mut dest_mapped = self.img.mmap();
+        let data = dest_mapped.as_slice_mut();
+        self.load_input(0, data, 4, preprocessing)?;
         Ok(())
-        // img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
-        // let mut dest_mapped = self.img.mmap();
-        // let data = dest_mapped.as_slice_mut();
-        // self.load_input(0, data, 4, preprocessing)
     }
 
     fn run_model(&mut self) -> Result<(), ModelError> {
@@ -179,10 +137,6 @@ impl Model for RtmModel {
         let tensor_shape = tensor.shape();
         let tensor_vol = tensor.volume() as usize;
         let tensor_channels = *tensor_shape.last().unwrap_or(&3) as usize;
-        println!(
-            "tensor_vol = {tensor_vol} tensor_channels = {tensor_channels} tensor_shape = {:?}",
-            tensor_shape
-        );
         match tensor.tensor_type() {
             TensorType::U8 => {
                 let mut tensor_mapped = tensor.maprw()?;
@@ -303,7 +257,7 @@ impl Model for RtmModel {
     }
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        println!("boxes");
+        trace!("boxes");
         let mut vaal_boxes = Vec::new();
         let len = boxes.len();
         for _ in 0..boxes.len() {

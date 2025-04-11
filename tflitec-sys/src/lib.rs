@@ -4,7 +4,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use delegate::Delegate;
-use std::{error::Error, fmt, io, os::raw::c_void, path::Path, ptr};
+use std::{error::Error, fmt, os::raw::c_void, path::Path, ptr};
 use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 
@@ -13,6 +13,7 @@ pub mod tensor;
 #[macro_use]
 extern crate num_derive;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct TfLiteError {
     msg: String,

@@ -482,13 +482,13 @@ async fn main() -> ExitCode {
             if first_run {
                 info!(
                     "Successfully recieved camera frames and run model, found {:?} boxes",
-                    detect_boxes.len()
+                    new_boxes.len()
                 );
                 first_run = false;
             } else {
                 trace!(
                     "Detected {:?} boxes. FPS: {}",
-                    detect_boxes.len(),
+                    new_boxes.len(),
                     fps.update()
                 );
             }
