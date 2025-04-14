@@ -103,7 +103,7 @@ fn jaccard(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::nms::decode_boxes;
+    use crate::nms::{decode_boxes, jaccard};
 
     use ndarray::{
         parallel::prelude::{IntoParallelIterator, ParallelIterator},
@@ -143,5 +143,19 @@ mod tests {
             decoded_boxes_ndarray, decoded_boxes,
             "Decoded boxes were not equal"
         );
+    }
+
+    #[test]
+    fn test_iou() {
+        let iou = jaccard([0.1, 0.1, 0.2, 0.2], [0.15, 0.15, 0.25, 0.25]);
+        assert!(
+            (iou - 1.0f32 / 7.0f32).abs() < 0.00001,
+            "Computed IOU was not 0.57142857142"
+        );
+    }
+    #[test]
+    fn test_iou_zero() {
+        let iou = jaccard([0.1, 0.1, 0.1, 0.2], [0.1, 0.15, 0.1, 0.25]);
+        assert_eq!(iou, 0.0, "Computed IOU was not 0.0");
     }
 }
