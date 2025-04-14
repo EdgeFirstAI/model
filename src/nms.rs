@@ -94,7 +94,9 @@ fn jaccard(a: [f32; 4], b: [f32; 4]) -> f32 {
     let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
     let area_a = (a[2] - a[0]) * (a[3] - a[1]);
     let area_b = (b[2] - b[0]) * (b[3] - b[1]);
-    let union = area_a + area_b - intersection;
+
+    // need to make sure we are not dividing by zero
+    let union = (area_a + area_b - intersection).max(0.0000001);
 
     intersection / union
 }
