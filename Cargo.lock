@@ -3345,7 +3345,7 @@ dependencies = [
 [[package]]
 name = "vaal"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1cd5efa6c226641f571972570c98dbb50d783857"
+source = "git+https://github.com/DeepViewML/vaal-rs.git#cba7ec604e38997c43b0a87be9c34453a2c27f0d"
 dependencies = [
  "deepviewrt",
  "vaal-sys",
@@ -3354,7 +3354,7 @@ dependencies = [
 [[package]]
 name = "vaal-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-571#1cd5efa6c226641f571972570c98dbb50d783857"
+source = "git+https://github.com/DeepViewML/vaal-rs.git#cba7ec604e38997c43b0a87be9c34453a2c27f0d"
 dependencies = [
  "libc",
 ]

@@ -64,7 +64,7 @@ tracy-client = { version = "0.18.0", default-features = false, features = [
     "fibers",
 ] }
 uuid = { version = "1.13.2", features = ["v4"] }
-vaal = { git = "https://github.com/Charlie-AuZone/vaal-rs.git", branch = "EDGEAI-571" }
+vaal = { git = "https://github.com/DeepViewML/vaal-rs.git" }
 zenoh = "1.2.1"
 zstd = "0.13"
 
