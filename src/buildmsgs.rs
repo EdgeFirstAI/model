@@ -1,5 +1,4 @@
 use cdr::{CdrLe, Infinite};
-use deepviewrt::tensor::TensorType;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, Mask, ModelInfo},
@@ -13,10 +12,13 @@ use edgefirst_schemas::{
 use log::{debug, error};
 use std::path::Path;
 use tracing::instrument;
-use vaal::Context;
 use zenoh::bytes::{Encoding, ZBytes};
 
-use crate::{args::LabelSetting, Box2D, ModelType};
+use crate::{
+    args::LabelSetting,
+    model::{DataType, Model, SupportedModel},
+    BoxWithTrack, ModelType,
+};
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -47,7 +49,7 @@ fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
 }
 
 pub fn build_image_annotations_msg_and_encode(
-    boxes: &[Box2D],
+    boxes: &[BoxWithTrack],
     timestamp: Time,
     stream_width: f64,
     stream_height: f64,
@@ -157,29 +159,55 @@ pub fn build_image_annotations_msg_and_encode(
 #[instrument(skip_all)]
 pub fn build_segmentation_msg(
     _in_time: Time,
-    model_ctx: Option<&Context>,
-    output_index: i32,
+    model_ctx: Option<&SupportedModel>,
+    output_index: usize,
 ) -> Mask {
-    let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
+    let mut output_shape = vec![0, 0, 0, 0];
     let mask = if let Some(model) = model_ctx {
-        if let Some(tensor) = model.output_tensor(output_index) {
-            output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-            let data = tensor.mapro_u8().unwrap();
-            let len = data.len();
-            let mut buffer = vec![0; len];
-            buffer.copy_from_slice(&data);
-            buffer
-        } else {
-            error!("Did not find model output");
-            Vec::new()
+        match model.output_shape(output_index) {
+            Ok(v) => output_shape = v,
+            Err(e) => error!("Could not get output shape: {:?}", e),
+        }
+        let len = output_shape.iter().product();
+
+        let output_type = match model.output_type(output_index) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get output type: {:?}", e);
+                DataType::UInt8
+            }
+        };
+
+        match output_type {
+            DataType::Int8 => {
+                let mut buffer = vec![0i8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!(
+                        "Could not get output data from segmentation tensor: {:?}",
+                        e
+                    );
+                }
+                buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
+            }
+            DataType::UInt8 => {
+                let mut buffer = vec![0u8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!(
+                        "Could not get output data from segmentation tensor: {:?}",
+                        e
+                    );
+                }
+                buffer
+            }
+            _ => todo!(),
         }
     } else {
         Vec::new()
     };
 
     Mask {
-        height: output_shape[1],
-        width: output_shape[2],
+        height: output_shape[1] as u32,
+        width: output_shape[2] as u32,
         length: 1,
         encoding: "".to_string(),
         mask,
@@ -194,8 +222,8 @@ pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     }
 }
 
-impl From<&Box2D> for DetectBox2D {
-    fn from(box2d: &Box2D) -> Self {
+impl From<&BoxWithTrack> for DetectBox2D {
+    fn from(box2d: &BoxWithTrack) -> Self {
         let track = match &box2d.track {
             Some(v) => DetectTrack {
                 id: v.uuid.to_string(),
@@ -223,7 +251,7 @@ impl From<&Box2D> for DetectBox2D {
 }
 
 pub fn build_detect_msg_and_encode(
-    boxes: &[Box2D],
+    boxes: &[BoxWithTrack],
     in_time: Time,
     model_time: Time,
     curr_time: Time,
@@ -244,75 +272,91 @@ pub fn build_detect_msg_and_encode(
     (msg, enc)
 }
 
-fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
+fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {
     match t {
-        TensorType::RAW => model_info::RAW,
-        TensorType::STR => model_info::STRING,
-        TensorType::I8 => model_info::INT8,
-        TensorType::U8 => model_info::UINT8,
-        TensorType::I16 => model_info::INT16,
-        TensorType::U16 => model_info::UINT16,
-        TensorType::F16 => model_info::FLOAT16,
-        TensorType::I32 => model_info::INT32,
-        TensorType::U32 => model_info::UINT32,
-        TensorType::F32 => model_info::FLOAT32,
-        TensorType::I64 => model_info::INT64,
-        TensorType::U64 => model_info::UINT64,
-        TensorType::F64 => model_info::FLOAT64,
+        DataType::Raw => model_info::RAW,
+        DataType::Int8 => model_info::INT8,
+        DataType::UInt8 => model_info::UINT8,
+        DataType::Int16 => model_info::INT16,
+        DataType::UInt16 => model_info::UINT16,
+        DataType::Float16 => model_info::FLOAT16,
+        DataType::Int32 => model_info::INT32,
+        DataType::UInt32 => model_info::UINT32,
+        DataType::Float32 => model_info::FLOAT32,
+        DataType::Int64 => model_info::INT64,
+        DataType::UInt64 => model_info::UINT64,
+        DataType::Float64 => model_info::FLOAT64,
+        DataType::String => model_info::STRING,
     }
 }
 
-fn get_input_info(model_ctx: Option<&mut Context>) -> (Vec<u32>, u8) {
+// fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
+//     match t {
+//         TensorType::RAW => model_info::RAW,
+//         TensorType::STR => model_info::STRING,
+//         TensorType::I8 => model_info::INT8,
+//         TensorType::U8 => model_info::UINT8,
+//         TensorType::I16 => model_info::INT16,
+//         TensorType::U16 => model_info::UINT16,
+//         TensorType::F16 => model_info::FLOAT16,
+//         TensorType::I32 => model_info::INT32,
+//         TensorType::U32 => model_info::UINT32,
+//         TensorType::F32 => model_info::FLOAT32,
+//         TensorType::I64 => model_info::INT64,
+//         TensorType::U64 => model_info::UINT64,
+//         TensorType::F64 => model_info::FLOAT64,
+//     }
+// }
+
+fn get_input_info(model_ctx: Option<&SupportedModel>) -> (Vec<u32>, u8) {
     let mut input_shape = vec![0, 0, 0, 0];
     let mut input_type = model_info::RAW;
-    if let Some(ctx) = model_ctx {
-        let model = match ctx.model() {
-            Ok(v) => v,
-            Err(_) => return (input_shape, input_type),
-        };
 
-        let inputs = match model.inputs() {
-            Ok(v) => v,
-            _ => return (input_shape, input_type),
+    if let Some(ctx) = model_ctx {
+        match ctx.input_shape(0) {
+            Ok(v) => input_shape = v.iter().map(|f| *f as u32).collect(),
+            Err(e) => error!("Cannot get input shape: {:?}", e),
+        }
+        match ctx.input_type(0) {
+            Ok(v) => input_type = tensor_type_to_model_info_datatype(v),
+            Err(e) => error!("Cannot get input datatype: {:?}", e),
         };
-        let dvrt_ctx = match ctx.dvrt_context() {
-            Ok(v) => v,
-            Err(_) => return (input_shape, input_type),
-        };
-        match dvrt_ctx.tensor_index(inputs[0] as usize) {
-            Ok(tensor) => {
-                input_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-                input_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
-            }
-            Err(_) => return (input_shape, input_type),
-        };
-    };
+    }
     (input_shape, input_type)
 }
 
 pub fn build_model_info_msg(
     in_time: Time,
-    model_ctx: Option<&mut Context>,
-    decoder_ctx: Option<&mut Context>,
+    model_ctx: Option<&SupportedModel>,
     path: &Path,
     model_type: &ModelType,
 ) -> ModelInfo {
-    let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
+    let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
-    let output_ctx = match decoder_ctx {
-        Some(_) => &decoder_ctx,
-        None => &model_ctx,
-    };
-    if let Some(ctx) = output_ctx {
-        if let Some(tensor) = ctx.output_tensor(0) {
-            output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-            output_type = tensor_type_to_model_info_datatype(tensor.tensor_type());
-        }
-    };
-    let labels = match output_ctx {
-        Some(ref ctx) => ctx.labels().into_iter().map(String::from).collect(),
-        None => Vec::new(),
-    };
+    let mut labels = Vec::new();
+    if let Some(model_ctx) = model_ctx {
+        match model_ctx.output_shape(0) {
+            Ok(v) => output_shape = v.iter().map(|f| *f as u32).collect(),
+            Err(e) => {
+                error!("Cannot get output shape of model: {:?}", e);
+            }
+        };
+        let model_output_type = match model_ctx.output_type(0) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Cannot get output data type of model: {:?}", e);
+                DataType::Raw
+            }
+        };
+        output_type = tensor_type_to_model_info_datatype(model_output_type);
+
+        match model_ctx.labels() {
+            Ok(v) => labels = v,
+            Err(e) => {
+                error!("Cannot get labels of model: {:?}", e);
+            }
+        };
+    }
 
     let model_format = match path.extension() {
         // , HailoRT, RKNN, TensorRT, TFLite
@@ -327,15 +371,12 @@ pub fn build_model_info_msg(
     };
 
     let model_name = match model_ctx {
-        Some(ref ctx) if ctx.model().is_err() => String::from("No Model"),
-        Some(ref ctx)
-            if ctx.model().unwrap().name().is_err()
-                || ctx.model().unwrap().name().unwrap().is_empty() =>
-        {
-            //the path cannot end with a `..` otherwise the model would not have loaded
-            path.file_name().unwrap().to_string_lossy().into_owned()
-        }
-        Some(ref ctx) => ctx.model().unwrap().name().unwrap().to_owned(),
+        Some(ctx) if ctx.model_name().is_ok_and(|n| !n.is_empty()) => ctx.model_name().unwrap(),
+        Some(_) => path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
         None => String::from("Loading Model..."),
     };
     debug!("Model name = {}", model_name);
