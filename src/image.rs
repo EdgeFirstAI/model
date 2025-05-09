@@ -7,7 +7,7 @@ use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use g2d_sys::{
     fourcc::FourCC, g2d as g2d_library, g2d_buf, g2d_rotation_G2D_ROTATION_0,
     g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
-    g2d_surface, G2DFormat, G2DPhysical,
+    g2d_surface, guess_version, G2DFormat, G2DPhysical,
 };
 use log::warn;
 use nix::libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
@@ -89,10 +89,16 @@ impl Drop for G2DBuffer<'_> {
 
 pub struct ImageManager {
     lib: g2d_library,
+    version: g2d_sys::Version,
     handle: *mut c_void,
 }
 
-#[allow(dead_code)]
+const G2D_2_3_0: g2d_sys::Version = g2d_sys::Version {
+    major: 6,
+    minor: 4,
+    patch: 11,
+};
+
 impl ImageManager {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let lib = unsafe { g2d_library::new("libg2d.so.2") }?;
@@ -102,7 +108,16 @@ impl ImageManager {
             let err = io::Error::last_os_error();
             return Err(Box::new(err));
         }
-        Ok(Self { lib, handle })
+        let version = guess_version(&lib).unwrap_or(G2D_2_3_0);
+        Ok(Self {
+            lib,
+            handle,
+            version,
+        })
+    }
+
+    pub fn version(&self) -> g2d_sys::Version {
+        self.version
     }
 
     pub fn alloc(
