@@ -130,11 +130,6 @@ impl ImageManager {
         }
     }
 
-    pub fn g2d_buf_fd(&self, buf: &G2DBuffer) -> OwnedFd {
-        let fd = unsafe { self.lib.g2d_buf_export_fd(buf.buf) };
-        unsafe { OwnedFd::from_raw_fd(fd) }
-    }
-
     pub fn convert(
         &self,
         from: &Image,
