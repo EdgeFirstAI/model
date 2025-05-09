@@ -7,7 +7,7 @@ use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use g2d_sys::{
     fourcc::FourCC, g2d as g2d_library, g2d_buf, g2d_rotation_G2D_ROTATION_0,
     g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
-    g2d_surface, guess_version, G2DFormat, G2DPhysical,
+    g2d_surface, g2d_surface_new, guess_version, G2DFormat, G2DPhysical,
 };
 use log::warn;
 use nix::libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
@@ -151,7 +151,21 @@ impl ImageManager {
         to: &Image,
         crop: Option<Rect>,
         rot: Rotation,
-    ) -> Result<(), io::Error> {
+    ) -> Result<(), Box<dyn Error>> {
+        if self.version >= G2D_2_3_0 {
+            self.convert_new(from, to, crop, rot)
+        } else {
+            self.convert_old(from, to, crop, rot)
+        }
+    }
+
+    pub fn convert_old(
+        &self,
+        from: &Image,
+        to: &Image,
+        crop: Option<Rect>,
+        rot: Rotation,
+    ) -> Result<(), Box<dyn Error>> {
         let from_fd = from.fd.try_clone()?;
         let from_phys: G2DPhysical = DmaBuf::from(from_fd).into();
 
@@ -196,20 +210,97 @@ impl ImageManager {
             rot: rot as u32,
             global_alpha: 0,
         };
-
         if unsafe { self.lib.g2d_blit(self.handle, &mut src, &mut dst) } != 0 {
-            return Err(io::Error::new(
+            return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "g2d_blit failed",
-            ));
+            )));
         }
         if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
-            return Err(io::Error::new(
+            return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "g2d_finish failed",
-            ));
+            )));
+        }
+        // FIXME: A cache invalidation is required here, currently missing!
+
+        Ok(())
+    }
+
+    pub fn convert_new(
+        &self,
+        from: &Image,
+        to: &Image,
+        crop: Option<Rect>,
+        rot: Rotation,
+    ) -> Result<(), Box<dyn Error>> {
+        let from_fd = from.fd.try_clone()?;
+        let from_phys: G2DPhysical = DmaBuf::from(from_fd).into();
+
+        let to_fd = to.fd.try_clone()?;
+        let to_phys: G2DPhysical = DmaBuf::from(to_fd).into();
+
+        let mut src = g2d_surface_new {
+            planes: [from_phys.into(), 0, 0],
+            format: G2DFormat::from(from.format).format(),
+            left: 0,
+            top: 0,
+            right: from.width as i32,
+            bottom: from.height as i32,
+            stride: from.width as i32,
+            width: from.width as i32,
+            height: from.height as i32,
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: 0,
+            global_alpha: 0,
+        };
+
+        if let Some(r) = crop {
+            src.left = r.x;
+            src.top = r.y;
+            src.right = r.x + r.width;
+            src.bottom = r.y + r.height;
         }
 
+        let mut dst = g2d_surface_new {
+            planes: [to_phys.into(), 0, 0],
+            format: G2DFormat::from(to.format).format(),
+            left: 0,
+            top: 0,
+            right: to.width as i32,
+            bottom: to.height as i32,
+            stride: to.width as i32,
+            width: to.width as i32,
+            height: to.height as i32,
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: rot as u32,
+            global_alpha: 0,
+        };
+        let src_ptr = &raw mut src;
+        let dst_ptr = &raw mut dst;
+        if unsafe {
+            // force cast the g2d_surface_new to g2d_surface so it can be sent to the
+            // g2d_blit function
+            self.lib.g2d_blit(
+                self.handle,
+                src_ptr as *mut g2d_surface,
+                dst_ptr as *mut g2d_surface,
+            )
+        } != 0
+        {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "g2d_blit failed",
+            )));
+        }
+        if unsafe { self.lib.g2d_finish(self.handle) } != 0 {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "g2d_finish failed",
+            )));
+        }
         // FIXME: A cache invalidation is required here, currently missing!
 
         Ok(())

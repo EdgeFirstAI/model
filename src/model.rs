@@ -174,6 +174,7 @@ enum ModelErrorKind {
     Io,
     TFLite,
     Rtm,
+    Other,
 }
 
 impl fmt::Display for ModelErrorKind {
@@ -220,6 +221,15 @@ impl From<vaal::deepviewrt::error::Error> for ModelError {
         ModelError {
             kind: ModelErrorKind::Rtm,
             source: Box::from(value),
+        }
+    }
+}
+
+impl From<Box<dyn Error>> for ModelError {
+    fn from(value: Box<dyn Error>) -> Self {
+        ModelError {
+            kind: ModelErrorKind::Other,
+            source: value,
         }
     }
 }
