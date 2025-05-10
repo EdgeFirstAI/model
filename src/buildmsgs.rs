@@ -211,6 +211,7 @@ pub fn build_segmentation_msg(
         length: 1,
         encoding: "".to_string(),
         mask,
+        boxed: false,
     }
 }
 
