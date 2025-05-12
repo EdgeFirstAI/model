@@ -8,6 +8,7 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use log::debug;
 use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
@@ -25,28 +26,13 @@ pub struct TFLiteLib {
 
 impl TFLiteLib {
     pub fn new() -> Result<Self, LibloadingError> {
-        // try a bunch of versions...
-        // we don't know which specific version of tflite is installed so we try a bunch
-        // of them
-        for versions in (1..50).rev() {
-            for patch in (0..10).rev() {
-                if let Ok(tflite_lib) = TFLiteLib::new_with_path(format!(
-                    "{DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}"
-                )) {
-                    return Ok(tflite_lib);
-                }
-            }
-        }
-
-        if let Ok(tflite_lib) = TFLiteLib::new_with_path(DEFAULT_TFLITEC_PATH) {
-            return Ok(tflite_lib);
-        }
-        let tflite_lib = TFLiteLib::new_with_path(DEFAULT_TFLITECPP_PATH)?;
-        Ok(tflite_lib)
+        let tflite_lib = TFLiteLib_::new()?;
+        Ok(TFLiteLib { tflite_lib })
     }
 
+    #[allow(dead_code)]
     pub fn new_with_path<P: AsRef<Path>>(path: P) -> Result<Self, LibloadingError> {
-        let tflite_lib = TFLiteLib_::new(path)?;
+        let tflite_lib = TFLiteLib_::new_with_path(path)?;
         Ok(TFLiteLib { tflite_lib })
     }
 

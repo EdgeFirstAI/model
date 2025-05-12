@@ -4,9 +4,9 @@
 #![allow(clippy::missing_safety_doc)]
 
 use delegate::Delegate;
+use log::debug;
 use std::{error::Error, fmt, os::raw::c_void, path::Path, ptr};
 use tensor::{Tensor, TensorMut};
-
 include!("ffi.rs");
 
 pub mod delegate;
@@ -90,8 +90,32 @@ pub struct TFLiteLib {
     lib: tensorflowlite_c,
 }
 
+pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
+pub static DEFAULT_TFLITECPP_PATH: &str = "libtensorflow-lite.so";
 impl TFLiteLib {
-    pub fn new<P>(path: P) -> Result<Self, LibloadingError>
+    pub fn new() -> Result<Self, libloading::Error> {
+        // try a bunch of versions...
+        // we don't know which specific version of tflite is installed so we try a bunch
+        // Takes around 25ms to try to open 500 shared library files on the EVK
+        for versions in (1..50).rev() {
+            for patch in (0..10).rev() {
+                if let Ok(tflite_lib) = TFLiteLib::new_with_path(format!(
+                    "{DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}"
+                )) {
+                    debug!("Found TFLiteLib: {DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}");
+                    return Ok(tflite_lib);
+                }
+            }
+        }
+
+        if let Ok(tflite_lib) = TFLiteLib::new_with_path(DEFAULT_TFLITEC_PATH) {
+            return Ok(tflite_lib);
+        }
+        let tflite_lib = TFLiteLib::new_with_path(DEFAULT_TFLITECPP_PATH)?;
+        Ok(tflite_lib)
+    }
+
+    pub fn new_with_path<P>(path: P) -> Result<Self, libloading::Error>
     where
         P: AsRef<Path>,
     {
