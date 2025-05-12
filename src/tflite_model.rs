@@ -17,13 +17,35 @@ use tflitec_sys::{
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
 pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
+pub static DEFAULT_TFLITECPP_PATH: &str = "libtensorflow-lite.so";
 
 pub struct TFLiteLib {
     tflite_lib: TFLiteLib_,
 }
 
 impl TFLiteLib {
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, LibloadingError> {
+    pub fn new() -> Result<Self, LibloadingError> {
+        // try a bunch of versions...
+        // we don't know which specific version of tflite is installed so we try a bunch
+        // of them
+        for versions in (1..50).rev() {
+            for patch in (0..10).rev() {
+                if let Ok(tflite_lib) = TFLiteLib::new_with_path(format!(
+                    "{DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}"
+                )) {
+                    return Ok(tflite_lib);
+                }
+            }
+        }
+
+        if let Ok(tflite_lib) = TFLiteLib::new_with_path(DEFAULT_TFLITEC_PATH) {
+            return Ok(tflite_lib);
+        }
+        let tflite_lib = TFLiteLib::new_with_path(DEFAULT_TFLITECPP_PATH)?;
+        Ok(tflite_lib)
+    }
+
+    pub fn new_with_path<P: AsRef<Path>>(path: P) -> Result<Self, LibloadingError> {
         let tflite_lib = TFLiteLib_::new(path)?;
         Ok(TFLiteLib { tflite_lib })
     }
