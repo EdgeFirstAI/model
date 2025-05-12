@@ -8,7 +8,6 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use log::debug;
 use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
@@ -17,8 +16,6 @@ use tflitec_sys::{
 };
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
-pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
-pub static DEFAULT_TFLITECPP_PATH: &str = "libtensorflow-lite.so";
 
 pub struct TFLiteLib {
     tflite_lib: TFLiteLib_,
