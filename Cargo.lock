@@ -3068,6 +3068,7 @@ name = "tflitec-sys"
 version = "1.0.0"
 dependencies = [
  "libloading",
+ "log",
  "num",
  "num-derive",
  "num-traits",

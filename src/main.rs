@@ -31,7 +31,7 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
-use tflite_model::{TFLiteLib, DEFAULT_NPU_DELEGATE_PATH, DEFAULT_TFLITEC_PATH};
+use tflite_model::{TFLiteLib, DEFAULT_NPU_DELEGATE_PATH};
 use tokio::sync::mpsc::{self, error::TryRecvError, Receiver};
 use tracing::{info_span, instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
@@ -157,13 +157,10 @@ async fn main() -> ExitCode {
 
     let mut model = match args.model.extension() {
         Some(v) if v == "tflite" => {
-            _tflite = match TFLiteLib::new(DEFAULT_TFLITEC_PATH) {
+            _tflite = match TFLiteLib::new() {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    error!(
-                        "Could not load TensorFlowLite C API at {DEFAULT_TFLITEC_PATH}: {:?}",
-                        e
-                    );
+                    error!("Could not load TensorFlowLite API: {:?}", e);
                     return ExitCode::FAILURE;
                 }
             };
