@@ -25,6 +25,7 @@ profiling = [
     "tracy-client/sampling",
     "tracy-client/system-tracing",
 ]
+rtm = ["vaal"]
 
 [dependencies]
 async-pidfd = "0.1.4"
@@ -64,7 +65,7 @@ tracy-client = { version = "0.18.0", default-features = false, features = [
     "fibers",
 ] }
 uuid = { version = "1.16.0", features = ["v4"] }
-vaal = { git = "https://github.com/DeepViewML/vaal-rs.git" }
+vaal = { git = "https://github.com/DeepViewML/vaal-rs.git", optional = true}
 zenoh = "1.3.4"
 zstd = "0.13.3"
 

@@ -6,9 +6,11 @@ mod kalman;
 mod masks;
 mod model;
 mod nms;
-mod rtm_model;
 mod tflite_model;
 mod tracker;
+
+#[cfg(feature = "rtm")]
+mod rtm_model;
 
 use crate::{buildmsgs::*, tracker::*};
 use args::{Args, LabelSetting};
@@ -25,7 +27,6 @@ use nix::{
     time::{clock_gettime, ClockId},
 };
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use rtm_model::RtmModel;
 use std::{
     os::fd::AsRawFd,
     process::ExitCode,
@@ -44,6 +45,9 @@ use zenoh::{
     sample::Sample,
     Session,
 };
+
+#[cfg(feature = "rtm")]
+use rtm_model::RtmModel;
 
 struct ModelType {
     segment_output_ind: Option<usize>,
@@ -185,16 +189,25 @@ async fn main() -> ExitCode {
             SupportedModel::from_tflite_model(model)
         }
         Some(v) if v == "rtm" => {
-            let mut model =
-                match RtmModel::load_model_from_mem_with_engine(model_data, &args.engine) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("Could not load RTM model: {:?}", e);
-                        return ExitCode::FAILURE;
-                    }
-                };
-            model.setup_context(&args);
-            SupportedModel::from_rtm_model(model)
+            #[cfg(feature = "rtm")]
+            {
+                let mut model =
+                    match RtmModel::load_model_from_mem_with_engine(model_data, &args.engine) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("Could not load RTM model: {:?}", e);
+                            return ExitCode::FAILURE;
+                        }
+                    };
+                model.setup_context(&args);
+                SupportedModel::from_rtm_model(model)
+            }
+
+            #[cfg(not(feature = "rtm"))]
+            {
+                error!("RTM model support is not enabled in this build");
+                return ExitCode::FAILURE;
+            }
         }
         Some(v) => {
             error!("Unsupported model extension: {:?}", v);
