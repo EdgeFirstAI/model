@@ -269,6 +269,10 @@ impl Model for TFLiteModel<'_> {
         match tensor.tensor_type() {
             TensorType::UInt8 => {
                 let tensor_mapped = tensor.maprw()?;
+                if tensor_channels == data_channels {
+                    tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
+                    return Ok(());
+                }
                 for i in 0..tensor_vol / tensor_channels {
                     for j in 0..tensor_channels {
                         tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j];
