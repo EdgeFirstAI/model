@@ -159,7 +159,7 @@ async fn main() -> ExitCode {
 
     let mut _tflite = None;
 
-    let mut model = match args.model.extension() {
+    let mut model: SupportedModel<'_> = match args.model.extension() {
         Some(v) if v == "tflite" => {
             _tflite = match TFLiteLib::new() {
                 Ok(v) => Some(v),
@@ -186,7 +186,7 @@ async fn main() -> ExitCode {
                 }
             };
             model.setup_context(&args);
-            SupportedModel::from_tflite_model(model)
+            model.into()
         }
         Some(v) if v == "rtm" => {
             #[cfg(feature = "rtm")]
@@ -200,7 +200,7 @@ async fn main() -> ExitCode {
                         }
                     };
                 model.setup_context(&args);
-                SupportedModel::from_rtm_model(model)
+                model.into()
             }
 
             #[cfg(not(feature = "rtm"))]
