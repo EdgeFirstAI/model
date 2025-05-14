@@ -1,6 +1,7 @@
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use log::trace;
 use std::{error::Error, io};
+use tracing::{instrument, span, Level};
 use vaal::{
     deepviewrt::{
         model,
@@ -89,6 +90,7 @@ impl RtmModel {
 }
 
 impl Model for RtmModel {
+    #[instrument(skip_all)]
     fn load_frame_dmabuf(
         &mut self,
         dmabuf: &DmaBufMsg,
@@ -104,6 +106,7 @@ impl Model for RtmModel {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn run_model(&mut self) -> Result<(), ModelError> {
         trace!("run_model");
         Ok(self.ctx.run_model()?)
@@ -121,6 +124,7 @@ impl Model for RtmModel {
         Ok(inp_shape.iter().map(|f| *f as usize).collect())
     }
 
+    #[instrument(skip_all)]
     fn load_input(
         &mut self,
         index: usize,
@@ -229,6 +233,7 @@ impl Model for RtmModel {
         Ok(shape.iter().map(|f| *f as usize).collect())
     }
 
+    #[instrument(skip_all)]
     fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
         trace!("output_data");
         let tensor = match self.ctx.output_tensor(index as i32) {
@@ -256,6 +261,7 @@ impl Model for RtmModel {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
         trace!("boxes");
         let mut vaal_boxes = Vec::new();

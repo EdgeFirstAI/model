@@ -14,6 +14,7 @@ use tflitec_sys::{
     tensor::{Tensor, TensorMut, TensorType},
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
+use tracing::instrument;
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
 
@@ -219,6 +220,7 @@ impl<'a> TFLiteModel<'a> {
 }
 
 impl Model for TFLiteModel<'_> {
+    #[instrument(skip_all)]
     fn load_frame_dmabuf(
         &mut self,
         dmabuf: &DmaBuf,
@@ -233,6 +235,7 @@ impl Model for TFLiteModel<'_> {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn run_model(&mut self) -> Result<(), ModelError> {
         Ok(self.model.invoke()?)
     }
@@ -245,6 +248,7 @@ impl Model for TFLiteModel<'_> {
         TFLiteModel::input_shape(&self.model, index)
     }
 
+    #[instrument(skip_all)]
     fn load_input(
         &mut self,
         index: usize,
@@ -364,6 +368,7 @@ impl Model for TFLiteModel<'_> {
         Ok(tensor.shape()?)
     }
 
+    #[instrument(skip_all)]
     fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
@@ -395,6 +400,7 @@ impl Model for TFLiteModel<'_> {
         Ok(self.outputs.len())
     }
 
+    #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
         let mut box_ind = None;
         let mut score_ind = None;

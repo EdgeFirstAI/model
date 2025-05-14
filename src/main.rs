@@ -318,7 +318,9 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
     info!("Opened G2D with version {}", img_mgr.version());
+
     loop {
         let dma_buf = if let Some(v) = sub_camera.drain().last() {
             v
