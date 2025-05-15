@@ -251,6 +251,7 @@ impl From<&BoxWithTrack> for DetectBox2D {
     }
 }
 
+#[instrument(skip_all)]
 pub fn build_detect_msg_and_encode(
     boxes: &[BoxWithTrack],
     in_time: Time,

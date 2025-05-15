@@ -23,6 +23,7 @@ use std::{
     ptr::null_mut,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
+use tracing::instrument;
 
 pub const RGB3: FourCC = FourCC(*b"RGB3");
 pub const RGBX: FourCC = FourCC(*b"RGBX");
@@ -143,6 +144,7 @@ impl ImageManager {
         }
     }
 
+    #[instrument(skip_all)]
     pub fn convert(
         &self,
         from: &Image,

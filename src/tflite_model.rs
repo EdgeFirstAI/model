@@ -15,10 +15,9 @@ use tflitec_sys::{
     tensor::{Tensor, TensorMut, TensorType},
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
+use tracing::instrument;
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
-pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
-pub static DEFAULT_TFLITECPP_PATH: &str = "libtensorflow-lite.so";
 
 pub struct TFLiteLib {
     tflite_lib: TFLiteLib_,
@@ -222,6 +221,7 @@ impl<'a> TFLiteModel<'a> {
 }
 
 impl Model for TFLiteModel<'_> {
+    #[instrument(skip_all)]
     fn load_frame_dmabuf(
         &mut self,
         dmabuf: &DmaBuf,
@@ -236,6 +236,7 @@ impl Model for TFLiteModel<'_> {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn run_model(&mut self) -> Result<(), ModelError> {
         Ok(self.model.invoke()?)
     }
@@ -248,6 +249,7 @@ impl Model for TFLiteModel<'_> {
         TFLiteModel::input_shape(&self.model, index)
     }
 
+    #[instrument(skip_all)]
     fn load_input(
         &mut self,
         index: usize,
@@ -272,6 +274,10 @@ impl Model for TFLiteModel<'_> {
         match tensor.tensor_type() {
             TensorType::UInt8 => {
                 let tensor_mapped = tensor.maprw()?;
+                if tensor_channels == data_channels {
+                    tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
+                    return Ok(());
+                }
                 for i in 0..tensor_vol / tensor_channels {
                     for j in 0..tensor_channels {
                         tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j];
@@ -363,6 +369,7 @@ impl Model for TFLiteModel<'_> {
         Ok(tensor.shape()?)
     }
 
+    #[instrument(skip_all)]
     fn output_data<T: Copy>(&self, index: usize, buffer: &mut [T]) -> Result<(), ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
@@ -394,6 +401,7 @@ impl Model for TFLiteModel<'_> {
         Ok(self.outputs.len())
     }
 
+    #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
         let mut box_ind = None;
         let mut score_ind = None;

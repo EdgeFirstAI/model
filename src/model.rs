@@ -3,18 +3,12 @@ use std::{error::Error, fmt};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use tflitec_sys::TfLiteError;
 
-use crate::{image::ImageManager, rtm_model::RtmModel, tflite_model::TFLiteModel};
+use crate::{image::ImageManager, tflite_model::TFLiteModel};
 
-// #[derive(Debug)]
-// struct ModelError {
-//     kind: ModelErrorKind,
-//     source: Box<dyn std::error::Error>,
-// }
+use enum_dispatch::enum_dispatch;
 
-// enum ModelErrorKind {
-//     IoError,
-//     Other,
-// }
+#[cfg(feature = "rtm")]
+use crate::rtm_model::RtmModel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct DetectBox {
@@ -44,123 +38,11 @@ pub enum Preprocessing {
 pub static RGB_MEANS_IMAGENET: [f32; 4] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0, 128.0]; // last value is for Alpha channel when needed
 pub static RGB_STDS_IMAGENET: [f32; 4] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0, 64.0]; // last value is for Alpha channel when needed
 
+#[enum_dispatch(Model)]
 pub enum SupportedModel<'a> {
-    RtmModel(RtmModel),
     TfLiteModel(TFLiteModel<'a>),
-}
-
-impl<'a> SupportedModel<'a> {
-    pub fn from_rtm_model(model: RtmModel) -> Self {
-        Self::RtmModel(model)
-    }
-
-    pub fn from_tflite_model(model: TFLiteModel<'a>) -> Self {
-        Self::TfLiteModel(model)
-    }
-}
-
-impl Model for SupportedModel<'_> {
-    fn load_frame_dmabuf(
-        &mut self,
-        dmabuf: &DmaBuf,
-        img_mgr: &ImageManager,
-        preprocessing: Preprocessing,
-    ) -> Result<(), ModelError> {
-        match self {
-            Self::RtmModel(m) => m.load_frame_dmabuf(dmabuf, img_mgr, preprocessing),
-            Self::TfLiteModel(m) => m.load_frame_dmabuf(dmabuf, img_mgr, preprocessing),
-        }
-    }
-
-    fn run_model(&mut self) -> Result<(), ModelError> {
-        match self {
-            Self::RtmModel(m) => m.run_model(),
-            Self::TfLiteModel(m) => m.run_model(),
-        }
-    }
-
-    fn input_count(&self) -> Result<usize, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.input_count(),
-            Self::TfLiteModel(m) => m.input_count(),
-        }
-    }
-
-    fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.input_shape(index),
-            Self::TfLiteModel(m) => m.input_shape(index),
-        }
-    }
-
-    fn load_input(
-        &mut self,
-        index: usize,
-        data: &[u8],
-        data_channels: usize,
-        preprocessing: Preprocessing,
-    ) -> Result<(), ModelError> {
-        match self {
-            Self::RtmModel(m) => m.load_input(index, data, data_channels, preprocessing),
-            Self::TfLiteModel(m) => m.load_input(index, data, data_channels, preprocessing),
-        }
-    }
-
-    fn output_count(&self) -> Result<usize, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.output_count(),
-            Self::TfLiteModel(m) => m.output_count(),
-        }
-    }
-
-    fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.output_shape(index),
-            Self::TfLiteModel(m) => m.output_shape(index),
-        }
-    }
-
-    fn output_data<T: Copy>(&self, index: usize, data: &mut [T]) -> Result<(), ModelError> {
-        match self {
-            Self::RtmModel(m) => m.output_data(index, data),
-            Self::TfLiteModel(m) => m.output_data(index, data),
-        }
-    }
-
-    fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.boxes(boxes),
-            Self::TfLiteModel(m) => m.boxes(boxes),
-        }
-    }
-
-    fn input_type(&self, index: usize) -> Result<DataType, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.input_type(index),
-            Self::TfLiteModel(m) => m.input_type(index),
-        }
-    }
-
-    fn output_type(&self, index: usize) -> Result<DataType, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.output_type(index),
-            Self::TfLiteModel(m) => m.output_type(index),
-        }
-    }
-
-    fn labels(&self) -> Result<Vec<String>, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.labels(),
-            Self::TfLiteModel(m) => m.labels(),
-        }
-    }
-
-    fn model_name(&self) -> Result<String, ModelError> {
-        match self {
-            Self::RtmModel(m) => m.model_name(),
-            Self::TfLiteModel(m) => m.model_name(),
-        }
-    }
+    #[cfg(feature = "rtm")]
+    RtmModel(RtmModel),
 }
 
 #[derive(Debug)]
@@ -173,6 +55,7 @@ pub struct ModelError {
 enum ModelErrorKind {
     Io,
     TFLite,
+    #[cfg(feature = "rtm")]
     Rtm,
     Other,
 }
@@ -207,6 +90,7 @@ impl From<TfLiteError> for ModelError {
     }
 }
 
+#[cfg(feature = "rtm")]
 impl From<vaal::error::Error> for ModelError {
     fn from(value: vaal::error::Error) -> Self {
         ModelError {
@@ -216,6 +100,7 @@ impl From<vaal::error::Error> for ModelError {
     }
 }
 
+#[cfg(feature = "rtm")]
 impl From<vaal::deepviewrt::error::Error> for ModelError {
     fn from(value: vaal::deepviewrt::error::Error) -> Self {
         ModelError {
@@ -253,6 +138,7 @@ pub enum DataType {
     String = 12,
 }
 
+#[enum_dispatch]
 pub trait Model {
     fn model_name(&self) -> Result<String, ModelError>;
 
