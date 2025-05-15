@@ -1,7 +1,7 @@
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use log::trace;
 use std::{error::Error, io};
-use tracing::{instrument, span, Level};
+use tracing::instrument;
 use vaal::{
     deepviewrt::{
         model,
