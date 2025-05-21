@@ -18,7 +18,7 @@ use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
-use image::ImageManager;
+use image::{Image, ImageManager};
 use log::{error, info, trace, warn};
 use masks::{mask_compress_thread, mask_thread};
 use model::{DetectBox, Model, ModelError, SupportedModel};
@@ -28,6 +28,7 @@ use nix::{
 };
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
+    io,
     os::fd::AsRawFd,
     process::ExitCode,
     time::{Duration, Instant},
@@ -768,4 +769,21 @@ async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
         msg = v;
     }
     Some(msg)
+}
+
+impl TryFrom<&DmaBuf> for Image {
+    type Error = io::Error;
+
+    fn try_from(dma_buf: &DmaBuf) -> Result<Self, io::Error> {
+        let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
+        let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
+        let fourcc = dma_buf.fourcc.into();
+        // println!("src fourcc: {:?}", fourcc);
+        Ok(Image {
+            fd: fd.into(),
+            width: dma_buf.width as i32,
+            height: dma_buf.height as i32,
+            format: fourcc,
+        })
+    }
 }

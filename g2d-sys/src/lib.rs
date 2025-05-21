@@ -3,10 +3,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::missing_safety_doc)]
 
-pub mod fourcc;
 include!("./ffi.rs");
 mod ffi_new;
-
+pub mod fourcc;
 use dma_buf::DmaBuf;
 pub use ffi_new::*;
 use fourcc::FourCC;
@@ -86,6 +85,12 @@ impl From<DmaBuf> for G2DPhysical {
         }
 
         G2DPhysical(phys.0)
+    }
+}
+
+impl From<u64> for G2DPhysical {
+    fn from(buf: u64) -> Self {
+        G2DPhysical(buf)
     }
 }
 

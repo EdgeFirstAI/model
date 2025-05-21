@@ -1,17 +1,13 @@
-#![allow(dead_code)]
-use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
-use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use g2d_sys::{
     fourcc::FourCC, g2d as g2d_library, g2d_buf, g2d_rotation_G2D_ROTATION_0,
     g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
     g2d_surface, g2d_surface_new, guess_version, G2DFormat, G2DPhysical,
 };
-use log::warn;
+use log::{debug, warn};
 use nix::libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
     ffi::c_void,
@@ -23,7 +19,6 @@ use std::{
     ptr::null_mut,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
-use tracing::instrument;
 
 pub const RGB3: FourCC = FourCC(*b"RGB3");
 pub const RGBX: FourCC = FourCC(*b"RGBX");
@@ -38,22 +33,6 @@ pub struct Rect {
     pub height: i32,
 }
 
-// impl From<DmaBufMsg> for Rect {
-//     fn from(value: DmaBufMsg) -> Self {
-//         Rect {
-//             x: value.get_x(),
-//             y: value.get_y(),
-//             width: value.get_width(),
-//             height: value.get_height(),
-//         }
-//     }
-// }
-
-pub struct G2DBuffer<'a> {
-    buf: *mut g2d_buf,
-    imgmgr: &'a ImageManager,
-}
-
 #[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum Rotation {
@@ -61,6 +40,10 @@ pub enum Rotation {
     Rotation90 = g2d_rotation_G2D_ROTATION_90 as isize,
     Rotation180 = g2d_rotation_G2D_ROTATION_180 as isize,
     Rotation270 = g2d_rotation_G2D_ROTATION_270 as isize,
+}
+pub struct G2DBuffer<'a> {
+    buf: *mut g2d_buf,
+    imgmgr: &'a ImageManager,
 }
 
 #[allow(dead_code)]
@@ -85,6 +68,7 @@ impl G2DBuffer<'_> {
 impl Drop for G2DBuffer<'_> {
     fn drop(&mut self) {
         self.imgmgr.free(self);
+        debug!("G2D Buffer freed")
     }
 }
 
@@ -122,16 +106,21 @@ impl ImageManager {
         self.version
     }
 
+    #[allow(dead_code)]
     pub fn alloc(
         &self,
-        width: usize,
-        height: usize,
-        channels: usize,
+        width: i32,
+        height: i32,
+        channels: i32,
     ) -> Result<G2DBuffer, Box<dyn Error>> {
-        let g2d_buf = unsafe { self.lib.g2d_alloc((width * height * channels) as i32, 0) };
+        let g2d_buf = unsafe { self.lib.g2d_alloc(width * height * channels, 0) };
         if g2d_buf.is_null() {
-            return Err(Box::new(io::Error::other("g2d_alloc failed")));
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::Other,
+                "g2d_alloc failed",
+            )));
         }
+        debug!("G2D Buffer alloc'd");
         Ok(G2DBuffer {
             buf: g2d_buf,
             imgmgr: self,
@@ -144,7 +133,12 @@ impl ImageManager {
         }
     }
 
-    #[instrument(skip_all)]
+    #[allow(dead_code)]
+    pub fn g2d_buf_fd(&self, buf: &G2DBuffer) -> OwnedFd {
+        let fd = unsafe { self.lib.g2d_buf_export_fd(buf.buf) };
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
     pub fn convert(
         &self,
         from: &Image,
@@ -166,27 +160,7 @@ impl ImageManager {
         crop: Option<Rect>,
         rot: Rotation,
     ) -> Result<(), Box<dyn Error>> {
-        let from_fd = from.fd.try_clone()?;
-        let from_phys: G2DPhysical = DmaBuf::from(from_fd).into();
-
-        let to_fd = to.fd.try_clone()?;
-        let to_phys: G2DPhysical = DmaBuf::from(to_fd).into();
-
-        let mut src = g2d_surface {
-            planes: [from_phys.into(), 0, 0],
-            format: G2DFormat::from(from.format).format(),
-            left: 0,
-            top: 0,
-            right: from.width as i32,
-            bottom: from.height as i32,
-            stride: from.width as i32,
-            width: from.width as i32,
-            height: from.height as i32,
-            blendfunc: 0,
-            clrcolor: 0,
-            rot: 0,
-            global_alpha: 0,
-        };
+        let mut src: g2d_surface = from.try_into()?;
 
         if let Some(r) = crop {
             src.left = r.x;
@@ -195,21 +169,10 @@ impl ImageManager {
             src.bottom = r.y + r.height;
         }
 
-        let mut dst = g2d_surface {
-            planes: [to_phys.into(), 0, 0],
-            format: G2DFormat::from(to.format).format(),
-            left: 0,
-            top: 0,
-            right: to.width as i32,
-            bottom: to.height as i32,
-            stride: to.width as i32,
-            width: to.width as i32,
-            height: to.height as i32,
-            blendfunc: 0,
-            clrcolor: 0,
-            rot: rot as u32,
-            global_alpha: 0,
-        };
+        let mut dst: g2d_surface = to.try_into()?;
+
+        dst.rot = rot as u32;
+
         if unsafe { self.lib.g2d_blit(self.handle, &mut src, &mut dst) } != 0 {
             return Err(Box::new(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -234,27 +197,7 @@ impl ImageManager {
         crop: Option<Rect>,
         rot: Rotation,
     ) -> Result<(), Box<dyn Error>> {
-        let from_fd = from.fd.try_clone()?;
-        let from_phys: G2DPhysical = DmaBuf::from(from_fd).into();
-
-        let to_fd = to.fd.try_clone()?;
-        let to_phys: G2DPhysical = DmaBuf::from(to_fd).into();
-
-        let mut src = g2d_surface_new {
-            planes: [from_phys.into(), 0, 0],
-            format: G2DFormat::from(from.format).format(),
-            left: 0,
-            top: 0,
-            right: from.width as i32,
-            bottom: from.height as i32,
-            stride: from.width as i32,
-            width: from.width as i32,
-            height: from.height as i32,
-            blendfunc: 0,
-            clrcolor: 0,
-            rot: 0,
-            global_alpha: 0,
-        };
+        let mut src: g2d_surface_new = from.try_into()?;
 
         if let Some(r) = crop {
             src.left = r.x;
@@ -263,30 +206,17 @@ impl ImageManager {
             src.bottom = r.y + r.height;
         }
 
-        let mut dst = g2d_surface_new {
-            planes: [to_phys.into(), 0, 0],
-            format: G2DFormat::from(to.format).format(),
-            left: 0,
-            top: 0,
-            right: to.width as i32,
-            bottom: to.height as i32,
-            stride: to.width as i32,
-            width: to.width as i32,
-            height: to.height as i32,
-            blendfunc: 0,
-            clrcolor: 0,
-            rot: rot as u32,
-            global_alpha: 0,
-        };
-        let src_ptr = &raw mut src;
-        let dst_ptr = &raw mut dst;
+        let mut dst: g2d_surface_new = to.try_into()?;
+
+        dst.rot = rot as u32;
+
         if unsafe {
             // force cast the g2d_surface_new to g2d_surface so it can be sent to the
             // g2d_blit function
             self.lib.g2d_blit(
                 self.handle,
-                src_ptr as *mut g2d_surface,
-                dst_ptr as *mut g2d_surface,
+                &raw mut src as *mut g2d_surface,
+                &raw mut dst as *mut g2d_surface,
             )
         } != 0
         {
@@ -310,6 +240,156 @@ impl ImageManager {
 impl Drop for ImageManager {
     fn drop(&mut self) {
         _ = unsafe { self.lib.g2d_close(self.handle) };
+        debug!("G2D closed");
+    }
+}
+
+#[derive(Debug)]
+pub struct Image {
+    pub fd: OwnedFd,
+    pub width: i32,
+    pub height: i32,
+    pub format: FourCC,
+}
+
+const fn format_row_stride(format: FourCC, width: i32) -> usize {
+    match format {
+        RGB3 => 3 * width as usize,
+        RGBX => 4 * width as usize,
+        RGBA => 4 * width as usize,
+        YUYV => 2 * width as usize,
+        NV12 => width as usize / 2 + width as usize,
+        _ => todo!(),
+    }
+}
+
+const fn image_size(width: i32, height: i32, format: FourCC) -> usize {
+    format_row_stride(format, width) * height as usize
+}
+
+impl Image {
+    pub fn new(width: i32, height: i32, format: FourCC) -> Result<Self, Box<dyn Error>> {
+        let heap = Heap::new(HeapKind::Cma)?;
+        let fd = heap.allocate(image_size(width, height, format))?;
+        Ok(Self {
+            fd,
+            width,
+            height,
+            format,
+        })
+    }
+
+    pub fn new_preallocated(fd: OwnedFd, width: i32, height: i32, format: FourCC) -> Self {
+        Self {
+            fd,
+            width,
+            height,
+            format,
+        }
+    }
+
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+
+    pub fn raw_fd(&self) -> i32 {
+        self.fd.as_raw_fd()
+    }
+
+    pub fn dmabuf(&self) -> DmaBuf {
+        unsafe { DmaBuf::from_raw_fd(dup(self.fd.as_raw_fd())) }
+    }
+
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    pub fn format(&self) -> FourCC {
+        self.format
+    }
+
+    pub fn size(&self) -> usize {
+        format_row_stride(self.format, self.width) * self.height as usize
+    }
+
+    pub fn mmap(&mut self) -> MappedImage {
+        let image_size = image_size(self.width, self.height, self.format);
+        unsafe {
+            let mmap = mmap(
+                null_mut(),
+                image_size,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED,
+                self.raw_fd(),
+                0,
+            ) as *mut u8;
+            MappedImage {
+                mmap,
+                len: image_size,
+            }
+        }
+    }
+}
+
+impl TryFrom<&Image> for g2d_surface {
+    type Error = std::io::Error;
+
+    fn try_from(img: &Image) -> Result<Self, Self::Error> {
+        let to_fd = img.fd.try_clone()?;
+        let to_phys: G2DPhysical = DmaBuf::from(to_fd).into();
+        Ok(Self {
+            planes: [to_phys.into(), 0, 0],
+            format: G2DFormat::from(img.format).format(),
+            left: 0,
+            top: 0,
+            right: img.width,
+            bottom: img.height,
+            stride: img.width,
+            width: img.width,
+            height: img.height,
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: 0,
+            global_alpha: 0,
+        })
+    }
+}
+
+impl TryFrom<&Image> for g2d_surface_new {
+    type Error = std::io::Error;
+
+    fn try_from(img: &Image) -> Result<Self, Self::Error> {
+        let to_fd = img.fd.try_clone()?;
+        let to_phys: G2DPhysical = DmaBuf::from(to_fd).into();
+        Ok(Self {
+            planes: [to_phys.into(), 0, 0],
+            format: G2DFormat::from(img.format).format(),
+            left: 0,
+            top: 0,
+            right: img.width,
+            bottom: img.height,
+            stride: img.width,
+            width: img.width,
+            height: img.height,
+            blendfunc: 0,
+            clrcolor: 0,
+            rot: 0,
+            global_alpha: 0,
+        })
+    }
+}
+
+impl fmt::Display for Image {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}x{} {} fd:{:?}",
+            self.width, self.height, self.format, self.fd
+        )
     }
 }
 
@@ -332,123 +412,5 @@ impl Drop for MappedImage {
         if unsafe { munmap(self.mmap.cast::<c_void>(), self.len) } > 0 {
             warn!("unmap failed!");
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct Image {
-    fd: OwnedFd,
-    width: u32,
-    height: u32,
-    pub format: FourCC,
-}
-
-const fn format_row_stride(format: FourCC, width: u32) -> usize {
-    match format {
-        RGB3 => 3 * width as usize,
-        RGBX => 4 * width as usize,
-        RGBA => 4 * width as usize,
-        YUYV => 2 * width as usize,
-        NV12 => width as usize / 2 + width as usize,
-        _ => todo!(),
-    }
-}
-
-const fn image_size(width: u32, height: u32, format: FourCC) -> usize {
-    format_row_stride(format, width) * height as usize
-}
-
-impl Image {
-    pub fn new(width: u32, height: u32, format: FourCC) -> Result<Self, Box<dyn Error>> {
-        let heap = Heap::new(HeapKind::Cma)?;
-        let fd = heap.allocate(image_size(width, height, format))?;
-        Ok(Self {
-            fd,
-            width,
-            height,
-            format,
-        })
-    }
-
-    pub fn new_preallocated(fd: OwnedFd, width: u32, height: u32, format: FourCC) -> Self {
-        Self {
-            fd,
-            width,
-            height,
-            format,
-        }
-    }
-
-    pub fn fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-
-    pub fn raw_fd(&self) -> i32 {
-        self.fd.as_raw_fd()
-    }
-
-    pub fn dmabuf(&self) -> DmaBuf {
-        unsafe { DmaBuf::from_raw_fd(dup(self.fd.as_raw_fd())) }
-    }
-
-    pub fn mmap(&mut self) -> MappedImage {
-        let image_size = image_size(self.width, self.height, self.format);
-        unsafe {
-            let mmap = mmap(
-                null_mut(),
-                image_size,
-                PROT_READ | PROT_WRITE,
-                MAP_SHARED,
-                self.raw_fd(),
-                0,
-            ) as *mut u8;
-            MappedImage {
-                mmap,
-                len: image_size,
-            }
-        }
-    }
-
-    pub fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub fn format(&self) -> FourCC {
-        self.format
-    }
-
-    pub fn size(&self) -> usize {
-        format_row_stride(self.format, self.width) * self.height as usize
-    }
-}
-
-impl TryFrom<&DmaBufMsg> for Image {
-    type Error = io::Error;
-
-    fn try_from(dma_buf: &DmaBufMsg) -> Result<Self, io::Error> {
-        let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
-        let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
-        let fourcc = dma_buf.fourcc.into();
-        // println!("src fourcc: {:?}", fourcc);
-        Ok(Image {
-            fd: fd.into(),
-            width: dma_buf.width,
-            height: dma_buf.height,
-            format: fourcc,
-        })
-    }
-}
-
-impl fmt::Display for Image {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}x{} {} fd:{:?}",
-            self.width, self.height, self.format, self.fd
-        )
     }
 }
