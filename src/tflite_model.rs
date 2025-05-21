@@ -115,7 +115,7 @@ impl<'a> TFLiteModel<'a> {
             Ok(v) => v,
             Err(e) => return Err(Box::from(e)),
         };
-        let img = Image::new(inp_shape[2] as i32, inp_shape[1] as i32, RGBX)?;
+        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let mut m = TFLiteModel {
             model,
             img,

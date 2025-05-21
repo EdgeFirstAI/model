@@ -781,8 +781,8 @@ impl TryFrom<&DmaBuf> for Image {
         // println!("src fourcc: {:?}", fourcc);
         Ok(Image {
             fd: fd.into(),
-            width: dma_buf.width as i32,
-            height: dma_buf.height as i32,
+            width: dma_buf.width,
+            height: dma_buf.height,
             format: fourcc,
         })
     }
