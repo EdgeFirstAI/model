@@ -45,6 +45,27 @@ pub enum SupportedModel<'a> {
     RtmModel(RtmModel),
 }
 
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Metadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub license: Option<String>,
+}
+
+impl From<tflitec_sys::metadata::Metadata> for Metadata {
+    fn from(value: tflitec_sys::metadata::Metadata) -> Self {
+        Self {
+            name: value.name,
+            version: value.version,
+            description: value.description,
+            author: value.author,
+            license: value.license,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ModelError {
     kind: ModelErrorKind,
@@ -170,4 +191,6 @@ pub trait Model {
     fn labels(&self) -> Result<Vec<String>, ModelError>;
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError>;
+
+    fn get_model_metadata(&self) -> Metadata;
 }

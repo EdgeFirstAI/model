@@ -10,6 +10,9 @@ use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 
 pub mod delegate;
+pub mod metadata;
+mod metadata_schema_generated;
+mod schema_generated;
 pub mod tensor;
 pub use libloading::Error as LibloadingError;
 #[macro_use]
@@ -185,7 +188,7 @@ impl<'a> InterpreterBuilder<'a> {
             interpreter: ptr::NonNull::new(interpreter)
                 .ok_or(TfLiteError::new("TfLiteInterpreterCreate returned NULL"))?,
             _delegates: std::mem::replace(&mut self.delegates, Vec::new()),
-            _model_mem: std::mem::replace(&mut model.model_mem, Vec::new()),
+            model_mem: std::mem::replace(&mut model.model_mem, Vec::new()),
             lib: self.lib,
         };
 
@@ -208,7 +211,7 @@ impl<'a> Drop for InterpreterBuilder<'a> {
 pub struct Interpreter<'a> {
     interpreter: ptr::NonNull<TfLiteInterpreter>,
     _delegates: Vec<Delegate>,
-    _model_mem: Vec<u8>,
+    pub model_mem: Vec<u8>,
     lib: &'a tensorflowlite_c,
 }
 

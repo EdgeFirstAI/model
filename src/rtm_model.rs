@@ -316,6 +316,20 @@ impl Model for RtmModel {
         trace!("model_name");
         Ok(model::name(self.ctx.model()?)?.to_string())
     }
+
+    fn get_model_metadata(&self) -> Metadata {
+        let name = match self.model_name() {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        };
+        Metadata {
+            name,
+            version: None,
+            description: None,
+            author: None,
+            license: None,
+        }
+    }
 }
 
 impl From<VAALBox> for DetectBox {

@@ -2,7 +2,7 @@ use crate::{
     args::Args,
     image::{Image, ImageManager, Rotation, RGBX},
     model::{
-        DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
+        DataType, DetectBox, Metadata, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
     },
     nms::decode_boxes_and_nms,
@@ -11,6 +11,7 @@ use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
+    metadata::get_model_metadata,
     tensor::{Tensor, TensorMut, TensorType},
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
@@ -46,7 +47,6 @@ impl TFLiteLib {
     ) -> Result<TFLiteModel, Box<dyn Error>> {
         let model = self.tflite_lib.new_model_from_mem(mem)?;
         let mut builder = self.tflite_lib.new_interpreter_builder()?;
-
         if let Some(delegate) = delegate {
             let delegate = Delegate::load_external(delegate)?;
             builder.add_owned_delegate(delegate);
@@ -115,6 +115,8 @@ impl<'a> TFLiteModel<'a> {
             Ok(v) => v,
             Err(e) => return Err(Box::from(e)),
         };
+        let metadata = get_model_metadata(&model.model_mem);
+        println!("{:?}", metadata);
         let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let mut m = TFLiteModel {
             model,
@@ -203,8 +205,22 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::Float32 => todo!(),
-            DataType::Int64 => todo!(),
-            DataType::UInt64 => todo!(),
+            DataType::Int64 => {
+                let data: &[i64] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d - quant.zero_point as i64) as f32)
+                    .collect())
+            }
+            DataType::UInt64 => {
+                let data: &[u64] = self.output_data_ref(index)?;
+                let quant = self.outputs[index].get_quantization_params();
+                Ok(data
+                    .iter()
+                    .map(|d| quant.scale * (*d as i128 - quant.zero_point as i128) as f32)
+                    .collect())
+            }
             DataType::Float64 => todo!(),
             DataType::String => todo!(),
         }
@@ -466,6 +482,13 @@ impl Model for TFLiteModel<'_> {
     }
 
     fn model_name(&self) -> Result<String, ModelError> {
-        Ok("".to_string())
+        match get_model_metadata(&self.model.model_mem).name {
+            Some(v) => Ok(v),
+            None => Ok("".to_string()),
+        }
+    }
+
+    fn get_model_metadata(&self) -> Metadata {
+        get_model_metadata(&self.model.model_mem).into()
     }
 }
