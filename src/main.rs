@@ -169,7 +169,7 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let delegate = if &args.engine == "npu" {
+            let delegate = if &args.engine.to_lowercase() == "npu" {
                 Some(DEFAULT_NPU_DELEGATE_PATH)
             } else {
                 None
