@@ -8,6 +8,7 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use ndarray::Array;
 use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     delegate::Delegate,
@@ -16,6 +17,7 @@ use tflitec_sys::{
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
 use tracing::instrument;
+use yaml_rust2::Yaml;
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
 
@@ -91,6 +93,7 @@ pub struct TFLiteModel<'a> {
     outputs: Vec<Tensor<'a>>,
     score_threshold: f32,
     iou_threshold: f32,
+    metadata: Metadata,
 }
 
 impl<'a> TFLiteModel<'a> {
@@ -116,7 +119,7 @@ impl<'a> TFLiteModel<'a> {
             Err(e) => return Err(Box::from(e)),
         };
         let metadata = get_model_metadata(&model.model_mem);
-        println!("{:?}", metadata);
+        // println!("{:?}", metadata);
         let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let mut m = TFLiteModel {
             model,
@@ -125,6 +128,7 @@ impl<'a> TFLiteModel<'a> {
             outputs: Vec::new(),
             score_threshold: 0.5,
             iou_threshold: 0.5,
+            metadata: metadata.into(),
         };
         m.init_tensors()?;
         m.run_model()?;
@@ -158,67 +162,75 @@ impl<'a> TFLiteModel<'a> {
             DataType::Int8 => {
                 let data: &[i8] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::UInt8 => {
                 let data: &[u8] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::Int16 => {
                 let data: &[i16] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::UInt16 => {
                 let data: &[u16] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::Float16 => todo!(),
             DataType::Int32 => {
                 let data: &[i32] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::UInt32 => {
                 let data: &[u32] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::Float32 => todo!(),
             DataType::Int64 => {
                 let data: &[i64] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d - quant.zero_point as i64) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::UInt64 => {
                 let data: &[u64] = self.output_data_ref(index)?;
                 let quant = self.outputs[index].get_quantization_params();
+                let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
-                    .map(|d| quant.scale * (*d as i128 - quant.zero_point as i128) as f32)
+                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
                     .collect())
             }
             DataType::Float64 => todo!(),
@@ -233,6 +245,120 @@ impl<'a> TFLiteModel<'a> {
         self.inputs.append(&mut inputs);
         Ok(())
     }
+
+    fn decode_detection_outputs(outputs: Vec<Vec<f32>>, details: &[Yaml]) -> (Vec<f32>, Vec<f32>) {
+        let bboxes = vec![];
+        let bscores = vec![];
+        // bboxes, bscores = [], []
+
+        for (mut p, detail) in outputs.into_iter().zip(details) {
+            p.iter_mut().for_each(|x| *x = sigmoid(*x));
+
+            let anchors = detail["anchors"]
+                .as_vec()
+                .unwrap()
+                .into_iter()
+                .map(|x| {
+                    x.as_vec()
+                        .unwrap()
+                        .into_iter()
+                        .map(|y| y.as_i64().unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let strides = detail["stride"]
+                .as_vec()
+                .unwrap()
+                .into_iter()
+                .map(|x| {
+                    x.as_vec()
+                        .unwrap()
+                        .into_iter()
+                        .map(|y| y.as_i64().unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            let nc = detail["num_classes"].as_i64().unwrap();
+            let na = detail["num_anchors"].as_i64().unwrap();
+            let shape = detail["shape"]
+                .as_vec()
+                .unwrap()
+                .into_iter()
+                .map(|x| x.as_i64().unwrap())
+                .collect::<Vec<_>>();
+            let h = shape[1];
+            let w = shape[2];
+
+            let mut grid = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    for _ in 0..na {
+                        grid.push([x, y]);
+                    }
+                }
+            }
+            let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
+            // let stride3 = nc + 5;
+            // let stride2 = na * stride3;
+            // let stride1 = w * stride2;
+
+            // for i in 0..h {
+            //     for j in 0..w {
+            //         for k in 0..na {
+            //             //
+            //         }
+            //     }
+            // }
+        }
+
+        (bboxes, bscores)
+        // for p, detail in zip(outputs, details):
+        //     p = tf.nn.sigmoid(p)
+        //     p = p.numpy()
+
+        //     anchors = np.asarray(detail['anchors'], dtype=np.float32)
+        //     strides = np.asarray(detail['stride'], dtype=np.float32)
+        //     nc = detail['num_classes']
+        //     na = detail['num_anchors']
+        //     _, h, w, _ = p.shape
+        //     p = p.reshape((-1, h, w, na, nc + 5))
+
+        //     grid = np.meshgrid(tf.range(w), tf.range(h))
+        //     grid = np.expand_dims(np.stack(grid, axis=-1), axis=2)
+        //     grid = np.tile(np.expand_dims(grid, axis=0), [
+        //         1, 1, 1, na, 1])
+
+        //     # decoding
+
+        //     xy = p[..., 0:2]
+        //     wh = p[..., 2:4]
+        //     obj = p[..., 4:5]
+        //     probs = p[..., 5:]
+
+        //     scores = obj * probs
+        //     xy = (xy * 2.0 + grid - 0.5) / (w, h)
+        //     wh = (wh * 2) ** 2 * anchors * 0.5
+        //     xyxy = np.concat([
+        //         xy - wh,
+        //         xy + wh
+        //     ], axis=-1)
+        //     xyxy = xyxy.reshape((1, -1, 1, 4))
+        //     scores = scores.reshape(1, -1, nc)
+
+        //     bboxes.append(xyxy)
+        //     bscores.append(scores)
+
+        // bscores = np.concat(bscores, axis=1).astype(np.float32)
+        // bboxes = np.concat(bboxes, axis=1).astype(np.float32)
+
+        // return bboxes, bscores
+    }
+}
+#[inline]
+pub fn sigmoid(f: f32) -> f32 {
+    use std::f32::consts::E;
+    1.0 / (1.0 + E.powf(-f))
 }
 
 impl Model for TFLiteModel<'_> {
@@ -421,21 +547,26 @@ impl Model for TFLiteModel<'_> {
         let mut box_ind = None;
         let mut score_ind = None;
         let mut num_classes = None;
-        for i in 0..self.output_count()? {
-            let shape = self.output_shape(i)?;
-            if shape.len() == 3 {
-                score_ind = Some(i);
-                num_classes = Some(*shape.last().unwrap());
-            } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
-                box_ind = Some(i);
+        // for i in 0..self.output_count()? {
+        //     let shape = self.output_shape(i)?;
+        //     if shape.len() == 3 {
+        //         score_ind = Some(i);
+        //         num_classes = Some(*shape.last().unwrap());
+        //     } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
+        //         box_ind = Some(i);
+        //     }
+        // }
+
+        if let Some(config) = &self.metadata.config {
+            let output_details = &config["outputs"];
+            let mut output_tensors = vec![];
+            if let Some(output_details) = output_details.as_vec() {
+                for output in output_details {
+                    let index = &output["index"];
+                    output_tensors.push(self.dequant_output(index.as_i64().unwrap() as usize)?);
+                }
             }
         }
-        if box_ind.is_none() || score_ind.is_none() {
-            return Ok(0);
-        }
-
-        let box_data = self.dequant_output(box_ind.unwrap())?;
-        let score_data = self.dequant_output(score_ind.unwrap())?;
         let n_boxes = decode_boxes_and_nms(
             self.score_threshold,
             self.iou_threshold,

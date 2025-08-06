@@ -2,6 +2,7 @@ use std::{error::Error, fmt};
 
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use tflitec_sys::TfLiteError;
+use yaml_rust2::Yaml;
 
 use crate::{image::ImageManager, tflite_model::TFLiteModel};
 
@@ -52,6 +53,7 @@ pub struct Metadata {
     pub description: Option<String>,
     pub author: Option<String>,
     pub license: Option<String>,
+    pub config: Option<Yaml>,
 }
 
 impl From<tflitec_sys::metadata::Metadata> for Metadata {
@@ -62,6 +64,7 @@ impl From<tflitec_sys::metadata::Metadata> for Metadata {
             description: value.description,
             author: value.author,
             license: value.license,
+            config: value.config,
         }
     }
 }

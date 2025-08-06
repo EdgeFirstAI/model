@@ -1,3 +1,8 @@
+use std::io::Read;
+
+use log::error;
+use yaml_rust2::Yaml;
+
 use crate::{
     metadata_schema_generated::tflite::root_as_model_metadata,
     schema_generated::tflite::root_as_model,
@@ -11,6 +16,7 @@ pub struct Metadata {
     pub author: Option<String>,
     pub license: Option<String>,
     pub min_parser_version: Option<String>,
+    pub config: Option<Yaml>,
 }
 
 const kMetadataBufferName: &str = "TFLITE_METADATA";
@@ -52,5 +58,21 @@ pub fn get_model_metadata(model: &[u8]) -> Metadata {
         metadata.min_parser_version = model_metadata.min_parser_version().map(|x| x.to_owned());
         metadata.version = model_metadata.version().map(|x| x.to_owned());
     }
+
+    if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(model))
+        && let Ok(mut f) = z.by_name("config.yaml")
+        && f.is_file()
+    {
+        let mut yaml = String::new();
+        if let Err(e) = f.read_to_string(&mut yaml) {
+            error!("Error while reading config.yaml {e:?}");
+        } else {
+            match yaml_rust2::YamlLoader::load_from_str(&yaml) {
+                Ok(parsed) => metadata.config = parsed.into_iter().next(),
+                Err(err) => error!("Yaml Error {err:?}"),
+            }
+        }
+    }
+
     metadata
 }

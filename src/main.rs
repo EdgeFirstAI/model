@@ -322,6 +322,7 @@ async fn main() -> ExitCode {
 
     info!("Opened G2D with version {}", img_mgr.version());
 
+    let metadata = model.get_model_metadata();
     loop {
         let dma_buf = if let Some(v) = sub_camera.drain().last() {
             v
