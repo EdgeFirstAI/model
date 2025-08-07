@@ -1,20 +1,20 @@
 use crate::{
     args::Args,
-    image::{Image, ImageManager, Rotation, RGBX},
+    image::{Image, ImageManager, RGBX, Rotation},
     model::{
-        DataType, DetectBox, Metadata, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
-        RGB_STDS_IMAGENET,
+        ConfigOutput, DataType, DetectBox, Detection, Metadata, Model, ModelError, ModelErrorKind,
+        Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET,
     },
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use ndarray::Array;
-use std::{error::Error, io, path::Path};
+use std::{error::Error, io, path::Path, usize};
 use tflitec_sys::{
+    Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
     delegate::Delegate,
     metadata::get_model_metadata,
     tensor::{Tensor, TensorMut, TensorType},
-    Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
 };
 use tracing::instrument;
 use yaml_rust2::Yaml;
@@ -140,28 +140,12 @@ impl<'a> TFLiteModel<'a> {
         self.iou_threshold = args.iou;
     }
 
-    fn output_data_ref<T>(&self, index: usize) -> Result<&[T], ModelError> {
-        let tensor = match self.outputs.get(index) {
-            Some(v) => v,
-            None => {
-                let e = io::Error::other(format!(
-                    "Tried to access output tensor {index} of {}",
-                    self.outputs.len()
-                ))
-                .into();
-                return Err(e);
-            }
-        };
-        let data = tensor.mapro()?;
-        Ok(data)
-    }
-
-    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
-        match self.output_type(index)? {
+    fn dequant_tensor_(&self, tensor: &Tensor) -> Result<Vec<f32>, ModelError> {
+        match tensor.tensor_type().into() {
             DataType::Raw => todo!(),
             DataType::Int8 => {
-                let data: &[i8] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[i8] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -169,8 +153,8 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::UInt8 => {
-                let data: &[u8] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[u8] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -178,8 +162,8 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::Int16 => {
-                let data: &[i16] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[i16] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -187,8 +171,8 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::UInt16 => {
-                let data: &[u16] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[u16] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -197,8 +181,8 @@ impl<'a> TFLiteModel<'a> {
             }
             DataType::Float16 => todo!(),
             DataType::Int32 => {
-                let data: &[i32] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[i32] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -206,8 +190,8 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::UInt32 => {
-                let data: &[u32] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[u32] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -216,8 +200,8 @@ impl<'a> TFLiteModel<'a> {
             }
             DataType::Float32 => todo!(),
             DataType::Int64 => {
-                let data: &[i64] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[i64] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -225,8 +209,8 @@ impl<'a> TFLiteModel<'a> {
                     .collect())
             }
             DataType::UInt64 => {
-                let data: &[u64] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
+                let data: &[u64] = tensor.mapro()?;
+                let quant = tensor.get_quantization_params();
                 let scaled_zp = -quant.scale * quant.zero_point as f32;
                 Ok(data
                     .iter()
@@ -238,6 +222,21 @@ impl<'a> TFLiteModel<'a> {
         }
     }
 
+    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
+        let tensor = match self.outputs.get(index) {
+            Some(v) => v,
+            None => {
+                let e = io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    self.inputs.len()
+                ))
+                .into();
+                return Err(e);
+            }
+        };
+        self.dequant_tensor_(tensor)
+    }
+
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
         let mut outputs = self.model.outputs()?;
         self.outputs.append(&mut outputs);
@@ -246,73 +245,75 @@ impl<'a> TFLiteModel<'a> {
         Ok(())
     }
 
-    fn decode_detection_outputs(outputs: Vec<Vec<f32>>, details: &[Yaml]) -> (Vec<f32>, Vec<f32>) {
-        let bboxes = vec![];
-        let bscores = vec![];
+    fn decode_detection_outputs(
+        outputs: Vec<Vec<f32>>,
+        details: &[ConfigOutput],
+    ) -> (Vec<f32>, Vec<f32>, usize) {
+        let mut total_capacity = 0;
+        let mut nc = 0;
+        for detail in details {
+            match detail {
+                ConfigOutput::Detection(detail) => {
+                    nc = detail.num_classes;
+                    let shape = &detail.shape;
+                    let na = detail.num_anchors;
+                    total_capacity += shape[1] * shape[2] * na;
+                }
+                _ => continue,
+            }
+        }
+        let mut bboxes = Vec::with_capacity(total_capacity * 4);
+        let mut bscores = Vec::with_capacity(total_capacity * nc);
         // bboxes, bscores = [], []
 
         for (mut p, detail) in outputs.into_iter().zip(details) {
             p.iter_mut().for_each(|x| *x = sigmoid(*x));
+            if let ConfigOutput::Detection(detail) = detail {
+                let anchors = &detail.anchors;
+                let na = detail.num_anchors;
+                let shape = &detail.shape;
+                assert_eq!(
+                    shape.iter().product::<usize>(),
+                    p.len(),
+                    "Shape product doesn't match tensor length"
+                );
+                let height = shape[1];
+                let width = shape[2];
 
-            let anchors = detail["anchors"]
-                .as_vec()
-                .unwrap()
-                .into_iter()
-                .map(|x| {
-                    x.as_vec()
-                        .unwrap()
-                        .into_iter()
-                        .map(|y| y.as_i64().unwrap())
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            let strides = detail["stride"]
-                .as_vec()
-                .unwrap()
-                .into_iter()
-                .map(|x| {
-                    x.as_vec()
-                        .unwrap()
-                        .into_iter()
-                        .map(|y| y.as_i64().unwrap())
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
+                let mut grid = Vec::new();
+                for y in 0..height {
+                    for x in 0..width {
+                        for _ in 0..na {
+                            grid.push(x as f32);
+                            grid.push(y as f32);
+                        }
+                    }
+                }
+                // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
+                for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
+                    for (anchor_ind, (p, g)) in
+                        p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate()
+                    {
+                        let (x, y) = (p[0], p[1]);
+                        let x = (x * 2.0 + g[0] - 0.5) / width as f32;
+                        let y = (y * 2.0 + g[1] - 0.5) / height as f32;
+                        let (w, h) = (p[2], p[3]);
+                        let w_half = w * w * 2.0 * anchors[anchor_ind][0];
+                        let h_half = h * h * 2.0 * anchors[anchor_ind][1];
 
-            let nc = detail["num_classes"].as_i64().unwrap();
-            let na = detail["num_anchors"].as_i64().unwrap();
-            let shape = detail["shape"]
-                .as_vec()
-                .unwrap()
-                .into_iter()
-                .map(|x| x.as_i64().unwrap())
-                .collect::<Vec<_>>();
-            let h = shape[1];
-            let w = shape[2];
-
-            let mut grid = Vec::new();
-            for y in 0..h {
-                for x in 0..w {
-                    for _ in 0..na {
-                        grid.push([x, y]);
+                        let obj = p[4];
+                        let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
+                        bboxes.push(x - w_half);
+                        bboxes.push(y - h_half);
+                        bboxes.push(x + w_half);
+                        bboxes.push(y + h_half);
+                        bscores.extend(probs);
                     }
                 }
             }
-            let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
-            // let stride3 = nc + 5;
-            // let stride2 = na * stride3;
-            // let stride1 = w * stride2;
-
-            // for i in 0..h {
-            //     for j in 0..w {
-            //         for k in 0..na {
-            //             //
-            //         }
-            //     }
-            // }
         }
 
-        (bboxes, bscores)
+        (bboxes, bscores, nc)
         // for p, detail in zip(outputs, details):
         //     p = tf.nn.sigmoid(p)
         //     p = p.numpy()
@@ -355,6 +356,7 @@ impl<'a> TFLiteModel<'a> {
         // return bboxes, bscores
     }
 }
+
 #[inline]
 pub fn sigmoid(f: f32) -> f32 {
     use std::f32::consts::E;
@@ -544,35 +546,56 @@ impl Model for TFLiteModel<'_> {
 
     #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        let mut box_ind = None;
-        let mut score_ind = None;
-        let mut num_classes = None;
-        // for i in 0..self.output_count()? {
-        //     let shape = self.output_shape(i)?;
-        //     if shape.len() == 3 {
-        //         score_ind = Some(i);
-        //         num_classes = Some(*shape.last().unwrap());
-        //     } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
-        //         box_ind = Some(i);
-        //     }
-        // }
-
+        let num_classes;
+        let box_data;
+        let score_data;
         if let Some(config) = &self.metadata.config {
-            let output_details = &config["outputs"];
+            let output_details = &config.outputs;
             let mut output_tensors = vec![];
-            if let Some(output_details) = output_details.as_vec() {
-                for output in output_details {
-                    let index = &output["index"];
-                    output_tensors.push(self.dequant_output(index.as_i64().unwrap() as usize)?);
+            let mut min_index = usize::MAX;
+            for details in output_details.iter() {
+                match details {
+                    ConfigOutput::Detection(details) => min_index = min_index.min(details.index),
+                    ConfigOutput::Segmentation(details) => min_index = min_index.min(details.index),
                 }
             }
+            for details in output_details.iter() {
+                if let ConfigOutput::Detection(details) = details {
+                    output_tensors.push(self.dequant_output(details.index - min_index)?);
+                }
+            }
+            (box_data, score_data, num_classes) =
+                TFLiteModel::decode_detection_outputs(output_tensors, output_details);
+        } else {
+            let mut box_ind = None;
+            let mut score_ind = None;
+            let mut num_classes_ = None;
+            for i in 0..self.output_count()? {
+                let shape = self.output_shape(i)?;
+                if shape.len() == 3 {
+                    score_ind = Some(i);
+                    num_classes_ = Some(*shape.last().unwrap());
+                } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
+                    box_ind = Some(i);
+                }
+            }
+            if box_ind.is_none() || score_ind.is_none() || num_classes_.is_none() {
+                return Err(ModelError::new(
+                    ModelErrorKind::Decoding,
+                    "Cannot find detection outputs".to_string(),
+                ));
+            }
+
+            box_data = self.dequant_output(box_ind.unwrap())?;
+            score_data = self.dequant_output(score_ind.unwrap())?;
+            num_classes = num_classes_.unwrap();
         }
         let n_boxes = decode_boxes_and_nms(
             self.score_threshold,
             self.iou_threshold,
             &score_data,
             &box_data,
-            num_classes.unwrap(),
+            num_classes,
             boxes,
         );
         Ok(n_boxes)
@@ -598,7 +621,7 @@ impl Model for TFLiteModel<'_> {
             Some(v) => v,
             None => {
                 let e = io::Error::other(format!(
-                    "Tried to access input tensor {index} of {}",
+                    "Tried to access output tensor {index} of {}",
                     self.inputs.len()
                 ))
                 .into();
@@ -619,7 +642,7 @@ impl Model for TFLiteModel<'_> {
         }
     }
 
-    fn get_model_metadata(&self) -> Metadata {
-        get_model_metadata(&self.model.model_mem).into()
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
+        Ok(get_model_metadata(&self.model.model_mem).into())
     }
 }

@@ -1,10 +1,11 @@
 use std::{error::Error, fmt};
 
+use crate::{image::ImageManager, tflite_model::TFLiteModel};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use log::error;
+use serde::{Deserialize, Serialize};
 use tflitec_sys::TfLiteError;
 use yaml_rust2::Yaml;
-
-use crate::{image::ImageManager, tflite_model::TFLiteModel};
 
 use enum_dispatch::enum_dispatch;
 
@@ -46,14 +47,54 @@ pub enum SupportedModel<'a> {
     RtmModel(RtmModel),
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Metadata {
     pub name: Option<String>,
     pub version: Option<String>,
     pub description: Option<String>,
     pub author: Option<String>,
     pub license: Option<String>,
-    pub config: Option<Yaml>,
+    pub config: Option<ConfigOutputs>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigOutputs {
+    pub outputs: Vec<ConfigOutput>,
+}
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ConfigOutput {
+    #[serde(rename = "detection")]
+    Detection(Detection),
+    #[serde(rename = "segmentation")]
+    Segmentation(Segmentation),
+}
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Segmentation {
+    pub anchors: Option<Vec<[f32; 2]>>,
+    pub decode: bool,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+    pub num_classes: usize,
+    pub num_anchors: usize,
+    pub stride: Option<Vec<usize>>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Detection {
+    pub anchors: Vec<[f32; 2]>,
+    pub decode: bool,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+    pub num_classes: usize,
+    pub num_anchors: usize,
+    pub stride: Option<Vec<usize>>,
 }
 
 impl From<tflitec_sys::metadata::Metadata> for Metadata {
@@ -64,7 +105,16 @@ impl From<tflitec_sys::metadata::Metadata> for Metadata {
             description: value.description,
             author: value.author,
             license: value.license,
-            config: value.config,
+            config: match value.config_yaml {
+                Some(yaml) => match serde_yaml::from_str::<ConfigOutputs>(&yaml) {
+                    Ok(parsed) => Some(parsed),
+                    Err(err) => {
+                        error!("Yaml Error {err:?}");
+                        None
+                    }
+                },
+                None => None,
+            },
         }
     }
 }
@@ -76,11 +126,12 @@ pub struct ModelError {
 }
 
 #[derive(Debug)]
-enum ModelErrorKind {
+pub enum ModelErrorKind {
     Io,
     TFLite,
     #[cfg(feature = "rtm")]
     Rtm,
+    Decoding,
     Other,
 }
 
@@ -145,7 +196,17 @@ impl From<Box<dyn Error>> for ModelError {
 
 impl Error for ModelError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ModelError {
+    pub fn new(kind: ModelErrorKind, msg: String) -> Self {
+        ModelError {
+            kind,
+            source: msg.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DataType {
     Raw = 0,
     Int8 = 1,
@@ -195,5 +256,5 @@ pub trait Model {
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError>;
 
-    fn get_model_metadata(&self) -> Metadata;
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
 }

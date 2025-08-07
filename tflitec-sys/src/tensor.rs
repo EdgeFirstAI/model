@@ -1,14 +1,14 @@
 extern crate num;
 
 use crate::{
-    tensorflowlite_c, TfLiteError, TfLiteTensor, TfLiteType_kTfLiteBFloat16,
-    TfLiteType_kTfLiteBool, TfLiteType_kTfLiteComplex128, TfLiteType_kTfLiteComplex64,
-    TfLiteType_kTfLiteFloat16, TfLiteType_kTfLiteFloat32, TfLiteType_kTfLiteFloat64,
-    TfLiteType_kTfLiteInt16, TfLiteType_kTfLiteInt32, TfLiteType_kTfLiteInt4,
-    TfLiteType_kTfLiteInt64, TfLiteType_kTfLiteInt8, TfLiteType_kTfLiteNoType,
-    TfLiteType_kTfLiteResource, TfLiteType_kTfLiteString, TfLiteType_kTfLiteUInt16,
-    TfLiteType_kTfLiteUInt32, TfLiteType_kTfLiteUInt64, TfLiteType_kTfLiteUInt8,
-    TfLiteType_kTfLiteVariant,
+    TfLiteError, TfLiteTensor, TfLiteType_kTfLiteBFloat16, TfLiteType_kTfLiteBool,
+    TfLiteType_kTfLiteComplex64, TfLiteType_kTfLiteComplex128, TfLiteType_kTfLiteFloat16,
+    TfLiteType_kTfLiteFloat32, TfLiteType_kTfLiteFloat64, TfLiteType_kTfLiteInt4,
+    TfLiteType_kTfLiteInt8, TfLiteType_kTfLiteInt16, TfLiteType_kTfLiteInt32,
+    TfLiteType_kTfLiteInt64, TfLiteType_kTfLiteNoType, TfLiteType_kTfLiteResource,
+    TfLiteType_kTfLiteString, TfLiteType_kTfLiteUInt8, TfLiteType_kTfLiteUInt16,
+    TfLiteType_kTfLiteUInt32, TfLiteType_kTfLiteUInt64, TfLiteType_kTfLiteVariant,
+    tensorflowlite_c,
 };
 
 pub use crate::TfLiteQuantizationParams;

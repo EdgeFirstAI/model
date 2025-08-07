@@ -1,14 +1,13 @@
 use std::io::Read;
 
 use log::error;
-use yaml_rust2::Yaml;
 
 use crate::{
     metadata_schema_generated::tflite::root_as_model_metadata,
-    schema_generated::tflite::root_as_model,
+    schema_generated::tflite::root_as_model, tensor::TensorType,
 };
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Metadata {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -16,7 +15,7 @@ pub struct Metadata {
     pub author: Option<String>,
     pub license: Option<String>,
     pub min_parser_version: Option<String>,
-    pub config: Option<Yaml>,
+    pub config_yaml: Option<String>,
 }
 
 const kMetadataBufferName: &str = "TFLITE_METADATA";
@@ -66,12 +65,9 @@ pub fn get_model_metadata(model: &[u8]) -> Metadata {
         let mut yaml = String::new();
         if let Err(e) = f.read_to_string(&mut yaml) {
             error!("Error while reading config.yaml {e:?}");
-        } else {
-            match yaml_rust2::YamlLoader::load_from_str(&yaml) {
-                Ok(parsed) => metadata.config = parsed.into_iter().next(),
-                Err(err) => error!("Yaml Error {err:?}"),
-            }
         }
+
+        metadata.config_yaml = Some(yaml);
     }
 
     metadata

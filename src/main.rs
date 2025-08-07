@@ -24,27 +24,27 @@ use masks::{mask_compress_thread, mask_thread};
 use model::{DetectBox, Model, ModelError, SupportedModel};
 use nix::{
     sys::time::TimeValLike,
-    time::{clock_gettime, ClockId},
+    time::{ClockId, clock_gettime},
 };
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
+use pidfd_getfd::{GetFdFlags, get_file_from_pidfd};
 use std::{
     io,
     os::fd::AsRawFd,
     process::ExitCode,
     time::{Duration, Instant},
 };
-use tflite_model::{TFLiteLib, DEFAULT_NPU_DELEGATE_PATH};
-use tokio::sync::mpsc::{self, error::TryRecvError, Receiver};
+use tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib};
+use tokio::sync::mpsc::{self, Receiver, error::TryRecvError};
 use tracing::{info_span, instrument, level_filters::LevelFilter};
-use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
+use tracing_subscriber::{Layer as _, Registry, layer::SubscriberExt as _};
 use tracy_client::frame_mark;
 use uuid::Uuid;
 use zenoh::{
+    Session,
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
     pubsub::Subscriber,
     sample::Sample,
-    Session,
 };
 
 #[cfg(feature = "rtm")]
@@ -710,6 +710,23 @@ async fn heart_beat(
 }
 
 fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
+    if let Ok(metadata) = model.get_model_metadata()
+        && let Some(config) = &metadata.config
+    {
+        let mut model_type = ModelType {
+            segment_output_ind: None,
+            detection: false,
+        };
+
+        for (i, output) in config.outputs.iter().enumerate() {
+            match output {
+                model::ConfigOutput::Detection(detection) => model_type.detection = true,
+                _ => {}
+            }
+        }
+
+        return Ok(model_type);
+    }
     let output_count = model.output_count()?;
     info!("output_count {:?}", output_count);
     let mut segmentation_index = Vec::new();

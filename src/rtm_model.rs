@@ -317,16 +317,16 @@ impl Model for RtmModel {
         Ok(model::name(self.ctx.model()?)?.to_string())
     }
 
-    fn get_model_metadata(&self) -> Metadata {
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
         let name = self.model_name().ok();
-        Metadata {
+        Ok(Metadata {
             name,
             version: None,
             description: None,
             author: None,
             license: None,
             config: None,
-        }
+        })
     }
 }
 
