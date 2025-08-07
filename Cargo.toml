@@ -3,7 +3,7 @@ name = "edgefirst-model"
 description = "Maivin Detection Service"
 repository = "https://bitbucket.org/au-zone/maivin-detect"
 version = "0.0.0"
-edition = "2021"
+edition = "2024"
 
 [profile.release]
 opt-level = 3
