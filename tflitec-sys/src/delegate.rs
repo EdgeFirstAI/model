@@ -53,8 +53,9 @@ impl Delegate {
     }
 
     fn drop_external_fn(
-        lib: &Library,
-    ) -> Result<Symbol<unsafe extern "C" fn(delegate: *mut TfLiteDelegate)>, Box<dyn Error>> {
+        lib: &'_ Library,
+    ) -> Result<Symbol<'_, unsafe extern "C" fn(delegate: *mut TfLiteDelegate)>, Box<dyn Error>>
+    {
         unsafe {
             let func: Symbol<unsafe extern "C" fn(delegate: *mut TfLiteDelegate)> =
                 lib.get(b"tflite_plugin_destroy_delegate")?;

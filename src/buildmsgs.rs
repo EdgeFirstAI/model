@@ -166,14 +166,14 @@ pub fn build_segmentation_msg(
     let mask = if let Some(model) = model_ctx {
         match model.output_shape(output_index) {
             Ok(v) => output_shape = v,
-            Err(e) => error!("Could not get output shape: {:?}", e),
+            Err(e) => error!("Could not get output shape: {e:?}"),
         }
         let len = output_shape.iter().product();
 
         let output_type = match model.output_type(output_index) {
             Ok(v) => v,
             Err(e) => {
-                error!("Could not get output type: {:?}", e);
+                error!("Could not get output type: {e:?}");
                 DataType::UInt8
             }
         };
@@ -183,8 +183,7 @@ pub fn build_segmentation_msg(
                 let mut buffer = vec![0i8; len];
                 if let Err(e) = model.output_data(output_index, &mut buffer) {
                     error!(
-                        "Could not get output data from segmentation tensor: {:?}",
-                        e
+                        "Could not get output data from segmentation tensor: {e:?}"
                     );
                 }
                 buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
@@ -193,8 +192,7 @@ pub fn build_segmentation_msg(
                 let mut buffer = vec![0u8; len];
                 if let Err(e) = model.output_data(output_index, &mut buffer) {
                     error!(
-                        "Could not get output data from segmentation tensor: {:?}",
-                        e
+                        "Could not get output data from segmentation tensor: {e:?}"
                     );
                 }
                 buffer
@@ -317,11 +315,11 @@ fn get_input_info(model_ctx: Option<&SupportedModel>) -> (Vec<u32>, u8) {
     if let Some(ctx) = model_ctx {
         match ctx.input_shape(0) {
             Ok(v) => input_shape = v.iter().map(|f| *f as u32).collect(),
-            Err(e) => error!("Cannot get input shape: {:?}", e),
+            Err(e) => error!("Cannot get input shape: {e:?}"),
         }
         match ctx.input_type(0) {
             Ok(v) => input_type = tensor_type_to_model_info_datatype(v),
-            Err(e) => error!("Cannot get input datatype: {:?}", e),
+            Err(e) => error!("Cannot get input datatype: {e:?}"),
         };
     }
     (input_shape, input_type)
@@ -340,13 +338,13 @@ pub fn build_model_info_msg(
         match model_ctx.output_shape(0) {
             Ok(v) => output_shape = v.iter().map(|f| *f as u32).collect(),
             Err(e) => {
-                error!("Cannot get output shape of model: {:?}", e);
+                error!("Cannot get output shape of model: {e:?}");
             }
         };
         let model_output_type = match model_ctx.output_type(0) {
             Ok(v) => v,
             Err(e) => {
-                error!("Cannot get output data type of model: {:?}", e);
+                error!("Cannot get output data type of model: {e:?}");
                 DataType::Raw
             }
         };
@@ -355,7 +353,7 @@ pub fn build_model_info_msg(
         match model_ctx.labels() {
             Ok(v) => labels = v,
             Err(e) => {
-                error!("Cannot get labels of model: {:?}", e);
+                error!("Cannot get labels of model: {e:?}");
             }
         };
     }
@@ -381,7 +379,7 @@ pub fn build_model_info_msg(
             .into_owned(),
         None => String::from("Loading Model..."),
     };
-    debug!("Model name = {}", model_name);
+    debug!("Model name = {model_name}");
     let mut model_types = Vec::new();
     if model_type.segment_output_ind.is_some() {
         model_types.push("Segmentation".to_string());

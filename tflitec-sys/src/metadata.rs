@@ -4,7 +4,7 @@ use log::error;
 
 use crate::{
     metadata_schema_generated::tflite::root_as_model_metadata,
-    schema_generated::tflite::root_as_model, tensor::TensorType,
+    schema_generated::tflite::root_as_model,
 };
 
 #[derive(Debug, Default, PartialEq)]

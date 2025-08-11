@@ -1,6 +1,6 @@
 use nalgebra::{
-    allocator::Allocator, convert, dimension::U4, DVector, DefaultAllocator, Dyn, OMatrix,
-    RealField, SVector, U1, U8,
+    DVector, DefaultAllocator, Dyn, OMatrix, RealField, SVector, U1, U8, allocator::Allocator,
+    convert, dimension::U4,
 };
 
 #[derive(Debug, Clone)]
@@ -245,9 +245,9 @@ mod tests {
             column.copy_from(&dist);
         }
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Mahalanobis);
-        println!("Dist(false, maha): {}", dist);
+        println!("Dist(false, maha): {dist}");
 
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Gaussian);
-        println!("Dist(false, gaussian): {}", dist);
+        println!("Dist(false, gaussian): {dist}");
     }
 }

@@ -109,13 +109,10 @@ async fn main() -> ExitCode {
                     Ok(v) => {
                         stream_width = v.width as f64;
                         stream_height = v.height as f64;
-                        info!(
-                            "Found stream resolution: {}x{}",
-                            stream_width, stream_height
-                        );
+                        info!("Found stream resolution: {stream_width}x{stream_height}");
                     }
                     Err(e) => {
-                        warn!("Failed to deserialize camera info message: {:?}", e);
+                        warn!("Failed to deserialize camera info message: {e:?}");
                         warn!("Cannot determine stream resolution, using normalized coordinates");
                         stream_width = 1.0;
                         stream_height = 1.0;
@@ -165,7 +162,7 @@ async fn main() -> ExitCode {
             _tflite = match TFLiteLib::new() {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    error!("Could not load TensorFlowLite API: {:?}", e);
+                    error!("Could not load TensorFlowLite API: {e:?}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -182,7 +179,7 @@ async fn main() -> ExitCode {
             {
                 Ok(v) => v,
                 Err(e) => {
-                    error!("Could not load TFLite model: {:?}", e);
+                    error!("Could not load TFLite model: {e:?}");
                     return ExitCode::FAILURE;
                 }
             };
@@ -196,7 +193,7 @@ async fn main() -> ExitCode {
                     match RtmModel::load_model_from_mem_with_engine(model_data, &args.engine) {
                         Ok(v) => v,
                         Err(e) => {
-                            error!("Could not load RTM model: {:?}", e);
+                            error!("Could not load RTM model: {e:?}");
                             return ExitCode::FAILURE;
                         }
                     };
@@ -211,7 +208,7 @@ async fn main() -> ExitCode {
             }
         }
         Some(v) => {
-            error!("Unsupported model extension: {:?}", v);
+            error!("Unsupported model extension: {v:?}");
             return ExitCode::FAILURE;
         }
         None => {
@@ -224,7 +221,7 @@ async fn main() -> ExitCode {
     let model_type = match identify_model(&model) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not identify model type: {:?}", e);
+            error!("Could not identify model type: {e:?}");
             return ExitCode::FAILURE;
         }
     };
@@ -302,11 +299,11 @@ async fn main() -> ExitCode {
     let model_labels = match model.labels() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not get model labels: {:?}", e);
+            error!("Could not get model labels: {e:?}");
             Vec::new()
         }
     };
-    info!("got model_labels {:?}", model_labels);
+    info!("got model_labels {model_labels:?}");
     let mut tracker = ByteTrack::new();
     let mut detect_boxes: Vec<DetectBox> = vec![DetectBox::default(); args.max_boxes];
     let timeout = Duration::from_millis(100);
@@ -315,14 +312,13 @@ async fn main() -> ExitCode {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open G2D: {:?}", e);
+            error!("Could not open G2D: {e:?}");
             return ExitCode::FAILURE;
         }
     };
 
     info!("Opened G2D with version {}", img_mgr.version());
 
-    let metadata = model.get_model_metadata();
     loop {
         let dma_buf = if let Some(v) = sub_camera.drain().last() {
             v
@@ -354,13 +350,13 @@ async fn main() -> ExitCode {
 
         match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw) {
             Ok(_) => trace!("Loaded frame into model"),
-            Err(e) => error!("Could not load frame into model: {:?}", e),
+            Err(e) => error!("Could not load frame into model: {e:?}"),
         }
 
         let model_start = Instant::now();
 
         if let Err(e) = model.run_model() {
-            error!("Failed to run model: {:?}", e);
+            error!("Failed to run model: {e:?}");
             return ExitCode::FAILURE;
         }
         trace!("Ran model");
@@ -371,7 +367,7 @@ async fn main() -> ExitCode {
             match mask_tx.send(masks).await {
                 Ok(_) => {}
                 Err(e) => {
-                    error! {"Cannot send to mask publishing thread {:?}", e};
+                    error! {"Cannot send to mask publishing thread {e:?}"};
                 }
             }
         }
@@ -403,7 +399,7 @@ async fn main() -> ExitCode {
             let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
                 Ok(t) => t.num_nanoseconds() as u64,
                 Err(e) => {
-                    error!("Could not get Monotonic clock time: {:?}", e);
+                    error!("Could not get Monotonic clock time: {e:?}");
                     0
                 }
             };
@@ -481,7 +477,7 @@ fn run_detection(
     let n_boxes = match model.boxes(boxes) {
         Ok(n_boxes) => n_boxes,
         Err(e) => {
-            error!("Failed to read bounding boxes from model: {:?}", e);
+            error!("Failed to read bounding boxes from model: {e:?}");
             return Vec::new();
         }
     };
@@ -549,7 +545,7 @@ fn detectbox_to_boxwithtrack(
         None => b.label.to_string(),
     };
 
-    trace!("Created box with label {}", label);
+    trace!("Created box with label {label}");
     let track_info = track.as_ref().map(|v| Track {
         uuid: v.id,
         count: v.count,
@@ -618,7 +614,7 @@ async fn heart_beat(
         let mut dma_buf: DmaBuf = match cdr::deserialize(&sample.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
+                error!("Failed to deserialize message: {e:?}");
                 continue;
             }
         };
@@ -638,8 +634,7 @@ async fn heart_beat(
             Ok(v) => v,
             Err(e) => {
                 error!(
-                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-                    e
+                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
                 );
                 continue;
             }
@@ -649,7 +644,7 @@ async fn heart_beat(
         let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
             Ok(t) => t.num_nanoseconds() as u64,
             Err(e) => {
-                error!("Could not get Monotonic clock time: {:?}", e);
+                error!("Could not get Monotonic clock time: {e:?}");
                 0
             }
         };
@@ -710,6 +705,13 @@ async fn heart_beat(
 }
 
 fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
+    if model.input_count().is_ok_and(|f| f != 1) {
+        error!(
+            "Model has {} inputs but expected only 1",
+            model.input_count()?
+        );
+    }
+
     if let Ok(metadata) = model.get_model_metadata()
         && let Some(config) = &metadata.config
     {
@@ -720,15 +722,18 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
 
         for (i, output) in config.outputs.iter().enumerate() {
             match output {
-                model::ConfigOutput::Detection(detection) => model_type.detection = true,
-                _ => {}
+                model::ConfigOutput::Detection(_) => model_type.detection = true,
+                model::ConfigOutput::Segmentation(_) => {
+                    // model_type.segment_output_ind = Some(segmentation.index)
+                    model_type.segment_output_ind = Some(i)
+                }
             }
         }
 
         return Ok(model_type);
     }
     let output_count = model.output_count()?;
-    info!("output_count {:?}", output_count);
+    info!("output_count {output_count:?}");
     let mut segmentation_index = Vec::new();
     let mut model_type = ModelType {
         segment_output_ind: None,
@@ -741,7 +746,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
     // output.
     for i in 0..output_count {
         let shape = model.output_shape(i)?;
-        info!("output_shape[{}] {:?}", i, shape);
+        info!("output_shape[{i}] {shape:?}");
         if shape.len() != 4 {
             continue;
         }
@@ -751,7 +756,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
         if shape[2] < 8 {
             continue;
         }
-        info!("segmentation output shape: {:?}", shape);
+        info!("segmentation output shape: {shape:?}");
         segmentation_index.push(i);
     }
     if segmentation_index.len() > 1 {

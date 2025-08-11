@@ -8,7 +8,7 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use std::{error::Error, io, path::Path, usize};
+use std::{error::Error, io, path::Path};
 use tflitec_sys::{
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
     delegate::Delegate,
@@ -16,7 +16,6 @@ use tflitec_sys::{
     tensor::{Tensor, TensorMut, TensorType},
 };
 use tracing::instrument;
-use yaml_rust2::Yaml;
 
 pub static DEFAULT_NPU_DELEGATE_PATH: &str = "libvx_delegate.so";
 
@@ -37,15 +36,15 @@ impl TFLiteLib {
     }
 
     #[allow(dead_code)]
-    pub fn load_model_from_mem(&self, mem: Vec<u8>) -> Result<TFLiteModel, Box<dyn Error>> {
+    pub fn load_model_from_mem(&'_ self, mem: Vec<u8>) -> Result<TFLiteModel<'_>, Box<dyn Error>> {
         self.load_model_from_mem_with_delegate(mem, None::<String>)
     }
 
     pub fn load_model_from_mem_with_delegate<P: AsRef<Path>>(
-        &self,
+        &'_ self,
         mem: Vec<u8>,
         delegate: Option<P>,
-    ) -> Result<TFLiteModel, Box<dyn Error>> {
+    ) -> Result<TFLiteModel<'_>, Box<dyn Error>> {
         let model = self.tflite_lib.new_model_from_mem(mem)?;
         let mut builder = self.tflite_lib.new_interpreter_builder()?;
         if let Some(delegate) = delegate {
