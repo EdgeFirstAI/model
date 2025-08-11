@@ -5,7 +5,7 @@ use crate::{
         ConfigOutput, DataType, DetectBox, Metadata, Model, ModelError, ModelErrorKind,
         Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET, decode_detection_outputs, dequant,
     },
-    nms::decode_boxes_and_nms,
+    nms::{decode_boxes_and_nms, nms},
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::error;
@@ -233,6 +233,41 @@ impl<'a> TFLiteModel<'a> {
         self.dequant_tensor_(tensor, quant.scale, quant.zero_point as f32)
     }
 
+    // Must have 4 output tensors, in order of boxes, classes, scores, num_det
+    fn ssd_decode_boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+        let box_loc = self.outputs[0].mapro::<f32>()?;
+        let classes = self.outputs[1].mapro::<f32>()?;
+        let scores = self.outputs[2].mapro::<f32>()?;
+        let num_det = self.outputs[3].mapro::<f32>()?;
+        assert_eq!(
+            scores.len(),
+            classes.len(),
+            "classes and scores tensor don't have the same size"
+        );
+        assert_eq!(
+            box_loc.len(),
+            classes.len() * 4,
+            "boxes tensor isn't 4x the size of the classes tensor"
+        );
+        assert_eq!(num_det.len(), 1, "num_det tensor isn't size of 1");
+        let num_det = num_det[0].round() as usize;
+        let b = Vec::from_iter((0..num_det).map(|i| DetectBox {
+            ymin: box_loc[i * 4],
+            xmin: box_loc[i * 4 + 1],
+            ymax: box_loc[i * 4 + 2],
+            xmax: box_loc[i * 4 + 3],
+            score: scores[i],
+            label: classes[i].round() as usize,
+        }));
+        let b: Vec<DetectBox> = nms(self.iou_threshold, b);
+        let num_det = (b.len()).min(boxes.len());
+
+        for (out, b) in boxes.iter_mut().zip(b) {
+            *out = b;
+        }
+        Ok(num_det)
+    }
+
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
         let mut outputs = self.model.outputs()?;
         self.outputs.append(&mut outputs);
@@ -425,9 +460,17 @@ impl Model for TFLiteModel<'_> {
 
     #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+        if self.output_count()? == 4
+            && self.output_shape(3)?.len() == 1
+            && self.output_shape(3)?[0] == 1
+        {
+            return self.ssd_decode_boxes(boxes);
+        }
+
         let num_classes: usize;
         let box_data;
         let score_data;
+
         let mut box_ind = None;
         let mut score_ind = None;
         if let Some(config) = &self.metadata.config {

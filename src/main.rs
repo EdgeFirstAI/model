@@ -167,7 +167,7 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let delegate = if &args.engine == "npu" {
+            let delegate = if &args.engine.to_lowercase() == "npu" {
                 Some(DEFAULT_NPU_DELEGATE_PATH)
             } else {
                 None
@@ -360,8 +360,8 @@ async fn main() -> ExitCode {
             error!("Failed to run model: {e:?}");
             return ExitCode::FAILURE;
         }
-        trace!("Ran model");
         let model_duration = model_start.elapsed().as_nanos();
+        trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
 
         if let Some(i) = model_type.segment_output_ind {
             let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);

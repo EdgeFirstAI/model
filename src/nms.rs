@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use log::debug;
+use log::trace;
 
 use crate::model::DetectBox;
 
@@ -15,17 +15,12 @@ pub fn decode_boxes_and_nms(
     let start = Instant::now();
     let boxes = decode_boxes(score_threshold, scores_tensor, boxes_tensor, num_classes);
     let boxes = nms(iou_threshold, boxes);
-    for i in 0..output_boxes.len().min(boxes.len()) {
-        let (label, score, bbox) = boxes[i];
-        output_boxes[i].xmin = bbox[0];
-        output_boxes[i].ymin = bbox[1];
-        output_boxes[i].xmax = bbox[2];
-        output_boxes[i].ymax = bbox[3];
-        output_boxes[i].score = score;
-        output_boxes[i].label = label;
+    let len = output_boxes.len().min(boxes.len());
+    for (out, b) in output_boxes.iter_mut().zip(boxes) {
+        *out = b;
     }
-    debug!("Box decode and nms takes {:?}", start.elapsed());
-    output_boxes.len().min(boxes.len())
+    trace!("Box decode and nms takes {:?}", start.elapsed());
+    len
 }
 
 pub fn decode_boxes(
@@ -33,7 +28,7 @@ pub fn decode_boxes(
     scores: &[f32],
     boxes: &[f32],
     num_classes: usize,
-) -> Vec<(usize, f32, [f32; 4])> {
+) -> Vec<DetectBox> {
     assert_eq!(scores.len() / num_classes, boxes.len() / 4);
     let box_count = scores.len() / num_classes;
     let mut out = Vec::new();
@@ -48,52 +43,63 @@ pub fn decode_boxes(
         }
         let bbox = &boxes[i * 4..(i + 1) * 4];
         if score > threshold {
-            out.push((label, score, [bbox[0], bbox[1], bbox[2], bbox[3]]));
+            out.push(DetectBox {
+                xmin: bbox[0],
+                ymin: bbox[1],
+                xmax: bbox[2],
+                ymax: bbox[3],
+                score,
+                label,
+            });
         }
     }
     out
 }
 
-pub fn nms(iou: f32, mut boxes: Vec<(usize, f32, [f32; 4])>) -> Vec<(usize, f32, [f32; 4])> {
+pub fn nms(iou: f32, mut boxes: Vec<DetectBox>) -> Vec<DetectBox> {
     // Boxes get sorted by score in descending order so we know based on the
     // index the scoring of the boxes and can skip parts of the loop.
-    // let mut boxes = boxes.to_vec();
-    boxes.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    boxes.sort_unstable_by(|a, b| (b.label, b.score).partial_cmp(&(a.label, a.score)).unwrap());
 
     // Outer loop over all boxes.
     for i in 0..boxes.len() {
-        // Inner loop over boxes with higher score (earlier in the list).
-        for j in 0..i {
-            // If the boxes have the same class and the IoU is higher than the
-            // threshold, the boxes are merged and the outer box is removed.
-            if boxes[i].0 == boxes[j].0 && jaccard(boxes[i].2, boxes[j].2) > iou {
-                let maxbox = [
-                    boxes[i].2[0].min(boxes[j].2[0]),
-                    boxes[i].2[1].min(boxes[j].2[1]),
-                    boxes[i].2[2].max(boxes[j].2[2]),
-                    boxes[i].2[3].max(boxes[j].2[3]),
-                ];
-                boxes[i].1 = 0.0;
-                boxes[j].2 = maxbox;
+        if boxes[i].score <= 0.0 {
+            // this box was merged with a different box earlier
+            continue;
+        }
+        for j in (i + 1)..boxes.len() {
+            // Inner loop over boxes with lower score (later in the list).
+
+            // boxes are sorted by labels first, so when we encounter a box with a different
+            // class we can break
+            if boxes[j].label != boxes[i].label {
+                break;
+            }
+
+            if boxes[j].score <= 0.0 {
+                // this box was suppressed by different box earlier
+                continue;
+            }
+
+            if jaccard(&boxes[j], &boxes[i]) > iou {
+                // max_box(boxes[j].bbox, &mut boxes[i].bbox);
+                boxes[j].score = 0.0;
             }
         }
     }
     // Filter out boxes with a score of 0.0.
-    boxes
-        .into_iter()
-        .filter(|(_, score, _)| *score > 0.0)
-        .collect()
+    boxes.into_iter().filter(|b| b.score > 0.0).collect()
 }
 
-fn jaccard(a: [f32; 4], b: [f32; 4]) -> f32 {
-    let left = a[0].max(b[0]);
-    let top = a[1].max(b[1]);
-    let right = a[2].min(b[2]);
-    let bottom = a[3].min(b[3]);
+fn jaccard(a: &DetectBox, b: &DetectBox) -> f32 {
+    let left = a.xmin.max(b.xmin);
+    let top = a.ymin.max(b.ymin);
+    let right = a.xmax.min(b.xmax);
+    let bottom = a.ymax.min(b.ymax);
 
     let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
-    let area_a = (a[2] - a[0]) * (a[3] - a[1]);
-    let area_b = (b[2] - b[0]) * (b[3] - b[1]);
+    let area_a = (a.xmax - a.xmin) * (a.ymax - a.ymin);
+    let area_b = (b.xmax - b.xmin) * (b.ymax - b.ymin);
 
     // need to make sure we are not dividing by zero
     let union = (area_a + area_b - intersection).max(0.0000001);
@@ -103,7 +109,10 @@ fn jaccard(a: [f32; 4], b: [f32; 4]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::nms::{decode_boxes, jaccard};
+    use crate::{
+        model::DetectBox,
+        nms::{decode_boxes, jaccard},
+    };
 
     use ndarray::{
         ArrayView2, Zip,
@@ -116,7 +125,7 @@ mod tests {
         scores: &[f32],
         boxes: &[f32],
         num_classes: usize,
-    ) -> Vec<(usize, f32, [f32; 4])> {
+    ) -> Vec<DetectBox> {
         let scores =
             ArrayView2::from_shape([scores.len() / num_classes, num_classes], scores).unwrap();
         let boxes = ArrayView2::from_shape([boxes.len() / 4, 4], boxes).unwrap();
@@ -126,7 +135,14 @@ mod tests {
             .filter(|(score, _)| *score.max().unwrap() > threshold)
             .map(|(score, bbox)| {
                 let label = score.argmax().unwrap();
-                (label, score[label], [bbox[0], bbox[1], bbox[2], bbox[3]])
+                DetectBox {
+                    xmin: bbox[0],
+                    ymin: bbox[1],
+                    xmax: bbox[2],
+                    ymax: bbox[3],
+                    score: score[label],
+                    label,
+                }
             })
             .collect()
     }
@@ -147,7 +163,24 @@ mod tests {
 
     #[test]
     fn test_iou() {
-        let iou = jaccard([0.1, 0.1, 0.2, 0.2], [0.15, 0.15, 0.25, 0.25]);
+        let iou = jaccard(
+            &DetectBox {
+                label: 0,
+                score: 0.0,
+                xmin: 0.1,
+                ymin: 0.1,
+                xmax: 0.2,
+                ymax: 0.2,
+            },
+            &DetectBox {
+                label: 0,
+                score: 0.0,
+                xmin: 0.15,
+                ymin: 0.15,
+                xmax: 0.25,
+                ymax: 0.25,
+            },
+        );
         assert!(
             (iou - 1.0f32 / 7.0f32).abs() < 0.00001,
             "Computed IOU was not 0.57142857142"
@@ -155,7 +188,25 @@ mod tests {
     }
     #[test]
     fn test_iou_zero() {
-        let iou = jaccard([0.1, 0.1, 0.1, 0.2], [0.1, 0.15, 0.1, 0.25]);
+        let iou = jaccard(
+            &DetectBox {
+                label: 0,
+                score: 0.0,
+                xmin: 0.1,
+                ymin: 0.1,
+                xmax: 0.1,
+                ymax: 0.2,
+            },
+            &DetectBox {
+                label: 0,
+                score: 0.0,
+                xmin: 0.1,
+                ymin: 0.15,
+                xmax: 0.1,
+                ymax: 0.25,
+            },
+        );
+
         assert_eq!(iou, 0.0, "Computed IOU was not 0.0");
     }
 }

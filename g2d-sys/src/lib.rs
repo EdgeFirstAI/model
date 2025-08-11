@@ -69,6 +69,7 @@ struct dma_buf_phys(std::ffi::c_ulong);
 
 const DMA_BUF_BASE: u8 = b'b';
 const DMA_BUF_IOCTL_PHYS: u8 = 10;
+
 ioctl_write_ptr!(
     ioctl_dma_buf_phys,
     DMA_BUF_BASE,
