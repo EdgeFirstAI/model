@@ -809,6 +809,7 @@ dependencies = [
  "ndarray 0.16.1",
  "ndarray-stats",
  "nix 0.30.1",
+ "num-traits",
  "pidfd_getfd",
  "rand 0.9.1",
  "serde",

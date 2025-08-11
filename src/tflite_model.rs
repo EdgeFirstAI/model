@@ -2,13 +2,12 @@ use crate::{
     args::Args,
     image::{Image, ImageManager, RGBX, Rotation},
     model::{
-        ConfigOutput, DataType, DetectBox, Detection, Metadata, Model, ModelError, ModelErrorKind,
-        Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET,
+        ConfigOutput, DataType, DetectBox, Metadata, Model, ModelError, ModelErrorKind,
+        Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET, decode_detection_outputs, dequant,
     },
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use ndarray::Array;
 use std::{error::Error, io, path::Path, usize};
 use tflitec_sys::{
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
@@ -140,86 +139,53 @@ impl<'a> TFLiteModel<'a> {
         self.iou_threshold = args.iou;
     }
 
-    fn dequant_tensor_(&self, tensor: &Tensor) -> Result<Vec<f32>, ModelError> {
+    fn dequant_tensor_(
+        &self,
+        tensor: &Tensor,
+        scale: f32,
+        zero_point: f32,
+    ) -> Result<Vec<f32>, ModelError> {
+        let mut output = vec![0.0f32; tensor.volume()?];
         match tensor.tensor_type().into() {
             DataType::Raw => todo!(),
             DataType::Int8 => {
                 let data: &[i8] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::UInt8 => {
                 let data: &[u8] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::Int16 => {
                 let data: &[i16] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::UInt16 => {
                 let data: &[u16] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::Float16 => todo!(),
             DataType::Int32 => {
                 let data: &[i32] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::UInt32 => {
                 let data: &[u32] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::Float32 => todo!(),
             DataType::Int64 => {
                 let data: &[i64] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::UInt64 => {
                 let data: &[u64] = tensor.mapro()?;
-                let quant = tensor.get_quantization_params();
-                let scaled_zp = -quant.scale * quant.zero_point as f32;
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as f32) + scaled_zp)
-                    .collect())
+                dequant(data, &mut output, scale, zero_point);
             }
             DataType::Float64 => todo!(),
             DataType::String => todo!(),
         }
+        Ok(output)
     }
 
     fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
@@ -234,7 +200,8 @@ impl<'a> TFLiteModel<'a> {
                 return Err(e);
             }
         };
-        self.dequant_tensor_(tensor)
+        let quant = tensor.get_quantization_params();
+        self.dequant_tensor_(tensor, quant.scale, quant.zero_point as f32)
     }
 
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
@@ -244,123 +211,6 @@ impl<'a> TFLiteModel<'a> {
         self.inputs.append(&mut inputs);
         Ok(())
     }
-
-    fn decode_detection_outputs(
-        outputs: Vec<Vec<f32>>,
-        details: &[ConfigOutput],
-    ) -> (Vec<f32>, Vec<f32>, usize) {
-        let mut total_capacity = 0;
-        let mut nc = 0;
-        for detail in details {
-            match detail {
-                ConfigOutput::Detection(detail) => {
-                    nc = detail.num_classes;
-                    let shape = &detail.shape;
-                    let na = detail.num_anchors;
-                    total_capacity += shape[1] * shape[2] * na;
-                }
-                _ => continue,
-            }
-        }
-        let mut bboxes = Vec::with_capacity(total_capacity * 4);
-        let mut bscores = Vec::with_capacity(total_capacity * nc);
-        // bboxes, bscores = [], []
-
-        for (mut p, detail) in outputs.into_iter().zip(details) {
-            p.iter_mut().for_each(|x| *x = sigmoid(*x));
-            if let ConfigOutput::Detection(detail) = detail {
-                let anchors = &detail.anchors;
-                let na = detail.num_anchors;
-                let shape = &detail.shape;
-                assert_eq!(
-                    shape.iter().product::<usize>(),
-                    p.len(),
-                    "Shape product doesn't match tensor length"
-                );
-                let height = shape[1];
-                let width = shape[2];
-
-                let mut grid = Vec::new();
-                for y in 0..height {
-                    for x in 0..width {
-                        for _ in 0..na {
-                            grid.push(x as f32);
-                            grid.push(y as f32);
-                        }
-                    }
-                }
-                // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
-                for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
-                    for (anchor_ind, (p, g)) in
-                        p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate()
-                    {
-                        let (x, y) = (p[0], p[1]);
-                        let x = (x * 2.0 + g[0] - 0.5) / width as f32;
-                        let y = (y * 2.0 + g[1] - 0.5) / height as f32;
-                        let (w, h) = (p[2], p[3]);
-                        let w_half = w * w * 2.0 * anchors[anchor_ind][0];
-                        let h_half = h * h * 2.0 * anchors[anchor_ind][1];
-
-                        let obj = p[4];
-                        let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
-                        bboxes.push(x - w_half);
-                        bboxes.push(y - h_half);
-                        bboxes.push(x + w_half);
-                        bboxes.push(y + h_half);
-                        bscores.extend(probs);
-                    }
-                }
-            }
-        }
-
-        (bboxes, bscores, nc)
-        // for p, detail in zip(outputs, details):
-        //     p = tf.nn.sigmoid(p)
-        //     p = p.numpy()
-
-        //     anchors = np.asarray(detail['anchors'], dtype=np.float32)
-        //     strides = np.asarray(detail['stride'], dtype=np.float32)
-        //     nc = detail['num_classes']
-        //     na = detail['num_anchors']
-        //     _, h, w, _ = p.shape
-        //     p = p.reshape((-1, h, w, na, nc + 5))
-
-        //     grid = np.meshgrid(tf.range(w), tf.range(h))
-        //     grid = np.expand_dims(np.stack(grid, axis=-1), axis=2)
-        //     grid = np.tile(np.expand_dims(grid, axis=0), [
-        //         1, 1, 1, na, 1])
-
-        //     # decoding
-
-        //     xy = p[..., 0:2]
-        //     wh = p[..., 2:4]
-        //     obj = p[..., 4:5]
-        //     probs = p[..., 5:]
-
-        //     scores = obj * probs
-        //     xy = (xy * 2.0 + grid - 0.5) / (w, h)
-        //     wh = (wh * 2) ** 2 * anchors * 0.5
-        //     xyxy = np.concat([
-        //         xy - wh,
-        //         xy + wh
-        //     ], axis=-1)
-        //     xyxy = xyxy.reshape((1, -1, 1, 4))
-        //     scores = scores.reshape(1, -1, nc)
-
-        //     bboxes.append(xyxy)
-        //     bscores.append(scores)
-
-        // bscores = np.concat(bscores, axis=1).astype(np.float32)
-        // bboxes = np.concat(bboxes, axis=1).astype(np.float32)
-
-        // return bboxes, bscores
-    }
-}
-
-#[inline]
-pub fn sigmoid(f: f32) -> f32 {
-    use std::f32::consts::E;
-    1.0 / (1.0 + E.powf(-f))
 }
 
 impl Model for TFLiteModel<'_> {
@@ -565,7 +415,7 @@ impl Model for TFLiteModel<'_> {
                 }
             }
             (box_data, score_data, num_classes) =
-                TFLiteModel::decode_detection_outputs(output_tensors, output_details);
+                decode_detection_outputs(output_tensors, output_details);
         } else {
             let mut box_ind = None;
             let mut score_ind = None;

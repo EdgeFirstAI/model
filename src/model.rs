@@ -3,9 +3,9 @@ use std::{error::Error, fmt};
 use crate::{image::ImageManager, tflite_model::TFLiteModel};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::error;
+use num_traits::AsPrimitive;
 use serde::{Deserialize, Serialize};
 use tflitec_sys::TfLiteError;
-use yaml_rust2::Yaml;
 
 use enum_dispatch::enum_dispatch;
 
@@ -90,7 +90,7 @@ pub struct Detection {
     pub dtype: DataType,
     pub index: usize,
     pub name: String,
-    pub quantization: Option<[f32; 2]>,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
     pub num_classes: usize,
     pub num_anchors: usize,
@@ -137,7 +137,7 @@ pub enum ModelErrorKind {
 
 impl fmt::Display for ModelErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -257,4 +257,92 @@ pub trait Model {
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError>;
 
     fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
+}
+
+// Decodes each tensors into box coordinates and scores. Multiple tensors will
+// have their ouput box coordinates/scores appended together.
+// Output is (box coordinates, scores, number of classes)
+pub fn decode_detection_outputs(
+    outputs: Vec<Vec<f32>>,
+    details: &[ConfigOutput],
+) -> (Vec<f32>, Vec<f32>, usize) {
+    let mut total_capacity = 0;
+    let mut nc = 0;
+    for detail in details {
+        match detail {
+            ConfigOutput::Detection(detail) => {
+                nc = detail.num_classes;
+                let shape = &detail.shape;
+                let na = detail.num_anchors;
+                total_capacity += shape[1] * shape[2] * na;
+            }
+            _ => continue,
+        }
+    }
+    let mut bboxes = Vec::with_capacity(total_capacity * 4);
+    let mut bscores = Vec::with_capacity(total_capacity * nc);
+    // bboxes, bscores = [], []
+
+    for (mut p, detail) in outputs.into_iter().zip(details) {
+        p.iter_mut().for_each(|x| *x = sigmoid(*x));
+        if let ConfigOutput::Detection(detail) = detail {
+            let anchors = &detail.anchors;
+            let na = detail.num_anchors;
+            let shape = &detail.shape;
+            assert_eq!(
+                shape.iter().product::<usize>(),
+                p.len(),
+                "Shape product doesn't match tensor length"
+            );
+            let height = shape[1];
+            let width = shape[2];
+
+            let mut grid = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    for _ in 0..na {
+                        grid.push(x as f32);
+                        grid.push(y as f32);
+                    }
+                }
+            }
+            // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
+            for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
+                for (anchor_ind, (p, g)) in
+                    p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate()
+                {
+                    let (x, y) = (p[0], p[1]);
+                    let x = (x * 2.0 + g[0] - 0.5) / width as f32;
+                    let y = (y * 2.0 + g[1] - 0.5) / height as f32;
+                    let (w, h) = (p[2], p[3]);
+                    let w_half = w * w * 2.0 * anchors[anchor_ind][0];
+                    let h_half = h * h * 2.0 * anchors[anchor_ind][1];
+
+                    let obj = p[4];
+                    let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
+                    bboxes.push(x - w_half);
+                    bboxes.push(y - h_half);
+                    bboxes.push(x + w_half);
+                    bboxes.push(y + h_half);
+                    bscores.extend(probs);
+                }
+            }
+        }
+    }
+
+    (bboxes, bscores, nc)
+}
+
+#[inline]
+pub fn sigmoid(f: f32) -> f32 {
+    use std::f32::consts::E;
+    1.0 / (1.0 + E.powf(-f))
+}
+
+#[inline]
+pub fn dequant<T: AsPrimitive<f32>>(data: &[T], output: &mut [f32], scale: f32, zero_point: f32) {
+    let scaled_zp = -scale * zero_point;
+    data.iter()
+        .zip(output.iter_mut())
+        .for_each(|(d, out)| *out = scale * (*d).as_() + scaled_zp);
 }
