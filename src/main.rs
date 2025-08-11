@@ -720,13 +720,14 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
             detection: false,
         };
 
-        for (i, output) in config.outputs.iter().enumerate() {
+        for output in &config.outputs {
             match output {
                 model::ConfigOutput::Detection(_) => model_type.detection = true,
-                model::ConfigOutput::Segmentation(_) => {
+                model::ConfigOutput::Segmentation(segmentation) => {
                     // model_type.segment_output_ind = Some(segmentation.index)
-                    model_type.segment_output_ind = Some(i)
+                    model_type.segment_output_ind = Some(segmentation.output_index)
                 }
+                _ => {}
             }
         }
 

@@ -66,17 +66,48 @@ pub struct ConfigOutputs {
 pub enum ConfigOutput {
     #[serde(rename = "detection")]
     Detection(Detection),
+    #[serde(rename = "masks")]
+    Mask(Mask),
     #[serde(rename = "segmentation")]
     Segmentation(Segmentation),
 }
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Segmentation {
     pub anchors: Option<Vec<[f32; 2]>>,
     pub decode: bool,
+    pub decoder: Decoder,
     pub dtype: DataType,
     pub index: usize,
     pub name: String,
+    pub output_index: usize,
     pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Mask {
+    pub anchors: Option<Vec<[f32; 2]>>,
+    pub decode: bool,
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub output_index: usize,
+    pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct Detection {
+    pub anchors: Vec<[f32; 2]>,
+    pub decode: bool,
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub output_index: usize,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
     pub num_classes: usize,
     pub num_anchors: usize,
@@ -84,17 +115,11 @@ pub struct Segmentation {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-pub struct Detection {
-    pub anchors: Vec<[f32; 2]>,
-    pub decode: bool,
-    pub dtype: DataType,
-    pub index: usize,
-    pub name: String,
-    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
-    pub shape: Vec<usize>,
-    pub num_classes: usize,
-    pub num_anchors: usize,
-    pub stride: Option<Vec<usize>>,
+pub enum Decoder {
+    #[serde(rename = "modelpack")]
+    ModelPack,
+    #[serde(rename = "yolo")]
+    Yolo,
 }
 
 impl From<tflitec_sys::metadata::Metadata> for Metadata {

@@ -401,16 +401,9 @@ impl Model for TFLiteModel<'_> {
         if let Some(config) = &self.metadata.config {
             let output_details = &config.outputs;
             let mut output_tensors = vec![];
-            let mut min_index = usize::MAX;
-            for details in output_details.iter() {
-                match details {
-                    ConfigOutput::Detection(details) => min_index = min_index.min(details.index),
-                    ConfigOutput::Segmentation(details) => min_index = min_index.min(details.index),
-                }
-            }
             for details in output_details.iter() {
                 if let ConfigOutput::Detection(details) = details {
-                    output_tensors.push(self.dequant_output(details.index - min_index)?);
+                    output_tensors.push(self.dequant_output(details.output_index)?);
                 }
             }
             (box_data, score_data, num_classes) =
