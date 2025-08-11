@@ -8,7 +8,12 @@ use crate::{
     nms::decode_boxes_and_nms,
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use std::{error::Error, io, path::Path};
+use log::error;
+use std::{
+    error::Error,
+    io::{self, Read},
+    path::Path,
+};
 use tflitec_sys::{
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
     delegate::Delegate,
@@ -92,6 +97,7 @@ pub struct TFLiteModel<'a> {
     score_threshold: f32,
     iou_threshold: f32,
     metadata: Metadata,
+    labels: Vec<String>,
 }
 
 impl<'a> TFLiteModel<'a> {
@@ -116,8 +122,31 @@ impl<'a> TFLiteModel<'a> {
             Ok(v) => v,
             Err(e) => return Err(Box::from(e)),
         };
-        let metadata = get_model_metadata(&model.model_mem);
-        // println!("{:?}", metadata);
+        let mut labels = Vec::new();
+        let mut metadata = get_model_metadata(&model.model_mem);
+        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(&model.model_mem)) {
+            if let Ok(mut f) = z.by_name("config.yaml")
+                && f.is_file()
+            {
+                let mut yaml = String::new();
+                if let Err(e) = f.read_to_string(&mut yaml) {
+                    error!("Error while reading config.yaml {e:?}");
+                }
+
+                metadata.config_yaml = Some(yaml);
+            }
+
+            if let Ok(mut f) = z.by_name("labels.txt")
+                && f.is_file()
+            {
+                let mut labels_txt = String::new();
+                if let Err(e) = f.read_to_string(&mut labels_txt) {
+                    error!("Error while reading config.yaml {e:?}");
+                }
+                labels = labels_txt.lines().map(|l| l.to_string()).collect();
+            }
+        }
+
         let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let mut m = TFLiteModel {
             model,
@@ -127,6 +156,7 @@ impl<'a> TFLiteModel<'a> {
             score_threshold: 0.5,
             iou_threshold: 0.5,
             metadata: metadata.into(),
+            labels,
         };
         m.init_tensors()?;
         m.run_model()?;
@@ -395,22 +425,40 @@ impl Model for TFLiteModel<'_> {
 
     #[instrument(skip_all)]
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
-        let num_classes;
+        let num_classes: usize;
         let box_data;
         let score_data;
+        let mut box_ind = None;
+        let mut score_ind = None;
         if let Some(config) = &self.metadata.config {
             let output_details = &config.outputs;
             let mut output_tensors = vec![];
+            let mut detection_details = vec![];
             for details in output_details.iter() {
-                if let ConfigOutput::Detection(details) = details {
-                    output_tensors.push(self.dequant_output(details.output_index)?);
+                match details {
+                    ConfigOutput::Detection(detection) => {
+                        output_tensors.push(self.dequant_output(detection.output_index)?);
+                        detection_details.push(detection.clone());
+                    }
+                    ConfigOutput::Scores(scores) => {
+                        score_ind = Some(scores.output_index);
+                    }
+                    ConfigOutput::Boxes(boxes) => box_ind = Some(boxes.output_index),
+                    _ => {}
                 }
             }
-            (box_data, score_data, num_classes) =
-                decode_detection_outputs(output_tensors, output_details);
+
+            if let Some(score_ind) = score_ind
+                && let Some(box_ind) = box_ind
+            {
+                box_data = self.dequant_output(box_ind)?;
+                score_data = self.dequant_output(score_ind)?;
+                num_classes = *self.output_shape(score_ind)?.last().unwrap();
+            } else {
+                (box_data, score_data, num_classes) =
+                    decode_detection_outputs(output_tensors, &detection_details);
+            }
         } else {
-            let mut box_ind = None;
-            let mut score_ind = None;
             let mut num_classes_ = None;
             for i in 0..self.output_count()? {
                 let shape = self.output_shape(i)?;
@@ -431,6 +479,12 @@ impl Model for TFLiteModel<'_> {
             box_data = self.dequant_output(box_ind.unwrap())?;
             score_data = self.dequant_output(score_ind.unwrap())?;
             num_classes = num_classes_.unwrap();
+        }
+        if num_classes == 0 {
+            return Err(ModelError::new(
+                ModelErrorKind::Decoding,
+                "Did not find recognized detection output".to_string(),
+            ));
         }
         let n_boxes = decode_boxes_and_nms(
             self.score_threshold,
@@ -474,17 +528,17 @@ impl Model for TFLiteModel<'_> {
     }
 
     fn labels(&self) -> Result<Vec<String>, ModelError> {
-        Ok(Vec::new())
+        Ok(self.labels.clone())
     }
 
     fn model_name(&self) -> Result<String, ModelError> {
-        match get_model_metadata(&self.model.model_mem).name {
-            Some(v) => Ok(v),
+        match &self.metadata.name {
+            Some(v) => Ok(v.clone()),
             None => Ok("".to_string()),
         }
     }
 
     fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
-        Ok(get_model_metadata(&self.model.model_mem).into())
+        Ok(self.metadata.clone())
     }
 }

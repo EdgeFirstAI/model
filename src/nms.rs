@@ -106,8 +106,8 @@ mod tests {
     use crate::nms::{decode_boxes, jaccard};
 
     use ndarray::{
-        parallel::prelude::{IntoParallelIterator, ParallelIterator},
         ArrayView2, Zip,
+        parallel::prelude::{IntoParallelIterator, ParallelIterator},
     };
     use ndarray_stats::QuantileExt as _;
     use rand::random;

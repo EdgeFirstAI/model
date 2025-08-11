@@ -50,6 +50,7 @@ use zenoh::{
 #[cfg(feature = "rtm")]
 use rtm_model::RtmModel;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 struct ModelType {
     segment_output_ind: Option<usize>,
     detection: bool,
@@ -225,7 +226,7 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    info!("identified model type");
+    info!("identified model type: {model_type:?}");
     drop(tx);
 
     let publ_model_info = session
@@ -715,6 +716,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
     if let Ok(metadata) = model.get_model_metadata()
         && let Some(config) = &metadata.config
     {
+        println!("Metadata: {metadata:?}");
         let mut model_type = ModelType {
             segment_output_ind: None,
             detection: false,
@@ -722,7 +724,9 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
 
         for output in &config.outputs {
             match output {
-                model::ConfigOutput::Detection(_) => model_type.detection = true,
+                model::ConfigOutput::Detection(_)
+                | model::ConfigOutput::Boxes(_)
+                | model::ConfigOutput::Scores(_) => model_type.detection = true,
                 model::ConfigOutput::Segmentation(segmentation) => {
                     // model_type.segment_output_ind = Some(segmentation.index)
                     model_type.segment_output_ind = Some(segmentation.output_index)

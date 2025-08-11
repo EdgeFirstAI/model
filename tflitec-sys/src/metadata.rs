@@ -58,17 +58,5 @@ pub fn get_model_metadata(model: &[u8]) -> Metadata {
         metadata.version = model_metadata.version().map(|x| x.to_owned());
     }
 
-    if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(model))
-        && let Ok(mut f) = z.by_name("config.yaml")
-        && f.is_file()
-    {
-        let mut yaml = String::new();
-        if let Err(e) = f.read_to_string(&mut yaml) {
-            error!("Error while reading config.yaml {e:?}");
-        }
-
-        metadata.config_yaml = Some(yaml);
-    }
-
     metadata
 }

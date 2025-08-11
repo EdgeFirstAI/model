@@ -47,7 +47,7 @@ pub enum SupportedModel<'a> {
     RtmModel(RtmModel),
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Clone)]
 pub struct Metadata {
     pub name: Option<String>,
     pub version: Option<String>,
@@ -57,11 +57,11 @@ pub struct Metadata {
     pub config: Option<ConfigOutputs>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct ConfigOutputs {
     pub outputs: Vec<ConfigOutput>,
 }
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum ConfigOutput {
     #[serde(rename = "detection")]
@@ -70,11 +70,14 @@ pub enum ConfigOutput {
     Mask(Mask),
     #[serde(rename = "segmentation")]
     Segmentation(Segmentation),
+    #[serde(rename = "scores")]
+    Scores(Scores),
+    #[serde(rename = "boxes")]
+    Boxes(Boxes),
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Segmentation {
-    pub anchors: Option<Vec<[f32; 2]>>,
     pub decode: bool,
     pub decoder: Decoder,
     pub dtype: DataType,
@@ -85,9 +88,8 @@ pub struct Segmentation {
     pub shape: Vec<usize>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Mask {
-    pub anchors: Option<Vec<[f32; 2]>>,
     pub decode: bool,
     pub decoder: Decoder,
     pub dtype: DataType,
@@ -98,7 +100,7 @@ pub struct Mask {
     pub shape: Vec<usize>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Detection {
     pub anchors: Vec<[f32; 2]>,
     pub decode: bool,
@@ -109,12 +111,31 @@ pub struct Detection {
     pub output_index: usize,
     pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
-    pub num_classes: usize,
-    pub num_anchors: usize,
-    pub stride: Option<Vec<usize>>,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Scores {
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub output_index: usize,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Boxes {
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub output_index: usize,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Decoder {
     #[serde(rename = "modelpack")]
     ModelPack,
@@ -289,20 +310,15 @@ pub trait Model {
 // Output is (box coordinates, scores, number of classes)
 pub fn decode_detection_outputs(
     outputs: Vec<Vec<f32>>,
-    details: &[ConfigOutput],
+    details: &[Detection],
 ) -> (Vec<f32>, Vec<f32>, usize) {
     let mut total_capacity = 0;
     let mut nc = 0;
     for detail in details {
-        match detail {
-            ConfigOutput::Detection(detail) => {
-                nc = detail.num_classes;
-                let shape = &detail.shape;
-                let na = detail.num_anchors;
-                total_capacity += shape[1] * shape[2] * na;
-            }
-            _ => continue,
-        }
+        let shape = &detail.shape;
+        let na = detail.anchors.len();
+        nc = *shape.last().unwrap() / na - 5;
+        total_capacity += shape[1] * shape[2] * na;
     }
     let mut bboxes = Vec::with_capacity(total_capacity * 4);
     let mut bscores = Vec::with_capacity(total_capacity * nc);
@@ -310,47 +326,44 @@ pub fn decode_detection_outputs(
 
     for (mut p, detail) in outputs.into_iter().zip(details) {
         p.iter_mut().for_each(|x| *x = sigmoid(*x));
-        if let ConfigOutput::Detection(detail) = detail {
-            let anchors = &detail.anchors;
-            let na = detail.num_anchors;
-            let shape = &detail.shape;
-            assert_eq!(
-                shape.iter().product::<usize>(),
-                p.len(),
-                "Shape product doesn't match tensor length"
-            );
-            let height = shape[1];
-            let width = shape[2];
 
-            let mut grid = Vec::new();
-            for y in 0..height {
-                for x in 0..width {
-                    for _ in 0..na {
-                        grid.push(x as f32);
-                        grid.push(y as f32);
-                    }
+        let anchors = &detail.anchors;
+        let na = detail.anchors.len();
+        let shape = &detail.shape;
+        assert_eq!(
+            shape.iter().product::<usize>(),
+            p.len(),
+            "Shape product doesn't match tensor length"
+        );
+        let height = shape[1];
+        let width = shape[2];
+
+        let mut grid = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                for _ in 0..na {
+                    grid.push(x as f32);
+                    grid.push(y as f32);
                 }
             }
-            // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
-            for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
-                for (anchor_ind, (p, g)) in
-                    p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate()
-                {
-                    let (x, y) = (p[0], p[1]);
-                    let x = (x * 2.0 + g[0] - 0.5) / width as f32;
-                    let y = (y * 2.0 + g[1] - 0.5) / height as f32;
-                    let (w, h) = (p[2], p[3]);
-                    let w_half = w * w * 2.0 * anchors[anchor_ind][0];
-                    let h_half = h * h * 2.0 * anchors[anchor_ind][1];
+        }
+        // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
+        for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
+            for (anchor_ind, (p, g)) in p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate() {
+                let (x, y) = (p[0], p[1]);
+                let x = (x * 2.0 + g[0] - 0.5) / width as f32;
+                let y = (y * 2.0 + g[1] - 0.5) / height as f32;
+                let (w, h) = (p[2], p[3]);
+                let w_half = w * w * 2.0 * anchors[anchor_ind][0];
+                let h_half = h * h * 2.0 * anchors[anchor_ind][1];
 
-                    let obj = p[4];
-                    let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
-                    bboxes.push(x - w_half);
-                    bboxes.push(y - h_half);
-                    bboxes.push(x + w_half);
-                    bboxes.push(y + h_half);
-                    bscores.extend(probs);
-                }
+                let obj = p[4];
+                let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
+                bboxes.push(x - w_half);
+                bboxes.push(y - h_half);
+                bboxes.push(x + w_half);
+                bboxes.push(y + h_half);
+                bscores.extend(probs);
             }
         }
     }
