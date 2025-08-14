@@ -51,7 +51,7 @@ use zenoh::{
 use rtm_model::RtmModel;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-struct ModelType {
+pub struct ModelType {
     segment_output_ind: Option<usize>,
     detection: bool,
 }
