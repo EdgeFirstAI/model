@@ -481,7 +481,7 @@ impl Model for TFLiteModel<'_> {
                 match details {
                     ConfigOutput::Detection(detection) => {
                         output_tensors.push(self.dequant_output(detection.output_index)?);
-                        detection_details.push(detection.clone());
+                        detection_details.push(detection);
                     }
                     ConfigOutput::Scores(scores) => {
                         score_ind = Some(scores.output_index);

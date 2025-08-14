@@ -310,7 +310,7 @@ pub trait Model {
 // Output is (box coordinates, scores, number of classes)
 pub fn decode_detection_outputs(
     outputs: Vec<Vec<f32>>,
-    details: &[Detection],
+    details: &[&Detection],
 ) -> (Vec<f32>, Vec<f32>, usize) {
     let mut total_capacity = 0;
     let mut nc = 0;
@@ -322,10 +322,9 @@ pub fn decode_detection_outputs(
     }
     let mut bboxes = Vec::with_capacity(total_capacity * 4);
     let mut bscores = Vec::with_capacity(total_capacity * nc);
-    // bboxes, bscores = [], []
 
     for (mut p, detail) in outputs.into_iter().zip(details) {
-        p.iter_mut().for_each(|x| *x = sigmoid(*x));
+        p.iter_mut().for_each(|x| *x = fast_sigmoid(*x));
 
         let anchors = &detail.anchors;
         let na = detail.anchors.len();
@@ -338,7 +337,7 @@ pub fn decode_detection_outputs(
         let height = shape[1];
         let width = shape[2];
 
-        let mut grid = Vec::new();
+        let mut grid = Vec::with_capacity(height * width * na * 2);
         for y in 0..height {
             for x in 0..width {
                 for _ in 0..na {
@@ -347,34 +346,51 @@ pub fn decode_detection_outputs(
                 }
             }
         }
-        // let grid = Array::from_shape_vec((h, w, na, nc + 5), grid).unwrap();
-        for (p, g) in p.chunks_exact(na * (nc + 5)).zip(grid.chunks_exact(na * 2)) {
-            for (anchor_ind, (p, g)) in p.chunks_exact(nc + 5).zip(g.chunks_exact(2)).enumerate() {
-                let (x, y) = (p[0], p[1]);
-                let x = (x * 2.0 + g[0] - 0.5) / width as f32;
-                let y = (y * 2.0 + g[1] - 0.5) / height as f32;
-                let (w, h) = (p[2], p[3]);
-                let w_half = w * w * 2.0 * anchors[anchor_ind][0];
-                let h_half = h * h * 2.0 * anchors[anchor_ind][1];
 
-                let obj = p[4];
-                let probs = p[5..(nc + 5)].iter().map(|x| *x * obj);
-                bboxes.push(x - w_half);
-                bboxes.push(y - h_half);
-                bboxes.push(x + w_half);
-                bboxes.push(y + h_half);
-                bscores.extend(probs);
-            }
+        let div_width = 1.0 / width as f32;
+        let div_height = 1.0 / height as f32;
+        for ((p, g), anchor) in p
+            .chunks_exact(nc + 5)
+            .zip(grid.chunks_exact(2))
+            .zip(anchors.iter().cycle())
+        {
+            let (x, y) = (p[0], p[1]);
+            let x = (x * 2.0 + g[0] - 0.5) * div_width;
+            let y = (y * 2.0 + g[1] - 0.5) * div_height;
+            let (w, h) = (p[2], p[3]);
+            let w_half = w * w * 2.0 * anchor[0];
+            let h_half = h * h * 2.0 * anchor[1];
+
+            bboxes.push(x - w_half);
+            bboxes.push(y - h_half);
+            bboxes.push(x + w_half);
+            bboxes.push(y + h_half);
+
+            let obj = p[4];
+            let probs = p[5..].iter().map(|x| *x * obj);
+            bscores.extend(probs);
         }
     }
-
     (bboxes, bscores, nc)
 }
 
 #[inline]
+#[allow(dead_code)]
 pub fn sigmoid(f: f32) -> f32 {
     use std::f32::consts::E;
     1.0 / (1.0 + E.powf(-f))
+}
+
+#[inline]
+#[allow(dead_code)]
+pub fn fast_sigmoid(f: f32) -> f32 {
+    if f.abs() > 4.16666 {
+        f.signum() * 0.5 + 0.5
+    } else if f.abs() < 1.48487 {
+        0.259_165_59 * f / (1.0 + 0.1 * f * f) + 0.5
+    } else {
+        0.37 * f / (1.0 + 0.5 * f.abs()) + 0.5
+    }
 }
 
 #[inline]
