@@ -1,16 +1,16 @@
-mod args;
-mod buildmsgs;
-mod fps;
-mod image;
-mod kalman;
-mod masks;
-mod model;
-mod nms;
-mod tflite_model;
-mod tracker;
+pub mod args;
+pub mod buildmsgs;
+pub mod fps;
+pub mod image;
+pub mod kalman;
+pub mod masks;
+pub mod model;
+pub mod nms;
+pub mod tflite_model;
+pub mod tracker;
 
 #[cfg(feature = "rtm")]
-mod rtm_model;
+pub mod rtm_model;
 
 use crate::{buildmsgs::*, tracker::*};
 use args::{Args, LabelSetting};
@@ -57,7 +57,7 @@ struct ModelType {
 }
 
 #[tokio::main]
-async fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     let args = Args::parse();
 
     args.tracy.then(tracy_client::Client::start);
