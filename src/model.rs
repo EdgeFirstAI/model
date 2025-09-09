@@ -83,7 +83,6 @@ pub struct Segmentation {
     pub dtype: DataType,
     pub index: usize,
     pub name: String,
-    pub output_index: usize,
     pub quantization: Option<[f32; 2]>,
     pub shape: Vec<usize>,
 }
@@ -95,7 +94,6 @@ pub struct Mask {
     pub dtype: DataType,
     pub index: usize,
     pub name: String,
-    pub output_index: usize,
     pub quantization: Option<[f32; 2]>,
     pub shape: Vec<usize>,
 }
@@ -106,9 +104,7 @@ pub struct Detection {
     pub decode: bool,
     pub decoder: Decoder,
     pub dtype: DataType,
-    pub index: usize,
     pub name: String,
-    pub output_index: usize,
     pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
 }
@@ -117,9 +113,7 @@ pub struct Detection {
 pub struct Scores {
     pub decoder: Decoder,
     pub dtype: DataType,
-    pub index: usize,
     pub name: String,
-    pub output_index: usize,
     pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
 }
@@ -128,9 +122,7 @@ pub struct Scores {
 pub struct Boxes {
     pub decoder: Decoder,
     pub dtype: DataType,
-    pub index: usize,
     pub name: String,
-    pub output_index: usize,
     pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
     pub shape: Vec<usize>,
 }
@@ -153,7 +145,7 @@ impl From<tflitec_sys::metadata::Metadata> for Metadata {
             license: value.license,
             config: match value.config_yaml {
                 Some(yaml) => match serde_yaml::from_str::<ConfigOutputs>(&yaml) {
-                    Ok(parsed) => Some(parsed),
+                    Ok(mut parsed) => Some(parsed),
                     Err(err) => {
                         error!("Yaml Error {err:?}");
                         None
@@ -374,22 +366,39 @@ pub fn decode_detection_outputs(
     (bboxes, bscores, nc)
 }
 
-#[inline]
+#[inline(always)]
 #[allow(dead_code)]
 pub fn sigmoid(f: f32) -> f32 {
     use std::f32::consts::E;
     1.0 / (1.0 + E.powf(-f))
 }
 
+#[inline(always)]
+pub fn fast_sigmoid(f: f32) -> f32 {
+    if f.abs() > 80.0 {
+        f.signum() * 0.5 + 0.5
+    } else {
+        1.0 / (1.0 + fast_math::exp_raw(-f))
+    }
+}
 #[inline]
 #[allow(dead_code)]
-pub fn fast_sigmoid(f: f32) -> f32 {
-    if f.abs() > 4.16666 {
+/// A fast polynomial sigmoid approximation. Roughly 7x faster than the sigmoid
+/// function. See https://www.desmos.com/calculator/g4e3vbju6l for a visual comparison
+/// Not suitable for SIMD usage on the Arm Cortex-a53 based on benchmark results
+pub fn fast_sigmoid2(f: f32) -> f32 {
+    if f.abs() > 8.5 {
         f.signum() * 0.5 + 0.5
-    } else if f.abs() < 1.48487 {
-        0.259_165_59 * f / (1.0 + 0.1 * f * f) + 0.5
+    } else if f.abs() > 4.95716 {
+        0.5 + 0.278857_f32 * f.signum() + 0.108554 * f - 0.020359 * f * f.abs()
+            + 0.00172085 * f.powi(3)
+            - 0.0000550985 * f.powi(3) * f.abs()
+    } else if f.abs() > 1.48487 {
+        0.5 - 0.0525242_f32 * f.signum() + 0.3658526 * f - 0.09530283 * f * f.abs()
+            + 0.01137951 * f.powi(3)
+            - 0.0005171742 * f.powi(3) * f.abs()
     } else {
-        0.37 * f / (1.0 + 0.5 * f.abs()) + 0.5
+        -0.016123232 * f.powi(3) + 0.24758115 * f + 0.5
     }
 }
 

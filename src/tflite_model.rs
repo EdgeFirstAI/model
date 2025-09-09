@@ -11,6 +11,7 @@ use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::error;
 use std::{
     error::Error,
+    fmt::format,
     io::{self, Read},
     path::Path,
 };
@@ -57,7 +58,9 @@ impl TFLiteLib {
             builder.add_owned_delegate(delegate);
         }
         let runner = builder.build(model)?;
-        TFLiteModel::new(runner)
+        let mut model = TFLiteModel::new(runner)?;
+
+        Ok(model)
     }
 }
 
@@ -97,6 +100,7 @@ pub struct TFLiteModel<'a> {
     score_threshold: f32,
     iou_threshold: f32,
     metadata: Metadata,
+    output_index: Vec<usize>,
     labels: Vec<String>,
 }
 
@@ -117,23 +121,65 @@ impl<'a> TFLiteModel<'a> {
         Ok(tensor.shape()?)
     }
 
+    fn populate_output_index_from_shape(&mut self) -> Result<(), ModelError> {
+        if let Some(config) = &mut self.metadata.config {
+            self.output_index = Vec::new();
+            for out in &mut config.outputs {
+                let (config_shape) = match out {
+                    ConfigOutput::Detection(config) => &config.shape,
+                    ConfigOutput::Mask(config) => &config.shape,
+                    ConfigOutput::Segmentation(config) => &config.shape,
+                    ConfigOutput::Scores(config) => &config.shape,
+                    ConfigOutput::Boxes(config) => &config.shape,
+                };
+                let out = self.outputs.iter().enumerate().find_map(|(i, tensor)| {
+                    if tensor.shape().ok()? == *config_shape {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(i) = out {
+                    self.output_index.push(i);
+                } else {
+                    return Err(ModelError::new(
+                        ModelErrorKind::Decoding,
+                        format!(
+                            "Cannot find output with shape {config_shape:?} as specified in metadata"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(model: Interpreter<'a>) -> Result<Self, Box<dyn Error>> {
         let inp_shape = match Self::input_shape(&model, 0) {
             Ok(v) => v,
             Err(e) => return Err(Box::from(e)),
         };
+
+        let config_filenames = [
+            "edgefirst.yaml",
+            "edgefirst.yml",
+            "config.yaml",
+            "config.yml",
+        ];
         let mut labels = Vec::new();
         let mut metadata = get_model_metadata(&model.model_mem);
         if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(&model.model_mem)) {
-            if let Ok(mut f) = z.by_name("config.yaml")
-                && f.is_file()
-            {
-                let mut yaml = String::new();
-                if let Err(e) = f.read_to_string(&mut yaml) {
-                    error!("Error while reading config.yaml {e:?}");
+            for name in config_filenames {
+                if let Ok(mut f) = z.by_name(name)
+                    && f.is_file()
+                {
+                    let mut yaml = String::new();
+                    if let Err(e) = f.read_to_string(&mut yaml) {
+                        error!("Error while reading {name} {e:?}");
+                    }
+                    metadata.config_yaml = Some(yaml);
+                    break;
                 }
-
-                metadata.config_yaml = Some(yaml);
             }
 
             if let Ok(mut f) = z.by_name("labels.txt")
@@ -156,9 +202,11 @@ impl<'a> TFLiteModel<'a> {
             score_threshold: 0.5,
             iou_threshold: 0.5,
             metadata: metadata.into(),
+            output_index: Vec::new(),
             labels,
         };
         m.init_tensors()?;
+        m.populate_output_index_from_shape()?;
         m.run_model()?;
         Ok(m)
     }
@@ -259,7 +307,7 @@ impl<'a> TFLiteModel<'a> {
             score: scores[i],
             label: classes[i].round() as usize,
         }));
-        let b: Vec<DetectBox> = nms(self.iou_threshold, b);
+        let b: Vec<DetectBox> = nms(self.iou_threshold, b, false);
         let num_det = (b.len()).min(boxes.len());
 
         for (out, b) in boxes.iter_mut().zip(b) {
@@ -477,16 +525,16 @@ impl Model for TFLiteModel<'_> {
             let output_details = &config.outputs;
             let mut output_tensors = vec![];
             let mut detection_details = vec![];
-            for details in output_details.iter() {
+            for (details, output_index) in output_details.iter().zip(&self.output_index) {
                 match details {
                     ConfigOutput::Detection(detection) => {
-                        output_tensors.push(self.dequant_output(detection.output_index)?);
+                        output_tensors.push(self.dequant_output(*output_index)?);
                         detection_details.push(detection);
                     }
                     ConfigOutput::Scores(scores) => {
-                        score_ind = Some(scores.output_index);
+                        score_ind = Some(*output_index);
                     }
-                    ConfigOutput::Boxes(boxes) => box_ind = Some(boxes.output_index),
+                    ConfigOutput::Boxes(boxes) => box_ind = Some(*output_index),
                     _ => {}
                 }
             }
@@ -536,6 +584,7 @@ impl Model for TFLiteModel<'_> {
             &box_data,
             num_classes,
             boxes,
+            false,
         );
         Ok(n_boxes)
     }

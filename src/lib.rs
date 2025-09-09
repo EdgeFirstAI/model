@@ -12,14 +12,14 @@ pub mod tracker;
 #[cfg(feature = "rtm")]
 pub mod rtm_model;
 
-use crate::{buildmsgs::*, tracker::*};
+use crate::{buildmsgs::*, model::ModelErrorKind, tracker::*};
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
 use image::{Image, ImageManager};
-use log::{error, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use masks::{mask_compress_thread, mask_thread};
 use model::{DetectBox, Model, ModelError, SupportedModel};
 use nix::{
@@ -716,7 +716,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
     if let Ok(metadata) = model.get_model_metadata()
         && let Some(config) = &metadata.config
     {
-        println!("Metadata: {metadata:?}");
+        debug!("Metadata: {metadata:?}");
         let mut model_type = ModelType {
             segment_output_ind: None,
             detection: false,
@@ -729,7 +729,26 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
                 | model::ConfigOutput::Scores(_) => model_type.detection = true,
                 model::ConfigOutput::Segmentation(segmentation) => {
                     // model_type.segment_output_ind = Some(segmentation.index)
-                    model_type.segment_output_ind = Some(segmentation.output_index)
+                    model_type.segment_output_ind = match (0..model.output_count()?).find_map(
+                        |index| {
+                            if model.output_shape(index).ok()? == segmentation.shape {
+                                Some(index)
+                            } else {
+                                None
+                            }
+                        },
+                    ) {
+                        Some(index) => Some(index),
+                        None => {
+                            return Err(ModelError::new(
+                                ModelErrorKind::Decoding,
+                                format!(
+                                    "Cannot find output with shape {:?} as specified in metadata",
+                                    segmentation.shape
+                                ),
+                            ));
+                        }
+                    }
                 }
                 _ => {}
             }

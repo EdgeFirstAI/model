@@ -74,6 +74,7 @@ vaal = { git = "https://github.com/DeepViewML/vaal-rs.git", optional = true}
 zip = "4.3.0"
 zenoh = "1.5.0"
 zstd = "0.13.3"
+fast-math = "0.1.1"
 
 [dev-dependencies]
 ndarray = { version = "0.16.1", features = ["rayon"] }
