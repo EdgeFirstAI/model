@@ -1,18 +1,19 @@
 use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use log::trace;
+use ndarray::Array3;
 use std::{error::Error, io};
 use tracing::instrument;
 use vaal::{
+    Context, VAALBox,
     deepviewrt::{
         model,
         tensor::{Tensor, TensorType},
     },
-    Context, VAALBox,
 };
 
 use crate::{
     args::Args,
-    image::{Image, ImageManager, Rotation, RGBX},
+    image::{Image, ImageManager, RGBX, Rotation},
     model::{
         DataType, DetectBox, Metadata, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
@@ -262,7 +263,11 @@ impl Model for RtmModel {
     }
 
     #[instrument(skip_all)]
-    fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+    fn decode_outputs(
+        &mut self,
+        boxes: &mut Vec<DetectBox>,
+        protos: &mut Option<Array3<f32>>,
+    ) -> Result<(), ModelError> {
         trace!("boxes");
         let mut vaal_boxes = Vec::new();
         let len = boxes.len();
@@ -278,11 +283,12 @@ impl Model for RtmModel {
         }
 
         let box_count = self.ctx.boxes(&mut vaal_boxes, len)?;
+        boxes.clear();
         for i in 0..box_count {
-            boxes[i] = vaal_boxes[i].into();
+            boxes.push(vaal_boxes[i].into());
         }
 
-        Ok(box_count)
+        Ok(())
     }
 
     fn input_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {
@@ -339,6 +345,7 @@ impl From<VAALBox> for DetectBox {
             ymax: value.ymax,
             score: value.score,
             label: value.label as usize,
+            mask_coeff: None,
         }
     }
 }

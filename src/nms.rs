@@ -1,24 +1,29 @@
 use std::time::Instant;
 
 use log::trace;
+use ndarray::{
+    ArrayView2, Zip,
+    parallel::prelude::{IntoParallelIterator, ParallelIterator},
+};
 
 use crate::model::DetectBox;
 
 pub fn decode_boxes_and_nms(
     score_threshold: f32,
     iou_threshold: f32,
-    scores_tensor: &[f32],
-    boxes_tensor: &[f32],
-    num_classes: usize,
-    output_boxes: &mut [DetectBox],
+    scores_tensor: ArrayView2<f32>,
+    boxes_tensor: ArrayView2<f32>,
+    mask_coeff: Option<ArrayView2<f32>>,
+    output_boxes: &mut Vec<DetectBox>,
     ignore_class: bool,
 ) -> usize {
     let start = Instant::now();
-    let boxes = decode_boxes(score_threshold, scores_tensor, boxes_tensor, num_classes);
+    let boxes = decode_boxes(score_threshold, scores_tensor, boxes_tensor, mask_coeff);
     let boxes = nms(iou_threshold, boxes, ignore_class);
-    let len = output_boxes.len().min(boxes.len());
-    for (out, b) in output_boxes.iter_mut().zip(boxes) {
-        *out = b;
+    let len = output_boxes.capacity().min(boxes.len());
+    output_boxes.clear();
+    for b in boxes.into_iter().take(len) {
+        output_boxes.push(b);
     }
     trace!("Box decode and nms takes {:?}", start.elapsed());
     len
@@ -26,35 +31,68 @@ pub fn decode_boxes_and_nms(
 
 pub fn decode_boxes(
     threshold: f32,
-    scores: &[f32],
-    boxes: &[f32],
-    num_classes: usize,
+    scores: ArrayView2<f32>,
+    boxes: ArrayView2<f32>,
+    mask_coeff: Option<ArrayView2<f32>>,
 ) -> Vec<DetectBox> {
-    assert_eq!(scores.len() / num_classes, boxes.len() / 4);
-    let box_count = scores.len() / num_classes;
-    let mut out = Vec::new();
-    for i in 0..box_count {
-        let mut score = 0.0;
-        let mut label = 0;
-        for j in 0..num_classes {
-            if scores[i * num_classes + j] > score {
-                score = scores[i * num_classes + j];
-                label = j;
-            }
-        }
-        let bbox = &boxes[i * 4..(i + 1) * 4];
-        if score > threshold {
-            out.push(DetectBox {
-                xmin: bbox[0],
-                ymin: bbox[1],
-                xmax: bbox[2],
-                ymax: bbox[3],
-                score,
-                label,
-            });
-        }
+    assert_eq!(scores.dim().0, boxes.dim().0);
+    assert_eq!(boxes.dim().1, 4);
+    if let Some(mask_coeff) = mask_coeff {
+        Zip::from(scores.rows())
+            .and(boxes.rows())
+            .and(mask_coeff.rows())
+            .into_par_iter()
+            .filter_map(|(score, bbox, mask)| {
+                let (score_, label) =
+                    score
+                        .iter()
+                        .enumerate()
+                        .fold((score[0], 0), |(max, arg_max), (ind, s)| {
+                            if max > *s { (max, arg_max) } else { (*s, ind) }
+                        });
+                if score_ < threshold {
+                    return None;
+                }
+
+                Some(DetectBox {
+                    label,
+                    score: score_,
+                    xmin: bbox[0],
+                    ymin: bbox[1],
+                    xmax: bbox[2],
+                    ymax: bbox[3],
+                    mask_coeff: Some(mask.to_owned()),
+                })
+            })
+            .collect()
+    } else {
+        Zip::from(scores.rows())
+            .and(boxes.rows())
+            .into_par_iter()
+            .filter_map(|(score, bbox)| {
+                let (score_, label) =
+                    score
+                        .iter()
+                        .enumerate()
+                        .fold((score[0], 0), |(max, arg_max), (ind, s)| {
+                            if max > *s { (max, arg_max) } else { (*s, ind) }
+                        });
+                if score_ < threshold {
+                    return None;
+                }
+
+                Some(DetectBox {
+                    label,
+                    score: score_,
+                    xmin: bbox[0],
+                    ymin: bbox[1],
+                    xmax: bbox[2],
+                    ymax: bbox[3],
+                    mask_coeff: None,
+                })
+            })
+            .collect()
     }
-    out
 }
 
 pub fn nms(iou: f32, boxes: Vec<DetectBox>, ignore_class: bool) -> Vec<DetectBox> {
@@ -162,46 +200,6 @@ mod tests {
     };
     use ndarray_stats::QuantileExt as _;
     use rand::random;
-    pub fn decode_boxes1(
-        threshold: f32,
-        scores: &[f32],
-        boxes: &[f32],
-        num_classes: usize,
-    ) -> Vec<DetectBox> {
-        let scores =
-            ArrayView2::from_shape([scores.len() / num_classes, num_classes], scores).unwrap();
-        let boxes = ArrayView2::from_shape([boxes.len() / 4, 4], boxes).unwrap();
-        Zip::from(scores.rows())
-            .and(boxes.rows())
-            .into_par_iter()
-            .filter(|(score, _)| *score.max().unwrap() > threshold)
-            .map(|(score, bbox)| {
-                let label = score.argmax().unwrap();
-                DetectBox {
-                    xmin: bbox[0],
-                    ymin: bbox[1],
-                    xmax: bbox[2],
-                    ymax: bbox[3],
-                    score: score[label],
-                    label,
-                }
-            })
-            .collect()
-    }
-
-    #[test]
-    fn box_decoding() {
-        const NUM_BOXES: usize = 6009;
-        const NUM_CLASSES: usize = 10;
-        let box_data: [f32; NUM_BOXES * 4] = random();
-        let score_data: [f32; NUM_BOXES * NUM_CLASSES] = random();
-        let decoded_boxes_ndarray = decode_boxes1(0.5, &score_data, &box_data, NUM_CLASSES);
-        let decoded_boxes = decode_boxes(0.5, &score_data, &box_data, NUM_CLASSES);
-        assert_eq!(
-            decoded_boxes_ndarray, decoded_boxes,
-            "Decoded boxes were not equal"
-        );
-    }
 
     #[test]
     fn test_iou() {
@@ -213,6 +211,7 @@ mod tests {
                 ymin: 0.1,
                 xmax: 0.2,
                 ymax: 0.2,
+                mask_coeff: None,
             },
             &DetectBox {
                 label: 0,
@@ -221,6 +220,7 @@ mod tests {
                 ymin: 0.15,
                 xmax: 0.25,
                 ymax: 0.25,
+                mask_coeff: None,
             },
         );
         assert!(
@@ -238,6 +238,7 @@ mod tests {
                 ymin: 0.1,
                 xmax: 0.1,
                 ymax: 0.2,
+                mask_coeff: None,
             },
             &DetectBox {
                 label: 0,
@@ -246,6 +247,7 @@ mod tests {
                 ymin: 0.15,
                 xmax: 0.1,
                 ymax: 0.25,
+                mask_coeff: None,
             },
         );
 

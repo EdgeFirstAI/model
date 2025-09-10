@@ -12,16 +12,25 @@ pub mod tracker;
 #[cfg(feature = "rtm")]
 pub mod rtm_model;
 
-use crate::{buildmsgs::*, model::ModelErrorKind, tracker::*};
+use crate::{
+    buildmsgs::*,
+    model::{ModelErrorKind, decode_masks},
+    tracker::*,
+};
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
-use edgefirst_schemas::{self, edgefirst_msgs::DmaBuf, sensor_msgs::CameraInfo};
+use edgefirst_schemas::{
+    self,
+    edgefirst_msgs::{DetectBox2D, DmaBuf, Mask},
+    sensor_msgs::CameraInfo,
+};
 use image::{Image, ImageManager};
 use log::{debug, error, info, trace, warn};
 use masks::{mask_compress_thread, mask_thread};
 use model::{DetectBox, Model, ModelError, SupportedModel};
+use ndarray::{Array1, Array3};
 use nix::{
     sys::time::TimeValLike,
     time::{ClockId, clock_gettime},
@@ -54,6 +63,7 @@ use rtm_model::RtmModel;
 pub struct ModelType {
     segment_output_ind: Option<usize>,
     detection: bool,
+    detection_with_mask: bool,
 }
 
 #[tokio::main]
@@ -363,21 +373,11 @@ pub async fn main() -> ExitCode {
         let model_duration = model_start.elapsed().as_nanos();
         trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
 
-        if let Some(i) = model_type.segment_output_ind {
-            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error! {"Cannot send to mask publishing thread {e:?}"};
-                }
-            }
-        }
-
         if model_type.detection {
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            let new_boxes = run_detection(
-                &model,
+            let (mut new_boxes, protos) = run_detection(
+                &mut model,
                 &model_labels,
                 &mut detect_boxes,
                 &mut tracker,
@@ -405,13 +405,36 @@ pub async fn main() -> ExitCode {
                 }
             };
 
+            let boxes: Vec<DetectBox2D> = new_boxes.iter().map(|b| b.into()).collect();
+
+            if model_type.detection_with_mask
+                && let Some(protos) = protos
+            {
+                new_boxes.sort_by_key(|a| {
+                    if let Some(track) = a.track {
+                        track.last_updated
+                    } else {
+                        a.ts
+                    }
+                });
+                let masks = decode_masks(&new_boxes, protos.view());
+                let masks = masks.into_iter().filter_map(|x| {
+                    x.map(|v| Mask {
+                        height: v.0.shape()[0] as u32,
+                        width: v.0.shape()[1] as u32,
+                        length: 1,
+                        encoding: "".to_string(),
+                        mask: v.0.into_raw_vec_and_offset().0,
+                        boxed: true,
+                    })
+                });
+            }
             let (msg, enc) = build_detect_msg_and_encode(
                 &new_boxes,
                 dma_buf.header.stamp.clone(),
                 time_from_ns(model_duration as u32),
                 time_from_ns(curr_time as u32),
             );
-
             match publ_detect.put(msg).encoding(enc).await {
                 Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
                 Err(e) => {
@@ -446,6 +469,15 @@ pub async fn main() -> ExitCode {
                 }
             }
         }
+        if let Some(i) = model_type.segment_output_ind {
+            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
+            match mask_tx.send(masks).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error! {"Cannot send to mask publishing thread {e:?}"};
+                }
+            }
+        }
 
         model_info_msg.header.stamp = dma_buf.header.stamp.clone();
         let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
@@ -468,24 +500,23 @@ pub async fn main() -> ExitCode {
 
 #[instrument(skip_all)]
 fn run_detection(
-    model: &SupportedModel,
+    model: &mut SupportedModel,
     labels: &[String],
-    boxes: &mut [DetectBox],
+    boxes: &mut Vec<DetectBox>,
     tracker: &mut ByteTrack,
     timestamp: u64,
     args: &Args,
-) -> Vec<BoxWithTrack> {
-    let n_boxes = match model.boxes(boxes) {
-        Ok(n_boxes) => n_boxes,
-        Err(e) => {
-            error!("Failed to read bounding boxes from model: {e:?}");
-            return Vec::new();
-        }
+) -> (Vec<BoxWithTrack>, Option<Array3<f32>>) {
+    let mut protos = None;
+    if let Err(e) = model.decode_outputs(boxes, &mut protos) {
+        error!("Failed to read bounding boxes from model: {e:?}");
+        return (Vec::new(), None);
     };
+
     let mut new_boxes = Vec::new();
     if args.track {
         info_span!("tracker").in_scope(|| {
-            let _ = tracker.update(args, &mut boxes[0..n_boxes], timestamp);
+            let _ = tracker.update(args, boxes, timestamp);
             let tracks = tracker.get_tracklets();
             for track in tracks {
                 let detect_box: DetectBox = track.get_predicted_location();
@@ -495,12 +526,12 @@ fn run_detection(
             }
         });
     } else {
-        for detect_box in boxes[0..n_boxes].iter() {
+        for detect_box in boxes.iter_mut() {
             let box_2d = detectbox_to_boxwithtrack(args, detect_box, labels, timestamp, None);
             new_boxes.push(box_2d);
         }
     }
-    new_boxes
+    (new_boxes, protos)
 }
 #[derive(Debug, Clone, Default)]
 pub struct BoxWithTrack {
@@ -516,6 +547,8 @@ pub struct BoxWithTrack {
     pub score: f64,
     #[doc = " index of label for this detection"]
     pub index: usize,
+    #[doc = " Optional mask coefficients for computing instanced masks"]
+    pub mask_coeff: Option<Array1<f32>>,
     #[doc = " label for this detection"]
     pub label: String,
     #[doc = " timestamp"]
@@ -532,6 +565,8 @@ pub struct Track {
     pub count: i32,
     #[doc = " when this track was first added"]
     pub created: u64,
+    #[doc = " when this track was first added"]
+    pub last_updated: u64,
 }
 fn detectbox_to_boxwithtrack(
     args: &Args,
@@ -551,6 +586,7 @@ fn detectbox_to_boxwithtrack(
         uuid: v.id,
         count: v.count,
         created: v.created,
+        last_updated: v.last_updated,
     });
 
     BoxWithTrack {
@@ -559,6 +595,7 @@ fn detectbox_to_boxwithtrack(
         xmax: b.xmax as f64,
         ymax: b.ymax as f64,
         score: b.score as f64,
+        mask_coeff: b.mask_coeff.clone(),
         label,
         ts,
         index: b.label,
@@ -577,6 +614,7 @@ async fn heart_beat(
     let model_type = ModelType {
         segment_output_ind: None,
         detection: false,
+        detection_with_mask: false,
     };
     let mut model_info_msg =
         build_model_info_msg(time_from_ns(0u32), None, &model_path, &model_type);
@@ -720,6 +758,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
         let mut model_type = ModelType {
             segment_output_ind: None,
             detection: false,
+            detection_with_mask: false,
         };
 
         for output in &config.outputs {
@@ -727,6 +766,12 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
                 model::ConfigOutput::Detection(_)
                 | model::ConfigOutput::Boxes(_)
                 | model::ConfigOutput::Scores(_) => model_type.detection = true,
+                model::ConfigOutput::Segmentation(segmentation)
+                    if matches!(segmentation.decoder, model::Decoder::Yolov8) =>
+                {
+                    model_type.detection = true;
+                    model_type.detection_with_mask = true;
+                }
                 model::ConfigOutput::Segmentation(segmentation) => {
                     // model_type.segment_output_ind = Some(segmentation.index)
                     model_type.segment_output_ind = match (0..model.output_count()?).find_map(
@@ -762,6 +807,7 @@ fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
     let mut model_type = ModelType {
         segment_output_ind: None,
         detection: false,
+        detection_with_mask: false,
     };
     // first: check if segmentation -> segmentation if output has 4 dimensions and
     // the W/H is greater than 8

@@ -1,5 +1,5 @@
 use crate::{args::Args, kalman::ConstantVelocityXYAHModel2, model::DetectBox};
-use lapjv::{lapjv, Matrix};
+use lapjv::{Matrix, lapjv};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
@@ -17,17 +17,17 @@ pub struct Tracklet {
     pub id: Uuid,
     pub prev_boxes: DetectBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
-    pub expiry: u64,
     pub count: i32,
     pub created: u64,
+    pub last_updated: u64,
 }
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &DetectBox, args: &Args, ts: u64) {
+    fn update(&mut self, detect_box: &DetectBox, ts: u64) {
         self.count += 1;
-        self.expiry = ts + (args.track_extra_lifespan * 1e9) as u64;
-        self.prev_boxes = *vaalbox;
-        self.filter.update(&vaalbox_to_xyah(vaalbox));
+        self.last_updated = ts;
+        self.prev_boxes = detect_box.clone();
+        self.filter.update(&vaalbox_to_xyah(detect_box));
     }
 
     pub fn get_predicted_location(&self) -> DetectBox {
@@ -39,6 +39,7 @@ impl Tracklet {
             ymax: 0.0,
             score: self.prev_boxes.score,
             label: self.prev_boxes.label,
+            mask_coeff: None,
         };
         xyah_to_vaalbox(predicted_xyah, &mut expected);
         expected
@@ -114,14 +115,7 @@ fn box_cost(
 
     // use iou between predicted box and real box:
     let predicted_xyah = track.filter.mean.as_slice();
-    let mut expected = DetectBox {
-        xmin: 0.0,
-        xmax: 0.0,
-        ymin: 0.0,
-        ymax: 0.0,
-        score: 0.0,
-        label: 0,
-    };
+    let mut expected = DetectBox::default();
     xyah_to_vaalbox(predicted_xyah, &mut expected);
     let iou = iou(&expected, new_box);
     if iou < iou_threshold {
@@ -226,11 +220,11 @@ impl ByteTrack {
                     assert!(!tracked[x]);
                     tracked[x] = true;
 
-                    let observed_box = boxes[i];
+                    let observed_box = boxes[i].clone();
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.tracklets[x].update(&observed_box, args, timestamp);
+                    self.tracklets[x].update(&observed_box, timestamp);
                 }
             }
         }
@@ -268,7 +262,7 @@ impl ByteTrack {
                     let a_ = predicted_xyah[2];
                     let h_ = predicted_xyah[3];
 
-                    self.tracklets[x].update(&boxes[i], args, timestamp);
+                    self.tracklets[x].update(&boxes[i], timestamp);
 
                     let w_ = h_ * a_;
                     boxes[i].xmin = x_ - w_ / 2.0;
@@ -282,7 +276,8 @@ impl ByteTrack {
         // move tracklets that don't have lifespan to the removed tracklets
         // must iterate from the back
         for i in (0..self.tracklets.len()).rev() {
-            if self.tracklets[i].expiry < timestamp {
+            let expiry = self.tracklets[i].last_updated + (args.track_extra_lifespan * 1e9) as u64;
+            if expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
@@ -299,12 +294,12 @@ impl ByteTrack {
                 });
                 self.tracklets.push(Tracklet {
                     id,
-                    prev_boxes: boxes[i],
+                    prev_boxes: boxes[i].clone(),
                     filter: ConstantVelocityXYAHModel2::new(
                         &vaalbox_to_xyah(&boxes[i]),
                         args.track_update,
                     ),
-                    expiry: timestamp + (args.track_extra_lifespan * 1e9) as u64,
+                    last_updated: timestamp,
                     count: 1,
                     created: timestamp,
                 });
@@ -334,6 +329,7 @@ mod tests {
             ymax: 0.691,
             score: 0.0,
             label: 0,
+            mask_coeff: None,
         };
         let xyah = vaalbox_to_xyah(&box1);
         let mut box2 = DetectBox {
@@ -343,6 +339,7 @@ mod tests {
             ymax: 0.0,
             score: 0.0,
             label: 0,
+            mask_coeff: None,
         };
         xyah_to_vaalbox(&xyah, &mut box2);
 
