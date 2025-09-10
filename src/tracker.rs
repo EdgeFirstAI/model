@@ -130,6 +130,12 @@ fn box_cost(
     (1.5 - new_box.score) + (1.5 - iou)
 }
 
+impl Default for ByteTrack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ByteTrack {
     pub fn new() -> ByteTrack {
         ByteTrack {

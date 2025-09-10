@@ -145,7 +145,7 @@ impl From<tflitec_sys::metadata::Metadata> for Metadata {
             license: value.license,
             config: match value.config_yaml {
                 Some(yaml) => match serde_yaml::from_str::<ConfigOutputs>(&yaml) {
-                    Ok(mut parsed) => Some(parsed),
+                    Ok(parsed) => Some(parsed),
                     Err(err) => {
                         error!("Yaml Error {err:?}");
                         None

@@ -11,7 +11,6 @@ use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use log::error;
 use std::{
     error::Error,
-    fmt::format,
     io::{self, Read},
     path::Path,
 };
@@ -58,7 +57,7 @@ impl TFLiteLib {
             builder.add_owned_delegate(delegate);
         }
         let runner = builder.build(model)?;
-        let mut model = TFLiteModel::new(runner)?;
+        let model = TFLiteModel::new(runner)?;
 
         Ok(model)
     }
@@ -125,7 +124,7 @@ impl<'a> TFLiteModel<'a> {
         if let Some(config) = &mut self.metadata.config {
             self.output_index = Vec::new();
             for out in &mut config.outputs {
-                let (config_shape) = match out {
+                let config_shape = match out {
                     ConfigOutput::Detection(config) => &config.shape,
                     ConfigOutput::Mask(config) => &config.shape,
                     ConfigOutput::Segmentation(config) => &config.shape,
