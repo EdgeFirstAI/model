@@ -1,11 +1,11 @@
 use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{model_info, Detect, DetectBox2D, DetectTrack, Mask, ModelInfo},
+    edgefirst_msgs::{Detect, DetectBox2D, DetectTrack, Mask, ModelInfo, model_info},
     foxglove_msgs::{
-        point_annotation_type::{LINE_LOOP, UNKNOWN},
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
         FoxgloveTextAnnotations,
+        point_annotation_type::{LINE_LOOP, UNKNOWN},
     },
     std_msgs::Header,
 };
@@ -15,9 +15,9 @@ use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{
+    BoxWithTrack, ModelType,
     args::LabelSetting,
     model::{DataType, Model, SupportedModel},
-    BoxWithTrack, ModelType,
 };
 
 const WHITE: FoxgloveColor = FoxgloveColor {

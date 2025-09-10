@@ -1,18 +1,24 @@
 use crate::{
     args::Args,
-    image::{Image, ImageManager, Rotation, RGBX},
+    image::{Image, ImageManager, RGBX, Rotation},
     model::{
-        DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
-        RGB_STDS_IMAGENET,
+        ConfigOutput, DataType, DetectBox, Metadata, Model, ModelError, ModelErrorKind,
+        Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET, decode_detection_outputs, dequant,
     },
     nms::{decode_boxes_and_nms, nms},
 };
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use std::{error::Error, io, path::Path};
+use log::error;
+use std::{
+    error::Error,
+    io::{self, Read},
+    path::Path,
+};
 use tflitec_sys::{
-    delegate::Delegate,
-    tensor::{Tensor, TensorMut, TensorType},
     Interpreter, LibloadingError, TFLiteLib as TFLiteLib_,
+    delegate::Delegate,
+    metadata::get_model_metadata,
+    tensor::{Tensor, TensorMut, TensorType},
 };
 use tracing::instrument;
 
@@ -35,24 +41,25 @@ impl TFLiteLib {
     }
 
     #[allow(dead_code)]
-    pub fn load_model_from_mem(&self, mem: Vec<u8>) -> Result<TFLiteModel, Box<dyn Error>> {
+    pub fn load_model_from_mem(&'_ self, mem: Vec<u8>) -> Result<TFLiteModel<'_>, Box<dyn Error>> {
         self.load_model_from_mem_with_delegate(mem, None::<String>)
     }
 
     pub fn load_model_from_mem_with_delegate<P: AsRef<Path>>(
-        &self,
+        &'_ self,
         mem: Vec<u8>,
         delegate: Option<P>,
-    ) -> Result<TFLiteModel, Box<dyn Error>> {
+    ) -> Result<TFLiteModel<'_>, Box<dyn Error>> {
         let model = self.tflite_lib.new_model_from_mem(mem)?;
         let mut builder = self.tflite_lib.new_interpreter_builder()?;
-
         if let Some(delegate) = delegate {
             let delegate = Delegate::load_external(delegate)?;
             builder.add_owned_delegate(delegate);
         }
         let runner = builder.build(model)?;
-        TFLiteModel::new(runner)
+        let model = TFLiteModel::new(runner)?;
+
+        Ok(model)
     }
 }
 
@@ -91,6 +98,9 @@ pub struct TFLiteModel<'a> {
     outputs: Vec<Tensor<'a>>,
     score_threshold: f32,
     iou_threshold: f32,
+    metadata: Metadata,
+    output_index: Vec<usize>,
+    labels: Vec<String>,
 }
 
 impl<'a> TFLiteModel<'a> {
@@ -110,11 +120,78 @@ impl<'a> TFLiteModel<'a> {
         Ok(tensor.shape()?)
     }
 
+    fn populate_output_index_from_shape(&mut self) -> Result<(), ModelError> {
+        if let Some(config) = &mut self.metadata.config {
+            self.output_index = Vec::new();
+            for out in &mut config.outputs {
+                let config_shape = match out {
+                    ConfigOutput::Detection(config) => &config.shape,
+                    ConfigOutput::Mask(config) => &config.shape,
+                    ConfigOutput::Segmentation(config) => &config.shape,
+                    ConfigOutput::Scores(config) => &config.shape,
+                    ConfigOutput::Boxes(config) => &config.shape,
+                };
+                let out = self.outputs.iter().enumerate().find_map(|(i, tensor)| {
+                    if tensor.shape().ok()? == *config_shape {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(i) = out {
+                    self.output_index.push(i);
+                } else {
+                    return Err(ModelError::new(
+                        ModelErrorKind::Decoding,
+                        format!(
+                            "Cannot find output with shape {config_shape:?} as specified in metadata"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(model: Interpreter<'a>) -> Result<Self, Box<dyn Error>> {
         let inp_shape = match Self::input_shape(&model, 0) {
             Ok(v) => v,
             Err(e) => return Err(Box::from(e)),
         };
+
+        let config_filenames = [
+            "edgefirst.yaml",
+            "edgefirst.yml",
+            "config.yaml",
+            "config.yml",
+        ];
+        let mut labels = Vec::new();
+        let mut metadata = get_model_metadata(&model.model_mem);
+        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(&model.model_mem)) {
+            for name in config_filenames {
+                if let Ok(mut f) = z.by_name(name)
+                    && f.is_file()
+                {
+                    let mut yaml = String::new();
+                    if let Err(e) = f.read_to_string(&mut yaml) {
+                        error!("Error while reading {name} {e:?}");
+                    }
+                    metadata.config_yaml = Some(yaml);
+                    break;
+                }
+            }
+
+            if let Ok(mut f) = z.by_name("labels.txt")
+                && f.is_file()
+            {
+                let mut labels_txt = String::new();
+                if let Err(e) = f.read_to_string(&mut labels_txt) {
+                    error!("Error while reading config.yaml {e:?}");
+                }
+                labels = labels_txt.lines().map(|l| l.to_string()).collect();
+            }
+        }
+
         let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
         let mut m = TFLiteModel {
             model,
@@ -123,8 +200,12 @@ impl<'a> TFLiteModel<'a> {
             outputs: Vec::new(),
             score_threshold: 0.5,
             iou_threshold: 0.5,
+            metadata: metadata.into(),
+            output_index: Vec::new(),
+            labels,
         };
         m.init_tensors()?;
+        m.populate_output_index_from_shape()?;
         m.run_model()?;
         Ok(m)
     }
@@ -134,80 +215,69 @@ impl<'a> TFLiteModel<'a> {
         self.iou_threshold = args.iou;
     }
 
-    fn output_data_ref<T>(&self, index: usize) -> Result<&[T], ModelError> {
+    fn dequant_tensor_(
+        &self,
+        tensor: &Tensor,
+        scale: f32,
+        zero_point: f32,
+    ) -> Result<Vec<f32>, ModelError> {
+        let mut output = vec![0.0f32; tensor.volume()?];
+        match tensor.tensor_type().into() {
+            DataType::Raw => todo!(),
+            DataType::Int8 => {
+                let data: &[i8] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::UInt8 => {
+                let data: &[u8] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::Int16 => {
+                let data: &[i16] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::UInt16 => {
+                let data: &[u16] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::Float16 => todo!(),
+            DataType::Int32 => {
+                let data: &[i32] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::UInt32 => {
+                let data: &[u32] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::Float32 => todo!(),
+            DataType::Int64 => {
+                let data: &[i64] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::UInt64 => {
+                let data: &[u64] = tensor.mapro()?;
+                dequant(data, &mut output, scale, zero_point);
+            }
+            DataType::Float64 => todo!(),
+            DataType::String => todo!(),
+        }
+        Ok(output)
+    }
+
+    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
             None => {
                 let e = io::Error::other(format!(
                     "Tried to access output tensor {index} of {}",
-                    self.outputs.len()
+                    self.inputs.len()
                 ))
                 .into();
                 return Err(e);
             }
         };
-        let data = tensor.mapro()?;
-        Ok(data)
-    }
-
-    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
-        match self.output_type(index)? {
-            DataType::Raw => todo!(),
-            DataType::Int8 => {
-                let data: &[i8] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
-                    .collect())
-            }
-            DataType::UInt8 => {
-                let data: &[u8] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
-                    .collect())
-            }
-            DataType::Int16 => {
-                let data: &[i16] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
-                    .collect())
-            }
-            DataType::UInt16 => {
-                let data: &[u16] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i32 - quant.zero_point) as f32)
-                    .collect())
-            }
-            DataType::Float16 => todo!(),
-            DataType::Int32 => {
-                let data: &[i32] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
-                    .collect())
-            }
-            DataType::UInt32 => {
-                let data: &[u32] = self.output_data_ref(index)?;
-                let quant = self.outputs[index].get_quantization_params();
-                Ok(data
-                    .iter()
-                    .map(|d| quant.scale * (*d as i64 - quant.zero_point as i64) as f32)
-                    .collect())
-            }
-            DataType::Float32 => todo!(),
-            DataType::Int64 => todo!(),
-            DataType::UInt64 => todo!(),
-            DataType::Float64 => todo!(),
-            DataType::String => todo!(),
-        }
+        let quant = tensor.get_quantization_params();
+        self.dequant_tensor_(tensor, quant.scale, quant.zero_point as f32)
     }
 
     // Must have 4 output tensors, in order of boxes, classes, scores, num_det
@@ -236,7 +306,7 @@ impl<'a> TFLiteModel<'a> {
             score: scores[i],
             label: classes[i].round() as usize,
         }));
-        let b: Vec<DetectBox> = nms(self.iou_threshold, b);
+        let b: Vec<DetectBox> = nms(self.iou_threshold, b, false);
         let num_det = (b.len()).min(boxes.len());
 
         for (out, b) in boxes.iter_mut().zip(b) {
@@ -444,31 +514,76 @@ impl Model for TFLiteModel<'_> {
             return self.ssd_decode_boxes(boxes);
         }
 
+        let num_classes: usize;
+        let box_data;
+        let score_data;
+
         let mut box_ind = None;
         let mut score_ind = None;
-        let mut num_classes = None;
-        for i in 0..self.output_count()? {
-            let shape = self.output_shape(i)?;
-            if shape.len() == 3 {
-                score_ind = Some(i);
-                num_classes = Some(*shape.last().unwrap());
-            } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
-                box_ind = Some(i);
+        if let Some(config) = &self.metadata.config {
+            let output_details = &config.outputs;
+            let mut output_tensors = vec![];
+            let mut detection_details = vec![];
+            for (details, output_index) in output_details.iter().zip(&self.output_index) {
+                match details {
+                    ConfigOutput::Detection(detection) => {
+                        output_tensors.push(self.dequant_output(*output_index)?);
+                        detection_details.push(detection);
+                    }
+                    ConfigOutput::Scores(scores) => {
+                        score_ind = Some(*output_index);
+                    }
+                    ConfigOutput::Boxes(boxes) => box_ind = Some(*output_index),
+                    _ => {}
+                }
             }
-        }
-        if box_ind.is_none() || score_ind.is_none() {
-            return Ok(0);
-        }
 
-        let box_data = self.dequant_output(box_ind.unwrap())?;
-        let score_data = self.dequant_output(score_ind.unwrap())?;
+            if let Some(score_ind) = score_ind
+                && let Some(box_ind) = box_ind
+            {
+                box_data = self.dequant_output(box_ind)?;
+                score_data = self.dequant_output(score_ind)?;
+                num_classes = *self.output_shape(score_ind)?.last().unwrap();
+            } else {
+                (box_data, score_data, num_classes) =
+                    decode_detection_outputs(output_tensors, &detection_details);
+            }
+        } else {
+            let mut num_classes_ = None;
+            for i in 0..self.output_count()? {
+                let shape = self.output_shape(i)?;
+                if shape.len() == 3 {
+                    score_ind = Some(i);
+                    num_classes_ = Some(*shape.last().unwrap());
+                } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
+                    box_ind = Some(i);
+                }
+            }
+            if box_ind.is_none() || score_ind.is_none() || num_classes_.is_none() {
+                return Err(ModelError::new(
+                    ModelErrorKind::Decoding,
+                    "Cannot find detection outputs".to_string(),
+                ));
+            }
+
+            box_data = self.dequant_output(box_ind.unwrap())?;
+            score_data = self.dequant_output(score_ind.unwrap())?;
+            num_classes = num_classes_.unwrap();
+        }
+        if num_classes == 0 {
+            return Err(ModelError::new(
+                ModelErrorKind::Decoding,
+                "Did not find recognized detection output".to_string(),
+            ));
+        }
         let n_boxes = decode_boxes_and_nms(
             self.score_threshold,
             self.iou_threshold,
             &score_data,
             &box_data,
-            num_classes.unwrap(),
+            num_classes,
             boxes,
+            false,
         );
         Ok(n_boxes)
     }
@@ -493,7 +608,7 @@ impl Model for TFLiteModel<'_> {
             Some(v) => v,
             None => {
                 let e = io::Error::other(format!(
-                    "Tried to access input tensor {index} of {}",
+                    "Tried to access output tensor {index} of {}",
                     self.inputs.len()
                 ))
                 .into();
@@ -504,10 +619,17 @@ impl Model for TFLiteModel<'_> {
     }
 
     fn labels(&self) -> Result<Vec<String>, ModelError> {
-        Ok(Vec::new())
+        Ok(self.labels.clone())
     }
 
     fn model_name(&self) -> Result<String, ModelError> {
-        Ok("".to_string())
+        match &self.metadata.name {
+            Some(v) => Ok(v.clone()),
+            None => Ok("".to_string()),
+        }
+    }
+
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
+        Ok(self.metadata.clone())
     }
 }

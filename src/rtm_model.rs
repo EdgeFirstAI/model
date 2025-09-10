@@ -14,7 +14,7 @@ use crate::{
     args::Args,
     image::{Image, ImageManager, Rotation, RGBX},
     model::{
-        DataType, DetectBox, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
+        DataType, DetectBox, Metadata, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET,
         RGB_STDS_IMAGENET,
     },
 };
@@ -315,6 +315,18 @@ impl Model for RtmModel {
     fn model_name(&self) -> Result<String, ModelError> {
         trace!("model_name");
         Ok(model::name(self.ctx.model()?)?.to_string())
+    }
+
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
+        let name = self.model_name().ok();
+        Ok(Metadata {
+            name,
+            version: None,
+            description: None,
+            author: None,
+            license: None,
+            config: None,
+        })
     }
 }
 

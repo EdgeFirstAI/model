@@ -1,6 +1,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(mismatched_lifetime_syntaxes)]
 #![allow(clippy::missing_safety_doc)]
 
 use delegate::Delegate;
@@ -10,6 +11,9 @@ use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 
 pub mod delegate;
+pub mod metadata;
+mod metadata_schema_generated;
+mod schema_generated;
 pub mod tensor;
 pub use libloading::Error as LibloadingError;
 #[macro_use]
@@ -24,7 +28,7 @@ pub struct TfLiteError {
 
 impl fmt::Display for TfLiteError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 impl Error for TfLiteError {}
@@ -184,8 +188,8 @@ impl<'a> InterpreterBuilder<'a> {
         let interpreter = Interpreter {
             interpreter: ptr::NonNull::new(interpreter)
                 .ok_or(TfLiteError::new("TfLiteInterpreterCreate returned NULL"))?,
-            _delegates: std::mem::replace(&mut self.delegates, Vec::new()),
-            _model_mem: std::mem::replace(&mut model.model_mem, Vec::new()),
+            _delegates: std::mem::take(&mut self.delegates),
+            model_mem: std::mem::take(&mut model.model_mem),
             lib: self.lib,
         };
 
@@ -208,7 +212,7 @@ impl<'a> Drop for InterpreterBuilder<'a> {
 pub struct Interpreter<'a> {
     interpreter: ptr::NonNull<TfLiteInterpreter>,
     _delegates: Vec<Delegate>,
-    _model_mem: Vec<u8>,
+    pub model_mem: Vec<u8>,
     lib: &'a tensorflowlite_c,
 }
 
@@ -227,7 +231,7 @@ impl<'a> Interpreter<'a> {
         for i in 0..len {
             let input = unsafe {
                 self.lib
-                    .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i as i32)
+                    .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i)
             };
             if input.is_null() {
                 return Err(TfLiteError::new(
@@ -251,7 +255,7 @@ impl<'a> Interpreter<'a> {
         for i in 0..len {
             let input = unsafe {
                 self.lib
-                    .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i as i32)
+                    .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i)
             };
             inputs.push(TensorMut {
                 ptr: ptr::NonNull::new(input).ok_or(TfLiteError::new(
@@ -272,7 +276,7 @@ impl<'a> Interpreter<'a> {
         for i in 0..len {
             let output = unsafe {
                 self.lib
-                    .TfLiteInterpreterGetOutputTensor(self.interpreter.as_ptr(), i as i32)
+                    .TfLiteInterpreterGetOutputTensor(self.interpreter.as_ptr(), i)
             };
             if output.is_null() {
                 return Err(TfLiteError::new(

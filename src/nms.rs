@@ -11,10 +11,11 @@ pub fn decode_boxes_and_nms(
     boxes_tensor: &[f32],
     num_classes: usize,
     output_boxes: &mut [DetectBox],
+    ignore_class: bool,
 ) -> usize {
     let start = Instant::now();
     let boxes = decode_boxes(score_threshold, scores_tensor, boxes_tensor, num_classes);
-    let boxes = nms(iou_threshold, boxes);
+    let boxes = nms(iou_threshold, boxes, ignore_class);
     let len = output_boxes.len().min(boxes.len());
     for (out, b) in output_boxes.iter_mut().zip(boxes) {
         *out = b;
@@ -56,10 +57,22 @@ pub fn decode_boxes(
     out
 }
 
-pub fn nms(iou: f32, mut boxes: Vec<DetectBox>) -> Vec<DetectBox> {
+pub fn nms(iou: f32, boxes: Vec<DetectBox>, ignore_class: bool) -> Vec<DetectBox> {
+    if ignore_class {
+        nms_with_class(iou, boxes)
+    } else {
+        nms_ignore_class(iou, boxes)
+    }
+}
+
+pub fn nms_with_class(iou: f32, mut boxes: Vec<DetectBox>) -> Vec<DetectBox> {
     // Boxes get sorted by score in descending order so we know based on the
     // index the scoring of the boxes and can skip parts of the loop.
-    boxes.sort_unstable_by(|a, b| (b.label, b.score).partial_cmp(&(a.label, a.score)).unwrap());
+
+    boxes.sort_unstable_by(|a, b| match b.label.cmp(&a.label) {
+        std::cmp::Ordering::Equal => b.score.total_cmp(&a.score),
+        x => x,
+    });
 
     // Outer loop over all boxes.
     for i in 0..boxes.len() {
@@ -75,6 +88,35 @@ pub fn nms(iou: f32, mut boxes: Vec<DetectBox>) -> Vec<DetectBox> {
             if boxes[j].label != boxes[i].label {
                 break;
             }
+
+            if boxes[j].score <= 0.0 {
+                // this box was suppressed by different box earlier
+                continue;
+            }
+
+            if jaccard(&boxes[j], &boxes[i]) > iou {
+                // max_box(boxes[j].bbox, &mut boxes[i].bbox);
+                boxes[j].score = 0.0;
+            }
+        }
+    }
+    // Filter out boxes with a score of 0.0.
+    boxes.into_iter().filter(|b| b.score > 0.0).collect()
+}
+
+pub fn nms_ignore_class(iou: f32, mut boxes: Vec<DetectBox>) -> Vec<DetectBox> {
+    // Boxes get sorted by score in descending order so we know based on the
+    // index the scoring of the boxes and can skip parts of the loop.
+    boxes.sort_unstable_by(|a, b| b.score.total_cmp(&a.score));
+
+    // Outer loop over all boxes.
+    for i in 0..boxes.len() {
+        if boxes[i].score <= 0.0 {
+            // this box was merged with a different box earlier
+            continue;
+        }
+        for j in (i + 1)..boxes.len() {
+            // Inner loop over boxes with lower score (later in the list).
 
             if boxes[j].score <= 0.0 {
                 // this box was suppressed by different box earlier
@@ -115,8 +157,8 @@ mod tests {
     };
 
     use ndarray::{
-        parallel::prelude::{IntoParallelIterator, ParallelIterator},
         ArrayView2, Zip,
+        parallel::prelude::{IntoParallelIterator, ParallelIterator},
     };
     use ndarray_stats::QuantileExt as _;
     use rand::random;

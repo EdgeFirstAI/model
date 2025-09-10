@@ -1,9 +1,11 @@
 use std::{error::Error, fmt};
 
-use edgefirst_schemas::edgefirst_msgs::DmaBuf;
-use tflitec_sys::TfLiteError;
-
 use crate::{image::ImageManager, tflite_model::TFLiteModel};
+use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use log::error;
+use num_traits::AsPrimitive;
+use serde::{Deserialize, Serialize};
+use tflitec_sys::TfLiteError;
 
 use enum_dispatch::enum_dispatch;
 
@@ -45,6 +47,116 @@ pub enum SupportedModel<'a> {
     RtmModel(RtmModel),
 }
 
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct Metadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub license: Option<String>,
+    pub config: Option<ConfigOutputs>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct ConfigOutputs {
+    pub outputs: Vec<ConfigOutput>,
+}
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ConfigOutput {
+    #[serde(rename = "detection")]
+    Detection(Detection),
+    #[serde(rename = "masks")]
+    Mask(Mask),
+    #[serde(rename = "segmentation")]
+    Segmentation(Segmentation),
+    #[serde(rename = "scores")]
+    Scores(Scores),
+    #[serde(rename = "boxes")]
+    Boxes(Boxes),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Segmentation {
+    pub decode: bool,
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Mask {
+    pub decode: bool,
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub index: usize,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Detection {
+    pub anchors: Vec<[f32; 2]>,
+    pub decode: bool,
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Scores {
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Boxes {
+    pub decoder: Decoder,
+    pub dtype: DataType,
+    pub name: String,
+    pub quantization: Option<[f32; 2]>, // this quantization isn't used for dequant
+    pub shape: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub enum Decoder {
+    #[serde(rename = "modelpack")]
+    ModelPack,
+    #[serde(rename = "yolo")]
+    Yolo,
+}
+
+impl From<tflitec_sys::metadata::Metadata> for Metadata {
+    fn from(value: tflitec_sys::metadata::Metadata) -> Self {
+        Self {
+            name: value.name,
+            version: value.version,
+            description: value.description,
+            author: value.author,
+            license: value.license,
+            config: match value.config_yaml {
+                Some(yaml) => match serde_yaml::from_str::<ConfigOutputs>(&yaml) {
+                    Ok(parsed) => Some(parsed),
+                    Err(err) => {
+                        error!("Yaml Error {err:?}");
+                        None
+                    }
+                },
+                None => None,
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ModelError {
     kind: ModelErrorKind,
@@ -52,11 +164,12 @@ pub struct ModelError {
 }
 
 #[derive(Debug)]
-enum ModelErrorKind {
+pub enum ModelErrorKind {
     Io,
     TFLite,
     #[cfg(feature = "rtm")]
     Rtm,
+    Decoding,
     Other,
 }
 
@@ -121,7 +234,17 @@ impl From<Box<dyn Error>> for ModelError {
 
 impl Error for ModelError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ModelError {
+    pub fn new(kind: ModelErrorKind, msg: String) -> Self {
+        ModelError {
+            kind,
+            source: msg.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DataType {
     Raw = 0,
     Int8 = 1,
@@ -170,4 +293,119 @@ pub trait Model {
     fn labels(&self) -> Result<Vec<String>, ModelError>;
 
     fn boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError>;
+
+    fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
+}
+
+// Decodes each tensors into box coordinates and scores. Multiple tensors will
+// have their ouput box coordinates/scores appended together.
+// Output is (box coordinates, scores, number of classes)
+pub fn decode_detection_outputs(
+    outputs: Vec<Vec<f32>>,
+    details: &[&Detection],
+) -> (Vec<f32>, Vec<f32>, usize) {
+    let mut total_capacity = 0;
+    let mut nc = 0;
+    for detail in details {
+        let shape = &detail.shape;
+        let na = detail.anchors.len();
+        nc = *shape.last().unwrap() / na - 5;
+        total_capacity += shape[1] * shape[2] * na;
+    }
+    let mut bboxes = Vec::with_capacity(total_capacity * 4);
+    let mut bscores = Vec::with_capacity(total_capacity * nc);
+
+    for (mut p, detail) in outputs.into_iter().zip(details) {
+        p.iter_mut().for_each(|x| *x = fast_sigmoid(*x));
+
+        let anchors = &detail.anchors;
+        let na = detail.anchors.len();
+        let shape = &detail.shape;
+        assert_eq!(
+            shape.iter().product::<usize>(),
+            p.len(),
+            "Shape product doesn't match tensor length"
+        );
+        let height = shape[1];
+        let width = shape[2];
+
+        let mut grid = Vec::with_capacity(height * width * na * 2);
+        for y in 0..height {
+            for x in 0..width {
+                for _ in 0..na {
+                    grid.push(x as f32);
+                    grid.push(y as f32);
+                }
+            }
+        }
+
+        let div_width = 1.0 / width as f32;
+        let div_height = 1.0 / height as f32;
+        for ((p, g), anchor) in p
+            .chunks_exact(nc + 5)
+            .zip(grid.chunks_exact(2))
+            .zip(anchors.iter().cycle())
+        {
+            let (x, y) = (p[0], p[1]);
+            let x = (x * 2.0 + g[0] - 0.5) * div_width;
+            let y = (y * 2.0 + g[1] - 0.5) * div_height;
+            let (w, h) = (p[2], p[3]);
+            let w_half = w * w * 2.0 * anchor[0];
+            let h_half = h * h * 2.0 * anchor[1];
+
+            bboxes.push(x - w_half);
+            bboxes.push(y - h_half);
+            bboxes.push(x + w_half);
+            bboxes.push(y + h_half);
+
+            let obj = p[4];
+            let probs = p[5..].iter().map(|x| *x * obj);
+            bscores.extend(probs);
+        }
+    }
+    (bboxes, bscores, nc)
+}
+
+#[inline(always)]
+#[allow(dead_code)]
+pub fn sigmoid(f: f32) -> f32 {
+    use std::f32::consts::E;
+    1.0 / (1.0 + E.powf(-f))
+}
+
+#[inline(always)]
+pub fn fast_sigmoid(f: f32) -> f32 {
+    if f.abs() > 80.0 {
+        f.signum() * 0.5 + 0.5
+    } else {
+        1.0 / (1.0 + fast_math::exp_raw(-f))
+    }
+}
+#[inline]
+#[allow(dead_code)]
+/// A fast polynomial sigmoid approximation. Roughly 7x faster than the sigmoid
+/// function. See https://www.desmos.com/calculator/g4e3vbju6l for a visual comparison
+/// Not suitable for SIMD usage on the Arm Cortex-a53 based on benchmark results
+pub fn fast_sigmoid2(f: f32) -> f32 {
+    if f.abs() > 8.5 {
+        f.signum() * 0.5 + 0.5
+    } else if f.abs() > 4.95716 {
+        0.5 + 0.278857_f32 * f.signum() + 0.108554 * f - 0.020359 * f * f.abs()
+            + 0.00172085 * f.powi(3)
+            - 0.0000550985 * f.powi(3) * f.abs()
+    } else if f.abs() > 1.48487 {
+        0.5 - 0.0525242_f32 * f.signum() + 0.3658526 * f - 0.09530283 * f * f.abs()
+            + 0.01137951 * f.powi(3)
+            - 0.0005171742 * f.powi(3) * f.abs()
+    } else {
+        -0.016123232 * f.powi(3) + 0.24758115 * f + 0.5
+    }
+}
+
+#[inline]
+pub fn dequant<T: AsPrimitive<f32>>(data: &[T], output: &mut [f32], scale: f32, zero_point: f32) {
+    let scaled_zp = -scale * zero_point;
+    data.iter()
+        .zip(output.iter_mut())
+        .for_each(|(d, out)| *out = scale * (*d).as_() + scaled_zp);
 }

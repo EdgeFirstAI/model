@@ -1,14 +1,14 @@
 extern crate num;
 
 use crate::{
-    tensorflowlite_c, TfLiteError, TfLiteTensor, TfLiteType_kTfLiteBFloat16,
-    TfLiteType_kTfLiteBool, TfLiteType_kTfLiteComplex128, TfLiteType_kTfLiteComplex64,
-    TfLiteType_kTfLiteFloat16, TfLiteType_kTfLiteFloat32, TfLiteType_kTfLiteFloat64,
-    TfLiteType_kTfLiteInt16, TfLiteType_kTfLiteInt32, TfLiteType_kTfLiteInt4,
-    TfLiteType_kTfLiteInt64, TfLiteType_kTfLiteInt8, TfLiteType_kTfLiteNoType,
-    TfLiteType_kTfLiteResource, TfLiteType_kTfLiteString, TfLiteType_kTfLiteUInt16,
-    TfLiteType_kTfLiteUInt32, TfLiteType_kTfLiteUInt64, TfLiteType_kTfLiteUInt8,
-    TfLiteType_kTfLiteVariant,
+    TfLiteError, TfLiteTensor, TfLiteType_kTfLiteBFloat16, TfLiteType_kTfLiteBool,
+    TfLiteType_kTfLiteComplex64, TfLiteType_kTfLiteComplex128, TfLiteType_kTfLiteFloat16,
+    TfLiteType_kTfLiteFloat32, TfLiteType_kTfLiteFloat64, TfLiteType_kTfLiteInt4,
+    TfLiteType_kTfLiteInt8, TfLiteType_kTfLiteInt16, TfLiteType_kTfLiteInt32,
+    TfLiteType_kTfLiteInt64, TfLiteType_kTfLiteNoType, TfLiteType_kTfLiteResource,
+    TfLiteType_kTfLiteString, TfLiteType_kTfLiteUInt8, TfLiteType_kTfLiteUInt16,
+    TfLiteType_kTfLiteUInt32, TfLiteType_kTfLiteUInt64, TfLiteType_kTfLiteVariant,
+    tensorflowlite_c,
 };
 
 pub use crate::TfLiteQuantizationParams;
@@ -67,8 +67,7 @@ impl<'a> TensorMut<'a> {
         let num_dims = self.num_dims()?;
         if i >= num_dims {
             return Err(TfLiteError::new(format!(
-                "Tried to access dim {} of {}",
-                i, num_dims
+                "Tried to access dim {i} of {num_dims}"
             )));
         }
         let i = i32::try_from(i).unwrap();
@@ -95,10 +94,10 @@ impl<'a> TensorMut<'a> {
     }
 
     pub fn volume(&self) -> Result<usize, TfLiteError> {
-        Ok(self.shape()?.iter().fold(1, |acc, x| acc * x))
+        Ok(self.shape()?.iter().product::<usize>())
     }
 
-    pub fn maprw<'b, T>(&'b mut self) -> Result<&'b mut [T], TfLiteError> {
+    pub fn maprw<T>(&mut self) -> Result<&mut [T], TfLiteError> {
         let volume = self.volume()?;
         if std::mem::size_of::<T>() * volume > self.byte_size() {
             return Err(TfLiteError::new(format!(
@@ -110,10 +109,10 @@ impl<'a> TensorMut<'a> {
         if ptr.is_null() {
             return Err(TfLiteError::new("Tensor data is NULL"));
         }
-        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, volume as usize) })
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, volume) })
     }
 
-    pub fn mapro<'b, T>(&'b self) -> Result<&'b [T], TfLiteError> {
+    pub fn mapro<T>(&self) -> Result<&[T], TfLiteError> {
         let volume = self.volume()?;
         if std::mem::size_of::<T>() * volume > self.byte_size() {
             return Err(TfLiteError::new(format!(
@@ -125,7 +124,7 @@ impl<'a> TensorMut<'a> {
         if ptr.is_null() {
             return Err(TfLiteError::new("Tensor data is NULL"));
         }
-        Ok(unsafe { std::slice::from_raw_parts(ptr, volume as usize) })
+        Ok(unsafe { std::slice::from_raw_parts(ptr, volume) })
     }
 
     pub fn get_quantization_params(&self) -> TfLiteQuantizationParams {
@@ -161,8 +160,7 @@ impl<'a> Tensor<'a> {
         let num_dims = self.num_dims()?;
         if i >= num_dims {
             return Err(TfLiteError::new(format!(
-                "Tried to access dim {} of {}",
-                i, num_dims
+                "Tried to access dim {i} of {num_dims}"
             )));
         }
         let i = i32::try_from(i).unwrap();
@@ -189,10 +187,10 @@ impl<'a> Tensor<'a> {
     }
 
     pub fn volume(&self) -> Result<usize, TfLiteError> {
-        Ok(self.shape()?.iter().fold(1, |acc, x| acc * x))
+        Ok(self.shape()?.iter().product::<usize>())
     }
 
-    pub fn mapro<'b, T>(&'b self) -> Result<&'b [T], TfLiteError> {
+    pub fn mapro<T>(&self) -> Result<&[T], TfLiteError> {
         let volume = self.volume()?;
         if std::mem::size_of::<T>() * volume > self.byte_size() {
             return Err(TfLiteError::new(format!(
@@ -204,7 +202,7 @@ impl<'a> Tensor<'a> {
         if ptr.is_null() {
             return Err(TfLiteError::new("Tensor data is NULL"));
         }
-        Ok(unsafe { std::slice::from_raw_parts(ptr, volume as usize) })
+        Ok(unsafe { std::slice::from_raw_parts(ptr, volume) })
     }
 
     pub fn get_quantization_params(&self) -> TfLiteQuantizationParams {

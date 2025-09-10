@@ -2,12 +2,12 @@ use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
 use g2d_sys::{
-    fourcc::FourCC, g2d as g2d_library, g2d_buf, g2d_rotation_G2D_ROTATION_0,
-    g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
-    g2d_surface, g2d_surface_new, guess_version, G2DFormat, G2DPhysical,
+    G2DFormat, G2DPhysical, fourcc::FourCC, g2d as g2d_library, g2d_buf,
+    g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_90, g2d_rotation_G2D_ROTATION_180,
+    g2d_rotation_G2D_ROTATION_270, g2d_surface, g2d_surface_new, guess_version,
 };
 use log::{debug, warn};
-use nix::libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
+use nix::libc::{MAP_SHARED, PROT_READ, PROT_WRITE, dup, mmap, munmap};
 use std::{
     error::Error,
     ffi::c_void,
@@ -49,11 +49,11 @@ pub struct G2DBuffer<'a> {
 #[allow(dead_code)]
 impl G2DBuffer<'_> {
     pub unsafe fn buf_handle(&self) -> *mut c_void {
-        (*self.buf).buf_handle
+        unsafe { (*self.buf).buf_handle }
     }
 
     pub unsafe fn buf_vaddr(&self) -> *mut c_void {
-        (*self.buf).buf_vaddr
+        unsafe { (*self.buf).buf_vaddr }
     }
 
     pub fn buf_paddr(&self) -> i32 {
@@ -108,11 +108,11 @@ impl ImageManager {
 
     #[allow(dead_code)]
     pub fn alloc(
-        &self,
+        &'_ self,
         width: i32,
         height: i32,
         channels: i32,
-    ) -> Result<G2DBuffer, Box<dyn Error>> {
+    ) -> Result<G2DBuffer<'_>, Box<dyn Error>> {
         let g2d_buf = unsafe { self.lib.g2d_alloc(width * height * channels, 0) };
         if g2d_buf.is_null() {
             return Err(Box::new(io::Error::other("g2d_alloc failed")));

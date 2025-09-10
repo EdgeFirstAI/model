@@ -1,6 +1,6 @@
 use nalgebra::{
-    allocator::Allocator, convert, dimension::U4, DVector, DefaultAllocator, Dyn, OMatrix,
-    RealField, SVector, U1, U8,
+    DVector, DefaultAllocator, Dyn, OMatrix, RealField, SVector, U1, U8, allocator::Allocator,
+    convert, dimension::U4,
 };
 
 #[derive(Debug, Clone)]

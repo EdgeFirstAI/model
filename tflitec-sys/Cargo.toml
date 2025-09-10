@@ -7,7 +7,7 @@ repository = "https://bitbucket.org/au-zone/maivin-fusion/src"
 keywords = ["deepview", "visionpack"]
 categories = ["computer-vision", "multimedia::video", "external-ffi-bindings"]
 version = "1.0.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 libloading = "0.8.1"
@@ -15,3 +15,7 @@ num = "0.4"
 num-derive = "0.4"
 num-traits = "0.2"
 log = "0.4.20"
+flatbuffers = "25.2.10"
+zip = "4.3.0"
+yaml-rust2 = "0.10"
+
