@@ -94,7 +94,7 @@ fn full_decode_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let details = vec![
+    let details = [
         Detection {
             anchors: Some(vec![
                 [0.008593750186264515, 0.009722222574055195],
@@ -255,7 +255,7 @@ fn decodes_nms_benchmark(bencher: divan::Bencher) {
     let scores = Array2::from_shape_vec((scores.len() / 5, 5), scores).unwrap();
     let mut output_boxes = Vec::with_capacity(100);
     bencher.bench_local(|| {
-        let _ = decode_boxes_and_nms(
+        decode_boxes_and_nms(
             0.1,
             0.1,
             scores.view(),

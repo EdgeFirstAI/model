@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use log::trace;
 use ndarray::{
-    ArrayView2, Zip,
+    ArrayView1, ArrayView2, Zip,
     parallel::prelude::{IntoParallelIterator, ParallelIterator},
 };
 
@@ -16,7 +16,7 @@ pub fn decode_boxes_and_nms(
     mask_coeff: Option<ArrayView2<f32>>,
     output_boxes: &mut Vec<DetectBox>,
     ignore_class: bool,
-) -> usize {
+) {
     let start = Instant::now();
     let boxes = decode_boxes(score_threshold, scores_tensor, boxes_tensor, mask_coeff);
     let boxes = nms(iou_threshold, boxes, ignore_class);
@@ -26,7 +26,6 @@ pub fn decode_boxes_and_nms(
         output_boxes.push(b);
     }
     trace!("Box decode and nms takes {:?}", start.elapsed());
-    len
 }
 
 pub fn decode_boxes(
@@ -43,13 +42,7 @@ pub fn decode_boxes(
             .and(mask_coeff.rows())
             .into_par_iter()
             .filter_map(|(score, bbox, mask)| {
-                let (score_, label) =
-                    score
-                        .iter()
-                        .enumerate()
-                        .fold((score[0], 0), |(max, arg_max), (ind, s)| {
-                            if max > *s { (max, arg_max) } else { (*s, ind) }
-                        });
+                let (score_, label) = arg_max(score);
                 if score_ < threshold {
                     return None;
                 }
@@ -70,13 +63,7 @@ pub fn decode_boxes(
             .and(boxes.rows())
             .into_par_iter()
             .filter_map(|(score, bbox)| {
-                let (score_, label) =
-                    score
-                        .iter()
-                        .enumerate()
-                        .fold((score[0], 0), |(max, arg_max), (ind, s)| {
-                            if max > *s { (max, arg_max) } else { (*s, ind) }
-                        });
+                let (score_, label) = arg_max(score);
                 if score_ < threshold {
                     return None;
                 }
@@ -93,6 +80,15 @@ pub fn decode_boxes(
             })
             .collect()
     }
+}
+
+fn arg_max<T: PartialOrd + Copy>(score: ArrayView1<T>) -> (T, usize) {
+    score
+        .iter()
+        .enumerate()
+        .fold((score[0], 0), |(max, arg_max), (ind, s)| {
+            if max > *s { (max, arg_max) } else { (*s, ind) }
+        })
 }
 
 pub fn nms(iou: f32, boxes: Vec<DetectBox>, ignore_class: bool) -> Vec<DetectBox> {
@@ -189,17 +185,7 @@ fn jaccard(a: &DetectBox, b: &DetectBox) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        model::DetectBox,
-        nms::{decode_boxes, jaccard},
-    };
-
-    use ndarray::{
-        ArrayView2, Zip,
-        parallel::prelude::{IntoParallelIterator, ParallelIterator},
-    };
-    use ndarray_stats::QuantileExt as _;
-    use rand::random;
+    use crate::{model::DetectBox, nms::jaccard};
 
     #[test]
     fn test_iou() {

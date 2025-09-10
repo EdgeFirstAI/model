@@ -163,7 +163,7 @@ impl From<tflitec_sys::metadata::Metadata> for Metadata {
             license: value.license,
             config: match value.config_yaml {
                 Some(yaml) => match serde_yaml::from_str::<ConfigOutputs>(&yaml) {
-                    Ok(mut parsed) => Some(parsed),
+                    Ok(parsed) => Some(parsed),
                     Err(err) => {
                         error!("Yaml Error {err}");
                         None
@@ -587,12 +587,8 @@ pub fn protobox_safe(protos: ArrayView3<f32>, roi: &[f32; 4]) -> (Array2<f32>, [
 
 #[instrument(skip_all)]
 pub fn make_mask(mask: ArrayView1<f32>, protos: ArrayView3<f32>, shape: [usize; 3]) -> Array2<u8> {
-    let mask = mask
-        .map(|f| *f as f32)
-        .into_shape_with_order((1, mask.len()))
-        .unwrap();
+    let mask = mask.into_shape_with_order((1, mask.len())).unwrap();
     let protos = protos
-        .map(|f| *f as f32)
         .into_shape_with_order([shape[0], shape[1] * shape[2]])
         .unwrap();
 

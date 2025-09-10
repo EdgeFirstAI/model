@@ -2,9 +2,10 @@ use crate::{
     args::Args,
     image::{Image, ImageManager, RGBX, Rotation},
     model::{
-        ConfigOutput, DataType, Decoder, DetectBox, Metadata, Model, ModelError, ModelErrorKind,
-        Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET, decode_model_pack_detection_outputs,
-        decode_yolo_outputs_det, decode_yolo_outputs_seg, dequant,
+        ConfigOutput, ConfigOutputs, DataType, Decoder, DetectBox, Metadata, Model, ModelError,
+        ModelErrorKind, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET,
+        decode_model_pack_detection_outputs, decode_yolo_outputs_det, decode_yolo_outputs_seg,
+        dequant,
     },
     nms::{decode_boxes_and_nms, nms},
 };
@@ -13,7 +14,6 @@ use log::error;
 use ndarray::{Array2, Array3};
 use std::{
     error::Error,
-    fmt::format,
     io::{self, Read},
     path::Path,
 };
@@ -60,7 +60,7 @@ impl TFLiteLib {
             builder.add_owned_delegate(delegate);
         }
         let runner = builder.build(model)?;
-        let mut model = TFLiteModel::new(runner)?;
+        let model = TFLiteModel::new(runner)?;
 
         Ok(model)
     }
@@ -123,11 +123,88 @@ impl<'a> TFLiteModel<'a> {
         Ok(tensor.shape()?)
     }
 
+    fn get_outputs_from_metadata(
+        &self,
+        config: &ConfigOutputs,
+    ) -> Result<(Array2<f32>, Array2<f32>), ModelError> {
+        let mut box_ind = None;
+        let mut score_ind = None;
+
+        let box_data;
+        let score_data;
+
+        let output_details = &config.outputs;
+        let mut output_tensors = vec![];
+        let mut detection_details = vec![];
+        let mut yolo_segmentation_outputs = vec![];
+        let mut yolo_segmentation_details = vec![];
+
+        let mut yolo_detect_outputs = None;
+        let mut yolo_detect_details = None;
+        for (details, output_index) in output_details.iter().zip(&self.output_index) {
+            match details {
+                ConfigOutput::Detection(detection)
+                    if matches!(detection.decoder, Decoder::ModelPack) =>
+                {
+                    output_tensors.push(self.dequant_output(*output_index)?);
+                    detection_details.push(detection);
+                }
+                ConfigOutput::Detection(detection)
+                    if matches!(detection.decoder, Decoder::Yolov8) =>
+                {
+                    yolo_detect_outputs = Some(self.dequant_output(*output_index)?);
+                    yolo_detect_details = Some(detection);
+                }
+                ConfigOutput::Scores(_) => {
+                    score_ind = Some(*output_index);
+                }
+                ConfigOutput::Boxes(_) => box_ind = Some(*output_index),
+                ConfigOutput::Segmentation(seg) if matches!(seg.decoder, Decoder::Yolov8) => {
+                    yolo_segmentation_outputs.push(self.dequant_output(*output_index)?);
+                    yolo_segmentation_details.push(seg);
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(score_ind) = score_ind
+            && let Some(box_ind) = box_ind
+        {
+            let box_shape = self.output_shape(box_ind)?;
+            let box_shape = [box_shape[1], box_shape[3]];
+            box_data = Array2::from_shape_vec(box_shape, self.dequant_output(box_ind)?).unwrap();
+            let score_shape = self.output_shape(score_ind)?;
+            let score_shape = [score_shape[1], score_shape[2]];
+            score_data =
+                Array2::from_shape_vec(score_shape, self.dequant_output(score_ind)?).unwrap();
+        } else if !detection_details.is_empty() {
+            (box_data, score_data) =
+                decode_model_pack_detection_outputs(output_tensors, &detection_details);
+        } else if !yolo_segmentation_outputs.is_empty() {
+            let (box_data_, score_data_, _mask_data, _protos) =
+                decode_yolo_outputs_seg(yolo_segmentation_outputs, &yolo_segmentation_details);
+            box_data = box_data_;
+            score_data = score_data_;
+            // mask_data = Some(_mask_data);
+            // protos = Some(_protos);
+        } else if let Some(output) = yolo_detect_outputs
+            && let Some(details) = yolo_detect_details
+        {
+            (box_data, score_data) = decode_yolo_outputs_det(output, details);
+        } else {
+            return Err(ModelError::new(
+                ModelErrorKind::Decoding,
+                "Cannot find detection outputs".to_string(),
+            ));
+        }
+        Ok((box_data, score_data))
+    }
+
     fn populate_output_index_from_shape(&mut self) -> Result<(), ModelError> {
         if let Some(config) = &mut self.metadata.config {
             self.output_index = Vec::new();
             for out in &mut config.outputs {
-                let (config_shape) = match out {
+                let config_shape = match out {
                     ConfigOutput::Detection(config) => &config.shape,
                     ConfigOutput::Mask(config) => &config.shape,
                     ConfigOutput::Segmentation(config) => &config.shape,
@@ -513,7 +590,7 @@ impl Model for TFLiteModel<'_> {
     fn decode_outputs(
         &mut self,
         boxes: &mut Vec<DetectBox>,
-        protos: &mut Option<Array3<f32>>,
+        _protos: &mut Option<Array3<f32>>,
     ) -> Result<(), ModelError> {
         if self.output_count()? == 4
             && self.output_shape(3)?.len() == 1
@@ -525,84 +602,18 @@ impl Model for TFLiteModel<'_> {
 
         let box_data;
         let score_data;
-        let mut mask_data: Option<
-            ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 2]>>,
-        > = None;
-        let mut protos: Option<
-            ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 3]>>,
-        > = None;
+        // let mut mask_data: Option<
+        //     ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 2]>>,
+        // > = None;
+        // let mut protos: Option<
+        //     ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 3]>>,
+        // > = None;
 
-        let mut box_ind = None;
-        let mut score_ind = None;
         if let Some(config) = &self.metadata.config {
-            let output_details = &config.outputs;
-            let mut output_tensors = vec![];
-            let mut detection_details = vec![];
-            let mut yolo_segmentation_outputs = vec![];
-            let mut yolo_segmentation_details = vec![];
-
-            let mut yolo_detect_outputs = None;
-            let mut yolo_detect_details = None;
-            for (details, output_index) in output_details.iter().zip(&self.output_index) {
-                match details {
-                    ConfigOutput::Detection(detection)
-                        if matches!(detection.decoder, Decoder::ModelPack) =>
-                    {
-                        output_tensors.push(self.dequant_output(*output_index)?);
-                        detection_details.push(detection);
-                    }
-                    ConfigOutput::Detection(detection)
-                        if matches!(detection.decoder, Decoder::Yolov8) =>
-                    {
-                        yolo_detect_outputs = Some(self.dequant_output(*output_index)?);
-                        yolo_detect_details = Some(detection);
-                    }
-                    ConfigOutput::Scores(_) => {
-                        score_ind = Some(*output_index);
-                    }
-                    ConfigOutput::Boxes(_) => box_ind = Some(*output_index),
-                    ConfigOutput::Segmentation(seg) if matches!(seg.decoder, Decoder::Yolov8) => {
-                        yolo_segmentation_outputs.push(self.dequant_output(*output_index)?);
-                        yolo_segmentation_details.push(seg);
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Some(score_ind) = score_ind
-                && let Some(box_ind) = box_ind
-            {
-                let box_shape = self.output_shape(box_ind)?;
-                let box_shape = [box_shape[1], box_shape[3]];
-                box_data =
-                    Array2::from_shape_vec(box_shape, self.dequant_output(box_ind)?).unwrap();
-                let score_shape = self.output_shape(score_ind)?;
-                let score_shape = [score_shape[1], score_shape[2]];
-                score_data =
-                    Array2::from_shape_vec(score_shape, self.dequant_output(score_ind)?).unwrap();
-            } else if !detection_details.is_empty() {
-                (box_data, score_data) =
-                    decode_model_pack_detection_outputs(output_tensors, &detection_details);
-            } else if !yolo_segmentation_outputs.is_empty() {
-                let (box_data_, score_data_, mask_data_, protos_) =
-                    decode_yolo_outputs_seg(yolo_segmentation_outputs, &yolo_segmentation_details);
-                box_data = box_data_;
-                score_data = score_data_;
-                mask_data = None;
-                protos = None;
-                // mask_data = Some(mask_data_);
-                // protos = Some(protos_);
-            } else if let Some(output) = yolo_detect_outputs
-                && let Some(details) = yolo_detect_details
-            {
-                (box_data, score_data) = decode_yolo_outputs_det(output, details);
-            } else {
-                return Err(ModelError::new(
-                    ModelErrorKind::Decoding,
-                    "Cannot find detection outputs".to_string(),
-                ));
-            }
+            (box_data, score_data) = self.get_outputs_from_metadata(config)?;
         } else {
+            let mut box_ind = None;
+            let mut score_ind = None;
             for i in 0..self.output_count()? {
                 let shape = self.output_shape(i)?;
                 if shape.len() == 3 {
@@ -630,12 +641,13 @@ impl Model for TFLiteModel<'_> {
             }
         }
 
-        let n_boxes = decode_boxes_and_nms(
+        decode_boxes_and_nms(
             self.score_threshold,
             self.iou_threshold,
             score_data.view(),
             box_data.view(),
-            mask_data.as_ref().map(|x| x.view()),
+            // mask_data.as_ref().map(|x| x.view()),
+            None,
             boxes,
             false,
         );

@@ -12,23 +12,16 @@ pub mod tracker;
 #[cfg(feature = "rtm")]
 pub mod rtm_model;
 
-use crate::{
-    buildmsgs::*,
-    model::{ModelErrorKind, decode_masks},
-    tracker::*,
-};
+use crate::{buildmsgs::*, model::ModelErrorKind, tracker::*};
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
-use clap::Parser;
 use edgefirst_schemas::{
     self,
-    edgefirst_msgs::{DetectBox2D, DmaBuf, Mask},
-    sensor_msgs::CameraInfo,
+    edgefirst_msgs::{DmaBuf, ModelInfo},
 };
-use image::{Image, ImageManager};
+use image::Image;
 use log::{debug, error, info, trace, warn};
-use masks::{mask_compress_thread, mask_thread};
 use model::{DetectBox, Model, ModelError, SupportedModel};
 use ndarray::{Array1, Array3};
 use nix::{
@@ -36,17 +29,9 @@ use nix::{
     time::{ClockId, clock_gettime},
 };
 use pidfd_getfd::{GetFdFlags, get_file_from_pidfd};
-use std::{
-    io,
-    os::fd::AsRawFd,
-    process::ExitCode,
-    time::{Duration, Instant},
-};
-use tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib};
-use tokio::sync::mpsc::{self, Receiver, error::TryRecvError};
-use tracing::{info_span, instrument, level_filters::LevelFilter};
-use tracing_subscriber::{Layer as _, Registry, layer::SubscriberExt as _};
-use tracy_client::frame_mark;
+use std::{fs::File, io, os::fd::AsRawFd, time::Duration};
+use tokio::sync::mpsc::{Receiver, error::TryRecvError};
+use tracing::{info_span, instrument};
 use uuid::Uuid;
 use zenoh::{
     Session,
@@ -56,450 +41,15 @@ use zenoh::{
     sample::Sample,
 };
 
-#[cfg(feature = "rtm")]
-use rtm_model::RtmModel;
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct ModelType {
-    segment_output_ind: Option<usize>,
-    detection: bool,
-    detection_with_mask: bool,
-}
-
-#[tokio::main]
-pub async fn main() -> ExitCode {
-    let args = Args::parse();
-
-    args.tracy.then(tracy_client::Client::start);
-
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-
-    let stdout_log = tracing_subscriber::fmt::layer()
-        .pretty()
-        .with_filter(env_filter);
-
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(env_filter)),
-        Err(_) => None,
-    };
-
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(env_filter)),
-        false => None,
-    };
-
-    let subscriber = Registry::default()
-        .with(stdout_log)
-        .with(journald)
-        .with(tracy);
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-    tracing_log::LogTracer::init().unwrap();
-
-    let mut first_run = true;
-    let session = zenoh::open(args.clone()).await.unwrap();
-
-    let stream_width: f64;
-    let stream_height: f64;
-    if args.visualization {
-        let info_sub = session
-            .declare_subscriber(&args.camera_info_topic)
-            .await
-            .unwrap();
-        info!("Declared subscriber on {:?}", &args.camera_info_topic);
-        match info_sub.recv_timeout(Duration::from_secs(10)) {
-            Ok(v) => {
-                match cdr::deserialize::<CameraInfo>(&v.unwrap().payload().to_bytes()) {
-                    Ok(v) => {
-                        stream_width = v.width as f64;
-                        stream_height = v.height as f64;
-                        info!("Found stream resolution: {stream_width}x{stream_height}");
-                    }
-                    Err(e) => {
-                        warn!("Failed to deserialize camera info message: {e:?}");
-                        warn!("Cannot determine stream resolution, using normalized coordinates");
-                        stream_width = 1.0;
-                        stream_height = 1.0;
-                    }
-                };
-            }
-            Err(e) => {
-                warn!("Failed to receive on {:?}: {:?}", args.camera_info_topic, e);
-                warn!("Cannot determine stream resolution, using normalized coordinates");
-                stream_width = 1.0;
-                stream_height = 1.0;
-            }
-        }
-        drop(info_sub);
-    } else {
-        stream_width = 1.0;
-        stream_height = 1.0;
-    }
-
-    let sub_camera = session
-        .declare_subscriber(&args.camera_topic)
-        .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &args.camera_topic);
-
-    let (tx, rx) = mpsc::channel(50);
-    let heartbeat = tokio::spawn(heart_beat(
-        session.clone(),
-        args.clone(),
-        sub_camera,
-        rx,
-        (stream_width, stream_height),
-    ));
-
-    let model_data = match std::fs::read(&args.model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not read model file {:?}: {:?}", args.model, e);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut _tflite = None;
-
-    let mut model: SupportedModel<'_> = match args.model.extension() {
-        Some(v) if v == "tflite" => {
-            _tflite = match TFLiteLib::new() {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    error!("Could not load TensorFlowLite API: {e:?}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            let delegate = if &args.engine.to_lowercase() == "npu" {
-                Some(DEFAULT_NPU_DELEGATE_PATH)
-            } else {
-                None
-            };
-
-            let mut model = match _tflite
-                .as_ref()
-                .unwrap()
-                .load_model_from_mem_with_delegate(model_data, delegate)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not load TFLite model: {e:?}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            model.setup_context(&args);
-            model.into()
-        }
-        Some(v) if v == "rtm" => {
-            #[cfg(feature = "rtm")]
-            {
-                let mut model =
-                    match RtmModel::load_model_from_mem_with_engine(model_data, &args.engine) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("Could not load RTM model: {e:?}");
-                            return ExitCode::FAILURE;
-                        }
-                    };
-                model.setup_context(&args);
-                model.into()
-            }
-
-            #[cfg(not(feature = "rtm"))]
-            {
-                error!("RTM model support is not enabled in this build");
-                return ExitCode::FAILURE;
-            }
-        }
-        Some(v) => {
-            error!("Unsupported model extension: {v:?}");
-            return ExitCode::FAILURE;
-        }
-        None => {
-            error!("No model extension: {:?}", args.model);
-            return ExitCode::FAILURE;
-        }
-    };
-    info!("Loaded model");
-
-    let model_type = match identify_model(&model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not identify model type: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-    info!("identified model type: {model_type:?}");
-    drop(tx);
-
-    let publ_model_info = session
-        .declare_publisher(args.info_topic.clone())
-        .await
-        .unwrap();
-    let publ_detect = session
-        .declare_publisher(args.detect_topic.clone())
-        .await
-        .unwrap();
-    let publ_mask = session
-        .declare_publisher(args.mask_topic.clone())
-        .await
-        .unwrap();
-
-    let publ_mask_compressed = match args.mask_compression {
-        true => Some(
-            session
-                .declare_publisher(args.mask_compressed_topic.clone())
-                .await
-                .unwrap(),
-        ),
-        false => None,
-    };
-
-    let publ_visual = match args.visualization {
-        true => Some(
-            session
-                .declare_publisher(args.visual_topic.clone())
-                .await
-                .unwrap(),
-        ),
-        false => None,
-    };
-
-    let (mask_tx, mask_rx) = mpsc::channel(50);
-
-    let mask_compress_tx = if let Some(publ_mask_compressed) = publ_mask_compressed {
-        let (mask_compress_tx, mask_compress_rx) = mpsc::channel(50);
-        tokio::spawn(mask_compress_thread(
-            mask_compress_rx,
-            publ_mask_compressed,
-            args.mask_compression_level,
-        ));
-        Some(mask_compress_tx)
-    } else {
-        None
-    };
-
-    tokio::spawn(mask_thread(
-        mask_rx,
-        args.mask_classes.clone(),
-        publ_mask,
-        mask_compress_tx,
-    ));
-
-    let mut model_info_msg =
-        build_model_info_msg(time_from_ns(0u32), Some(&model), &args.model, &model_type);
-    info!("built model_info_msg");
-
-    let sub_camera = heartbeat.await.unwrap();
-
-    let model_name = match args.model.as_path().file_name() {
-        Some(v) => String::from(v.to_string_lossy()),
-        None => {
-            warn!("Cannot determine model file basename");
-            String::from("unknown_model_file")
-        }
-    };
-    info!("got model_name {model_name}");
-    let model_labels = match model.labels() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not get model labels: {e:?}");
-            Vec::new()
-        }
-    };
-    info!("got model_labels {model_labels:?}");
-    let mut tracker = ByteTrack::new();
-    let mut detect_boxes: Vec<DetectBox> = vec![DetectBox::default(); args.max_boxes];
-    let timeout = Duration::from_millis(100);
-    let mut fps = fps::Fps::<90>::default();
-
-    let img_mgr = match ImageManager::new() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open G2D: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    info!("Opened G2D with version {}", img_mgr.version());
-
-    loop {
-        let dma_buf = if let Some(v) = sub_camera.drain().last() {
-            v
-        } else {
-            match sub_camera.recv_timeout(timeout) {
-                Ok(msg) => match msg {
-                    Some(v) => v,
-                    None => {
-                        warn!(
-                            "timeout receiving camera frame on {}",
-                            sub_camera.key_expr()
-                        );
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "error receiving camera frame on {}: {:?}",
-                        sub_camera.key_expr(),
-                        e
-                    );
-                    continue;
-                }
-            }
-        };
-
-        let dma_buf: DmaBuf = cdr::deserialize(&dma_buf.payload().to_bytes()).unwrap();
-        trace!("Recieved camera frame");
-
-        match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw) {
-            Ok(_) => trace!("Loaded frame into model"),
-            Err(e) => error!("Could not load frame into model: {e:?}"),
-        }
-
-        let model_start = Instant::now();
-
-        if let Err(e) = model.run_model() {
-            error!("Failed to run model: {e:?}");
-            return ExitCode::FAILURE;
-        }
-        let model_duration = model_start.elapsed().as_nanos();
-        trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
-
-        if model_type.detection {
-            let timestamp = dma_buf.header.stamp.nanosec as u64
-                + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            let (mut new_boxes, protos) = run_detection(
-                &mut model,
-                &model_labels,
-                &mut detect_boxes,
-                &mut tracker,
-                timestamp,
-                &args,
-            );
-            if first_run {
-                info!(
-                    "Successfully recieved camera frames and run model, found {:?} boxes",
-                    new_boxes.len()
-                );
-                first_run = false;
-            } else {
-                trace!(
-                    "Detected {:?} boxes. FPS: {}",
-                    new_boxes.len(),
-                    fps.update()
-                );
-            }
-            let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
-                Ok(t) => t.num_nanoseconds() as u64,
-                Err(e) => {
-                    error!("Could not get Monotonic clock time: {e:?}");
-                    0
-                }
-            };
-
-            let boxes: Vec<DetectBox2D> = new_boxes.iter().map(|b| b.into()).collect();
-
-            if model_type.detection_with_mask
-                && let Some(protos) = protos
-            {
-                new_boxes.sort_by_key(|a| {
-                    if let Some(track) = a.track {
-                        track.last_updated
-                    } else {
-                        a.ts
-                    }
-                });
-                let masks = decode_masks(&new_boxes, protos.view());
-                let masks = masks.into_iter().filter_map(|x| {
-                    x.map(|v| Mask {
-                        height: v.0.shape()[0] as u32,
-                        width: v.0.shape()[1] as u32,
-                        length: 1,
-                        encoding: "".to_string(),
-                        mask: v.0.into_raw_vec_and_offset().0,
-                        boxed: true,
-                    })
-                });
-            }
-            let (msg, enc) = build_detect_msg_and_encode(
-                &new_boxes,
-                dma_buf.header.stamp.clone(),
-                time_from_ns(model_duration as u32),
-                time_from_ns(curr_time as u32),
-            );
-            match publ_detect.put(msg).encoding(enc).await {
-                Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
-                Err(e) => {
-                    error!(
-                        "Error sending message on {}: {:?}",
-                        publ_detect.key_expr(),
-                        e
-                    )
-                }
-            }
-
-            if publ_visual.is_some() {
-                let publ_visual = publ_visual.as_ref().unwrap();
-                let (msg, enc) = build_image_annotations_msg_and_encode(
-                    &new_boxes,
-                    dma_buf.header.stamp.clone(),
-                    stream_width,
-                    stream_height,
-                    &model_name,
-                    args.labels,
-                );
-
-                match publ_visual.put(msg).encoding(enc).await {
-                    Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
-                    Err(e) => {
-                        error!(
-                            "Error sending message on {}: {:?}",
-                            publ_detect.key_expr(),
-                            e
-                        )
-                    }
-                }
-            }
-        }
-        if let Some(i) = model_type.segment_output_ind {
-            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error! {"Cannot send to mask publishing thread {e:?}"};
-                }
-            }
-        }
-
-        model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
-
-        match publ_model_info.put(msg).encoding(enc).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!(
-                    "Error sending message on {}: {:?}",
-                    publ_model_info.key_expr(),
-                    e
-                )
-            }
-        }
-
-        args.tracy.then(frame_mark);
-    }
+    pub segment_output_ind: Option<usize>,
+    pub detection: bool,
+    pub detection_with_mask: bool,
 }
 
 #[instrument(skip_all)]
-fn run_detection(
+pub fn run_detection(
     model: &mut SupportedModel,
     labels: &[String],
     boxes: &mut Vec<DetectBox>,
@@ -603,7 +153,7 @@ fn detectbox_to_boxwithtrack(
     }
 }
 
-async fn heart_beat(
+pub async fn heart_beat(
     session: Session,
     args: Args,
     sub_camera: Subscriber<FifoChannelHandler<Sample>>,
@@ -623,127 +173,170 @@ async fn heart_beat(
     loop {
         match rx.try_recv() {
             Ok(_) => return sub_camera,
-            Err(e) => match e {
-                TryRecvError::Disconnected => return sub_camera,
-                TryRecvError::Empty => (),
-            },
+            Err(TryRecvError::Disconnected) => return sub_camera,
+            Err(_) => (),
         }
-        let sample = if let Some(s) = sub_camera.drain().last() {
-            s
-        } else {
-            match sub_camera.recv_timeout(Duration::from_millis(100)) {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    error!(
-                        "Timeout receiving camera frame on {}",
-                        sub_camera.key_expr()
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    error!(
-                        "error receiving camera frame on {}: {:?}",
-                        sub_camera.key_expr(),
-                        e
-                    );
-                    continue;
-                }
-            }
-        };
-        let mut dma_buf: DmaBuf = match cdr::deserialize(&sample.payload().to_bytes()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to deserialize message: {e:?}");
-                continue;
-            }
-        };
-        trace!("Recieved camera frame");
+        heart_beat_loop(
+            &session,
+            &args,
+            &sub_camera,
+            stream_dims,
+            &mut model_info_msg,
+            &status,
+        )
+        .await;
+    }
+}
 
-        let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    dma_buf.pid, e
-                );
-                continue;
-            }
-        };
-        let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
-                );
-                continue;
-            }
-        };
-        dma_buf.fd = fd.as_raw_fd();
-        trace!("Opened DMA buffer from camera");
-        let curr_time = match clock_gettime(ClockId::CLOCK_MONOTONIC) {
-            Ok(t) => t.num_nanoseconds() as u64,
-            Err(e) => {
-                error!("Could not get Monotonic clock time: {e:?}");
-                0
-            }
-        };
+async fn heart_beat_loop(
+    session: &Session,
+    args: &Args,
+    sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
+    stream_dims: (f64, f64),
+    model_info_msg: &mut ModelInfo,
+    status: &str,
+) {
+    let Some(mut dma_buf) = wait_for_camera_frame(sub_camera, Duration::from_millis(100)) else {
+        return;
+    };
+    trace!("Recieved camera frame");
 
-        let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&mask, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+    let Ok(_fd) = update_dmabuf_with_pidfd(&mut dma_buf) else {
+        return;
+    };
 
-        match session.put(&args.mask_topic, msg).encoding(enc).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error sending message on {}: {:?}", args.mask_topic, e)
-            }
+    trace!("Opened DMA buffer from camera");
+
+    let curr_time = get_curr_time();
+
+    let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
+    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&mask, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+    match session.put(&args.mask_topic, msg).encoding(enc).await {
+        Ok(_) => (),
+        Err(e) => {
+            error!("Error sending message on {}: {:?}", args.mask_topic, e)
         }
+    }
 
-        let (msg, enc) = build_detect_msg_and_encode(
+    let (msg, enc) = build_detect_msg_and_encode(
+        &Vec::new(),
+        dma_buf.header.stamp.clone(),
+        time_from_ns(0u32),
+        time_from_ns(curr_time),
+    );
+
+    match session.put(&args.detect_topic, msg).encoding(enc).await {
+        Ok(_) => (),
+        Err(e) => {
+            error!("Error sending message on {}: {:?}", args.detect_topic, e)
+        }
+    }
+
+    model_info_msg.header.stamp = dma_buf.header.stamp.clone();
+    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
+
+    match session.put(&args.info_topic, msg).encoding(enc).await {
+        Ok(_) => (),
+        Err(e) => {
+            error!("Error sending message on {}: {:?}", args.info_topic, e)
+        }
+    }
+
+    if args.visualization {
+        let (msg, enc) = build_image_annotations_msg_and_encode(
             &Vec::new(),
             dma_buf.header.stamp.clone(),
-            time_from_ns(0u32),
-            time_from_ns(curr_time),
+            stream_dims.0,
+            stream_dims.1,
+            status,
+            LabelSetting::Index,
         );
 
-        match session.put(&args.detect_topic, msg).encoding(enc).await {
-            Ok(_) => (),
+        match session.put(&args.visual_topic, msg).encoding(enc).await {
+            Ok(_) => trace!("Sent message on {}", args.visual_topic),
             Err(e) => {
-                error!("Error sending message on {}: {:?}", args.detect_topic, e)
-            }
-        }
-
-        model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
-        match session.put(&args.info_topic, msg).encoding(enc).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error sending message on {}: {:?}", args.info_topic, e)
-            }
-        }
-
-        if args.visualization {
-            let (msg, enc) = build_image_annotations_msg_and_encode(
-                &Vec::new(),
-                dma_buf.header.stamp.clone(),
-                stream_dims.0,
-                stream_dims.1,
-                &status,
-                LabelSetting::Index,
-            );
-
-            match session.put(&args.visual_topic, msg).encoding(enc).await {
-                Ok(_) => trace!("Sent message on {}", args.visual_topic),
-                Err(e) => {
-                    error!("Error sending message on {}: {:?}", args.visual_topic, e)
-                }
+                error!("Error sending message on {}: {:?}", args.visual_topic, e)
             }
         }
     }
 }
 
-fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
+pub fn get_curr_time() -> u64 {
+    match clock_gettime(ClockId::CLOCK_MONOTONIC) {
+        Ok(t) => t.num_nanoseconds() as u64,
+        Err(e) => {
+            error!("Could not get Monotonic clock time: {e:?}");
+            0
+        }
+    }
+}
+
+pub fn wait_for_camera_frame(
+    sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
+    timeout: Duration,
+) -> Option<DmaBuf> {
+    let dma_buf = if let Some(v) = sub_camera.drain().last() {
+        v
+    } else {
+        match sub_camera.recv_timeout(timeout) {
+            Ok(msg) => match msg {
+                Some(v) => v,
+                None => {
+                    warn!(
+                        "timeout receiving camera frame on {}",
+                        sub_camera.key_expr()
+                    );
+                    return None;
+                }
+            },
+            Err(e) => {
+                error!(
+                    "error receiving camera frame on {}: {:?}",
+                    sub_camera.key_expr(),
+                    e
+                );
+                return None;
+            }
+        }
+    };
+    match cdr::deserialize(&dma_buf.payload().to_bytes()) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            error!("Failed to deserialize message: {e:?}");
+            None
+        }
+    }
+}
+
+pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuf) -> Result<File, std::io::Error> {
+    let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                dma_buf.pid, e
+            );
+            return Err(e);
+        }
+    };
+
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
+            );
+            return Err(e);
+        }
+    };
+    dma_buf.fd = fd.as_raw_fd();
+    Ok(fd)
+}
+
+pub fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
     if model.input_count().is_ok_and(|f| f != 1) {
         error!(
             "Model has {} inputs but expected only 1",

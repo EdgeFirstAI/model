@@ -266,7 +266,7 @@ impl Model for RtmModel {
     fn decode_outputs(
         &mut self,
         boxes: &mut Vec<DetectBox>,
-        protos: &mut Option<Array3<f32>>,
+        _protos: &mut Option<Array3<f32>>,
     ) -> Result<(), ModelError> {
         trace!("boxes");
         let mut vaal_boxes = Vec::new();
@@ -284,8 +284,8 @@ impl Model for RtmModel {
 
         let box_count = self.ctx.boxes(&mut vaal_boxes, len)?;
         boxes.clear();
-        for i in 0..box_count {
-            boxes.push(vaal_boxes[i].into());
+        for b in vaal_boxes.into_iter().take(box_count) {
+            boxes.push(b.into());
         }
 
         Ok(())

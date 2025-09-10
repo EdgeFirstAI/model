@@ -5,6 +5,7 @@ use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
 
 #[allow(dead_code)]
+#[derive(Default)]
 pub struct ByteTrack {
     // tracklets;
     pub tracklets: Vec<Tracklet>,
@@ -126,12 +127,7 @@ fn box_cost(
 
 impl ByteTrack {
     pub fn new() -> ByteTrack {
-        ByteTrack {
-            tracklets: vec![],
-            lost_tracks: vec![],
-            removed_tracks: vec![],
-            frame_count: 0,
-        }
+        Self::default()
     }
 
     fn compute_costs(
