@@ -1,7 +1,6 @@
 * text=auto eol=lf
 *.{cmd,[cC][mM][dD]} text eol=crlf
 *.{bat,[bB][aA][tT]} text eol=crlf
-
 *.rtm filter=lfs diff=lfs merge=lfs -text
 *.pdf filter=lfs diff=lfs merge=lfs -text
 *.png filter=lfs diff=lfs merge=lfs -text
@@ -11,3 +10,8 @@
 *.ttf filter=lfs diff=lfs merge=lfs -text
 *.afdesign filter=lfs diff=lfs merge=lfs -text
 *.afphoto filter=lfs diff=lfs merge=lfs -text
+benches/benchmark_data/boxes.txt filter=lfs diff=lfs merge=lfs -text
+benches/benchmark_data/output_34x60x30.txt filter=lfs diff=lfs merge=lfs -text
+benches/benchmark_data/output_68x120x30.txt filter=lfs diff=lfs merge=lfs -text
+benches/benchmark_data/scores.txt filter=lfs diff=lfs merge=lfs -text
+benches/benchmark_data/config.yaml filter=lfs diff=lfs merge=lfs -text

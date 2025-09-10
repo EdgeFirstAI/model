@@ -1,10 +1,11 @@
 use edgefirst_model::{
     model::{
-        DataType, Decoder, DetectBox, Detection, decode_detection_outputs, fast_sigmoid,
+        DataType, Decoder, DetectBox, Detection, decode_model_pack_detection_outputs, fast_sigmoid,
         fast_sigmoid2, sigmoid,
     },
     nms::{decode_boxes, decode_boxes_and_nms, nms},
 };
+use ndarray::Array2;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 
@@ -93,30 +94,28 @@ fn full_decode_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let details = vec![
+    let details = [
         Detection {
-            anchors: vec![
+            anchors: Some(vec![
                 [0.008593750186264515, 0.009722222574055195],
                 [0.01614583283662796, 0.016203703358769417],
                 [0.03828125074505806, 0.03333333507180214],
-            ],
+            ]),
             decode: true,
             decoder: Decoder::ModelPack,
             dtype: DataType::Int8,
-            name: "test".to_string(),
             quantization: None,
             shape: vec![34, 60, 30],
         },
         Detection {
-            anchors: vec![
+            anchors: Some(vec![
                 [0.0018229166744276881, 0.002314814832061529],
                 [0.0036458333488553762, 0.004166666883975267],
                 [0.0054687499068677425, 0.006018518470227718],
-            ],
+            ]),
             decode: true,
             decoder: Decoder::ModelPack,
             dtype: DataType::Int8,
-            name: "test".to_string(),
             quantization: None,
             shape: vec![68, 120, 30],
         },
@@ -125,9 +124,17 @@ fn full_decode_benchmark(bencher: divan::Bencher) {
     bencher
         .with_inputs(|| vec![output1.clone(), output2.clone()])
         .bench_local_values(|outputs| {
-            let (boxes, scores, nc) = decode_detection_outputs(outputs, &d);
+            let (boxes, scores) = decode_model_pack_detection_outputs(outputs, &d);
             let mut output_boxes = vec![DetectBox::default(); 50];
-            decode_boxes_and_nms(0.5, 0.1, &scores, &boxes, nc, &mut output_boxes, true);
+            decode_boxes_and_nms(
+                0.5,
+                0.1,
+                scores.view(),
+                boxes.view(),
+                None,
+                &mut output_boxes,
+                true,
+            );
         });
 }
 
@@ -142,30 +149,28 @@ fn decode_tensors_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let details = vec![
+    let details = [
         Detection {
-            anchors: vec![
+            anchors: Some(vec![
                 [0.008593750186264515, 0.009722222574055195],
                 [0.01614583283662796, 0.016203703358769417],
                 [0.03828125074505806, 0.03333333507180214],
-            ],
+            ]),
             decode: true,
             decoder: Decoder::ModelPack,
             dtype: DataType::Int8,
-            name: "test".to_string(),
             quantization: None,
             shape: vec![34, 60, 30],
         },
         Detection {
-            anchors: vec![
+            anchors: Some(vec![
                 [0.0018229166744276881, 0.002314814832061529],
                 [0.0036458333488553762, 0.004166666883975267],
                 [0.0054687499068677425, 0.006018518470227718],
-            ],
+            ]),
             decode: true,
             decoder: Decoder::ModelPack,
             dtype: DataType::Int8,
-            name: "test".to_string(),
             quantization: None,
             shape: vec![68, 120, 30],
         },
@@ -174,7 +179,7 @@ fn decode_tensors_benchmark(bencher: divan::Bencher) {
     bencher
         .with_inputs(|| vec![output1.clone(), output2.clone()])
         .bench_local_values(|outputs| {
-            let (_boxes, _scores, _nc) = decode_detection_outputs(outputs, &d);
+            let (_boxes, _scores) = decode_model_pack_detection_outputs(outputs, &d);
         });
 }
 
@@ -184,13 +189,14 @@ fn decode_boxes_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-
+    let boxes = Array2::from_shape_vec((boxes.len() / 4, 4), boxes).unwrap();
     let scores = include_str!("benchmark_data/scores.txt")
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
+    let scores = Array2::from_shape_vec((scores.len() / 5, 5), scores).unwrap();
     bencher.bench_local(|| {
-        let _ = decode_boxes(0.05, &scores, &boxes, 5);
+        let _ = decode_boxes(0.05, scores.view(), boxes.view(), None);
     });
 }
 
@@ -200,12 +206,13 @@ fn nms_no_class_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-
+    let boxes = Array2::from_shape_vec((boxes.len() / 4, 4), boxes).unwrap();
     let scores = include_str!("benchmark_data/scores.txt")
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let boxes = decode_boxes(0.0001, &scores, &boxes, 5);
+    let scores = Array2::from_shape_vec((scores.len() / 5, 5), scores).unwrap();
+    let boxes = decode_boxes(0.0001, scores.view(), boxes.view(), None);
     bencher
         .with_inputs(|| boxes.clone())
         .bench_local_values(|boxes| {
@@ -219,12 +226,13 @@ fn nms_with_class_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-
+    let boxes = Array2::from_shape_vec((boxes.len() / 4, 4), boxes).unwrap();
     let scores = include_str!("benchmark_data/scores.txt")
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let boxes = decode_boxes(0.0001, &scores, &boxes, 5);
+    let scores = Array2::from_shape_vec((scores.len() / 5, 5), scores).unwrap();
+    let boxes = decode_boxes(0.0001, scores.view(), boxes.view(), None);
 
     bencher
         .with_inputs(|| boxes.clone())
@@ -239,14 +247,23 @@ fn decodes_nms_benchmark(bencher: divan::Bencher) {
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-
+    let boxes = Array2::from_shape_vec((boxes.len() / 4, 4), boxes).unwrap();
     let scores = include_str!("benchmark_data/scores.txt")
         .lines()
         .flat_map(|x| x.split_whitespace().map(|y| y.parse::<f32>().unwrap()))
         .collect::<Vec<_>>();
-    let mut output_boxes = [DetectBox::default(); 500];
+    let scores = Array2::from_shape_vec((scores.len() / 5, 5), scores).unwrap();
+    let mut output_boxes = Vec::with_capacity(100);
     bencher.bench_local(|| {
-        let _ = decode_boxes_and_nms(0.1, 0.1, &scores, &boxes, 5, &mut output_boxes, false);
+        decode_boxes_and_nms(
+            0.1,
+            0.1,
+            scores.view(),
+            boxes.view(),
+            None,
+            &mut output_boxes,
+            false,
+        );
     });
 }
 

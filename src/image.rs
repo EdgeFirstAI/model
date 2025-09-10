@@ -48,14 +48,6 @@ pub struct G2DBuffer<'a> {
 
 #[allow(dead_code)]
 impl G2DBuffer<'_> {
-    pub unsafe fn buf_handle(&self) -> *mut c_void {
-        unsafe { (*self.buf).buf_handle }
-    }
-
-    pub unsafe fn buf_vaddr(&self) -> *mut c_void {
-        unsafe { (*self.buf).buf_vaddr }
-    }
-
     pub fn buf_paddr(&self) -> i32 {
         unsafe { (*self.buf).buf_paddr }
     }

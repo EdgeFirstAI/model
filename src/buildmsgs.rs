@@ -209,6 +209,59 @@ pub fn build_segmentation_msg(
     }
 }
 
+#[instrument(skip_all)]
+pub fn build_instance_segmentation_msg(
+    _in_time: Time,
+    model_ctx: Option<&SupportedModel>,
+    output_index: usize,
+) -> Mask {
+    let mut output_shape = vec![0, 0, 0, 0];
+    let mask = if let Some(model) = model_ctx {
+        match model.output_shape(output_index) {
+            Ok(v) => output_shape = v,
+            Err(e) => error!("Could not get output shape: {e:?}"),
+        }
+        let len = output_shape.iter().product();
+
+        let output_type = match model.output_type(output_index) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get output type: {e:?}");
+                DataType::UInt8
+            }
+        };
+
+        match output_type {
+            DataType::Int8 => {
+                let mut buffer = vec![0i8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!("Could not get output data from segmentation tensor: {e:?}");
+                }
+                buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
+            }
+            DataType::UInt8 => {
+                let mut buffer = vec![0u8; len];
+                if let Err(e) = model.output_data(output_index, &mut buffer) {
+                    error!("Could not get output data from segmentation tensor: {e:?}");
+                }
+                buffer
+            }
+            _ => todo!(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    Mask {
+        height: output_shape[1] as u32,
+        width: output_shape[2] as u32,
+        length: 1,
+        encoding: "".to_string(),
+        mask,
+        boxed: false,
+    }
+}
+
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     let ts: u128 = ts.into();
     Time {
