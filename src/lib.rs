@@ -12,7 +12,11 @@ pub mod tracker;
 #[cfg(feature = "rtm")]
 pub mod rtm_model;
 
-use crate::{buildmsgs::*, model::ModelErrorKind, tracker::*};
+use crate::{
+    buildmsgs::*,
+    model::{ConfigOutputs, ModelErrorKind},
+    tracker::*,
+};
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
@@ -348,51 +352,7 @@ pub fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
         && let Some(config) = &metadata.config
     {
         debug!("Metadata: {metadata:?}");
-        let mut model_type = ModelType {
-            segment_output_ind: None,
-            detection: false,
-            detection_with_mask: false,
-        };
-
-        for output in &config.outputs {
-            match output {
-                model::ConfigOutput::Detection(_)
-                | model::ConfigOutput::Boxes(_)
-                | model::ConfigOutput::Scores(_) => model_type.detection = true,
-                model::ConfigOutput::Segmentation(segmentation)
-                    if matches!(segmentation.decoder, model::Decoder::Yolov8) =>
-                {
-                    model_type.detection = true;
-                    model_type.detection_with_mask = true;
-                }
-                model::ConfigOutput::Segmentation(segmentation) => {
-                    // model_type.segment_output_ind = Some(segmentation.index)
-                    model_type.segment_output_ind = match (0..model.output_count()?).find_map(
-                        |index| {
-                            if model.output_shape(index).ok()? == segmentation.shape {
-                                Some(index)
-                            } else {
-                                None
-                            }
-                        },
-                    ) {
-                        Some(index) => Some(index),
-                        None => {
-                            return Err(ModelError::new(
-                                ModelErrorKind::Decoding,
-                                format!(
-                                    "Cannot find output with shape {:?} as specified in metadata",
-                                    segmentation.shape
-                                ),
-                            ));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        return Ok(model_type);
+        return identify_model_from_config(model, config);
     }
     let output_count = model.output_count()?;
     info!("output_count {output_count:?}");
@@ -436,6 +396,54 @@ pub fn identify_model<M: Model>(model: &M) -> Result<ModelType, ModelError> {
         info!("Model has detection output");
     }
 
+    Ok(model_type)
+}
+
+pub fn identify_model_from_config<M: Model>(
+    model: &M,
+    config: &ConfigOutputs,
+) -> Result<ModelType, ModelError> {
+    let mut model_type = ModelType {
+        segment_output_ind: None,
+        detection: false,
+        detection_with_mask: false,
+    };
+
+    for output in &config.outputs {
+        match output {
+            model::ConfigOutput::Detection(_)
+            | model::ConfigOutput::Boxes(_)
+            | model::ConfigOutput::Scores(_) => model_type.detection = true,
+            model::ConfigOutput::Segmentation(segmentation)
+                if matches!(segmentation.decoder, model::Decoder::Yolov8) =>
+            {
+                model_type.detection = true;
+                model_type.detection_with_mask = true;
+            }
+            model::ConfigOutput::Segmentation(segmentation) => {
+                // model_type.segment_output_ind = Some(segmentation.index)
+                model_type.segment_output_ind = match (0..model.output_count()?).find_map(|index| {
+                    if model.output_shape(index).ok()? == segmentation.shape {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                }) {
+                    Some(index) => Some(index),
+                    None => {
+                        return Err(ModelError::new(
+                            ModelErrorKind::Decoding,
+                            format!(
+                                "Cannot find output with shape {:?} as specified in metadata",
+                                segmentation.shape
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(model_type)
 }
 
