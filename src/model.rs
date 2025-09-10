@@ -425,7 +425,18 @@ pub fn decode_yolo_outputs_seg(
         Array2::from_shape_vec((boxes_detail.shape[1], boxes_detail.shape[2]), boxes_output)
             .unwrap();
 
-    let bboxes = boxes_output.slice(s![..4, ..]).to_owned().reversed_axes();
+    let bboxes = boxes_output.slice(s![..4, ..]).reversed_axes();
+    let mut xyxy = Vec::with_capacity(bboxes.len());
+    for xywh in bboxes.rows() {
+        assert_eq!(xywh.len(), 4);
+        let x = xywh[0];
+        let y = xywh[1];
+        let w = xywh[2];
+        let h = xywh[3];
+        xyxy.push([x - w * 0.5, y - h * 0.5, x + w * 0.5, y + h * 0.5]);
+    }
+    let bboxes = Array2::from(xyxy);
+
     let bscores = boxes_output
         .slice(s![4..(4 + nc), ..])
         .to_owned()
@@ -465,7 +476,17 @@ pub fn decode_yolo_outputs_det(
         Array2::from_shape_vec((boxes_detail.shape[1], boxes_detail.shape[2]), boxes_output)
             .unwrap();
 
-    let bboxes = boxes_output.slice(s![..4, ..]).to_owned().reversed_axes();
+    let bboxes = boxes_output.slice(s![..4, ..]).reversed_axes();
+    let mut xyxy = Vec::with_capacity(bboxes.len());
+    for xywh in bboxes.rows() {
+        assert_eq!(xywh.len(), 4);
+        let x = xywh[0];
+        let y = xywh[1];
+        let w = xywh[2];
+        let h = xywh[3];
+        xyxy.push([x - w * 0.5, y - h * 0.5, x + w * 0.5, y + h * 0.5]);
+    }
+    let bboxes = Array2::from(xyxy);
     let bscores = boxes_output.slice(s![4.., ..]).to_owned().reversed_axes();
 
     (bboxes, bscores)
