@@ -626,7 +626,7 @@ impl Model for TFLiteModel<'_> {
                 && let Some(score_ind) = score_ind
             {
                 let box_shape = self.output_shape(box_ind)?;
-                let box_shape = [box_shape[1], box_shape[2]];
+                let box_shape = [box_shape[1], box_shape[3]];
                 box_data =
                     Array2::from_shape_vec(box_shape, self.dequant_output(box_ind)?).unwrap();
                 let score_shape = self.output_shape(score_ind)?;
