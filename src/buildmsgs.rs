@@ -301,15 +301,13 @@ impl From<&BoxWithTrack> for DetectBox2D {
 #[instrument(skip_all)]
 pub fn build_detect_msg_and_encode(
     boxes: &[BoxWithTrack],
+    header: Header,
     in_time: Time,
     model_time: Time,
     curr_time: Time,
 ) -> (ZBytes, Encoding) {
     let detect = Detect {
-        header: Header {
-            stamp: in_time.clone(),
-            frame_id: String::new(),
-        },
+        header,
         input_timestamp: in_time,
         model_time,
         output_time: curr_time,

@@ -6,7 +6,7 @@ use edgefirst_model::{
         build_detect_msg_and_encode, build_image_annotations_msg_and_encode, build_model_info_msg,
         build_segmentation_msg, time_from_ns,
     },
-    get_curr_time, heart_beat, identify_model,
+    heart_beat, identify_model,
     image::ImageManager,
     masks::{mask_compress_thread, mask_thread},
     model::{self, DetectBox, Model, SupportedModel},
@@ -299,10 +299,13 @@ pub async fn main() -> ExitCode {
         };
         trace!("Recieved camera frame");
 
+        let input_start = Instant::now();
         match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw) {
             Ok(_) => trace!("Loaded frame into model"),
             Err(e) => error!("Could not load frame into model: {e:?}"),
         }
+        let input_duration = input_start.elapsed().as_nanos();
+        trace!("Load input: {:.3} ms", input_duration as f32 / 1_000_000.0);
 
         let model_start = Instant::now();
 
@@ -313,9 +316,24 @@ pub async fn main() -> ExitCode {
         let model_duration = model_start.elapsed().as_nanos();
         trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
 
+        let mut output_duration = Duration::from_nanos(0);
+
+        if let Some(i) = model_type.segment_output_ind {
+            let mask_start = Instant::now();
+            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
+            output_duration += mask_start.elapsed();
+            match mask_tx.send(masks).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error! {"Cannot send to mask publishing thread {e:?}"};
+                }
+            }
+        }
+
         if model_type.detection {
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
+            let boxes_start = Instant::now();
             let (new_boxes, _protos) = run_detection(
                 &mut model,
                 &model_labels,
@@ -324,6 +342,7 @@ pub async fn main() -> ExitCode {
                 timestamp,
                 &args,
             );
+            output_duration += boxes_start.elapsed();
             if first_run {
                 info!(
                     "Successfully recieved camera frames and run model, found {:?} boxes",
@@ -337,8 +356,6 @@ pub async fn main() -> ExitCode {
                     fps.update()
                 );
             }
-            let curr_time = get_curr_time();
-
             // let boxes: Vec<DetectBox2D> = new_boxes.iter().map(|b| b.into()).collect();
 
             // if model_type.detection_with_mask
@@ -366,10 +383,12 @@ pub async fn main() -> ExitCode {
 
             let (msg, enc) = build_detect_msg_and_encode(
                 &new_boxes,
-                dma_buf.header.stamp.clone(),
-                time_from_ns(model_duration as u32),
-                time_from_ns(curr_time as u32),
+                dma_buf.header.clone(),
+                time_from_ns(input_duration),
+                time_from_ns(model_duration),
+                time_from_ns(output_duration.as_nanos()),
             );
+
             match publ_detect.put(msg).encoding(enc).await {
                 Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
                 Err(e) => {
@@ -401,15 +420,6 @@ pub async fn main() -> ExitCode {
                             e
                         )
                     }
-                }
-            }
-        }
-        if let Some(i) = model_type.segment_output_ind {
-            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error! {"Cannot send to mask publishing thread {e:?}"};
                 }
             }
         }

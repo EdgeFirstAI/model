@@ -211,8 +211,6 @@ async fn heart_beat_loop(
 
     trace!("Opened DMA buffer from camera");
 
-    let curr_time = get_curr_time();
-
     let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
     let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&mask, Infinite).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
@@ -226,9 +224,10 @@ async fn heart_beat_loop(
 
     let (msg, enc) = build_detect_msg_and_encode(
         &Vec::new(),
-        dma_buf.header.stamp.clone(),
+        dma_buf.header.clone(),
         time_from_ns(0u32),
-        time_from_ns(curr_time),
+        time_from_ns(0u32),
+        time_from_ns(0u32),
     );
 
     match session.put(&args.detect_topic, msg).encoding(enc).await {
