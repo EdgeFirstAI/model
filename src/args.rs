@@ -39,6 +39,12 @@ pub struct Args {
     #[arg(short, long, env, required = true)]
     pub model: PathBuf,
 
+    /// edgefirst config file. Can be provided to override config in model, or
+    /// in the case where the model does not have a config file. Can be either a
+    /// YAML file (.yaml) or a JSON file (.json)
+    #[arg(long, env)]
+    pub edgefirst_config: Option<PathBuf>,
+
     /// configure the text annotation of the detected bounding boxes
     #[arg(long, env, default_value = "label", value_enum)]
     pub labels: LabelSetting,
