@@ -7,7 +7,7 @@ use edgefirst_model::{
         build_detect_msg_and_encode_, build_image_annotations_msg_and_encode_,
         build_model_info_msg, build_segmentation_msg_, time_from_ns,
     },
-    heart_beat, identify_model,
+    heart_beat,
     masks::{mask_compress_thread, mask_thread},
     model::{self, Model, SupportedModel, guess_model_config},
     tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib},
@@ -201,7 +201,6 @@ pub async fn main() -> ExitCode {
                 .track_update(args.track_update)
                 .build(),
         );
-    let mut ssd_model = false;
     if let Some(path) = args.edgefirst_config {
         let config = match std::fs::read_to_string(&path) {
             Ok(v) => v,
@@ -267,11 +266,22 @@ pub async fn main() -> ExitCode {
         };
 
         let config = guess_model_config(&output_shapes, &output_quants);
+        info!("Model has shape: {:?}", output_shapes);
         if let Some(cfg) = config {
+            info!(
+                "A config file was not provided. Guessed model config based on model shape: {:?}",
+                cfg,
+            );
+
             decoder_builder = decoder_builder.with_config(cfg);
-        } else if output_count == 4 && output_shapes[0].len() == 2 {
+        } else if output_count == 4 && args.ssd_model {
+            warn!(
+                "Could not guess model config, but enabling SSD model mode due to --ssd-model flag"
+            );
             decoder_builder = decoder_builder.with_config_custom();
-            ssd_model = true;
+        } else {
+            error!("Could not guess model config from output shapes: {output_shapes:?}");
+            return ExitCode::FAILURE;
         }
     }
 
@@ -294,17 +304,9 @@ pub async fn main() -> ExitCode {
         edgefirst_decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
         edgefirst_decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
         edgefirst_decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
-        edgefirst_decoder::configs::ModelType::Custom { .. } => (false, false, false),
+        edgefirst_decoder::configs::ModelType::Custom { .. } => (true, false, false),
     };
 
-    let model_type = match identify_model(&model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not identify model type: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-    info!("identified model type: {model_type:?}");
     drop(tx);
 
     let publ_model_info = session
@@ -361,8 +363,13 @@ pub async fn main() -> ExitCode {
         mask_compress_tx,
     ));
 
-    let mut model_info_msg =
-        build_model_info_msg(time_from_ns(0u32), Some(&model), &args.model, &model_type);
+    let mut model_info_msg = build_model_info_msg(
+        time_from_ns(0u32),
+        Some(&model),
+        &args.model,
+        has_box,
+        has_seg | _has_instance_seg,
+    );
     info!("built model_info_msg");
 
     let sub_camera = heartbeat.await.unwrap();
@@ -457,12 +464,17 @@ pub async fn main() -> ExitCode {
 
         let output_duration = output_start.elapsed();
 
+        if first_run {
+            info!("First run complete. Found {} boxes", output_boxes.len());
+            first_run = false;
+        }
+
         if has_seg {
             let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
             match mask_tx.send(masks).await {
                 Ok(_) => {}
                 Err(e) => {
-                    error! {"Cannot send to mask publishing thread {e:?}"};
+                    error!("Cannot send to mask publishing thread {e:?}");
                 }
             }
         }
@@ -527,6 +539,7 @@ pub async fn main() -> ExitCode {
                 )
             }
         }
+        fps.update();
 
         args.tracy.then(frame_mark);
     }

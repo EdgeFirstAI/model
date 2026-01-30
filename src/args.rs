@@ -127,6 +127,10 @@ pub struct Args {
                                              * processing on Vec. This allows us to parse "" as
                                              * Vec::new(). */
 
+    /// Enable SSD model mode when a different model config is not found
+    #[arg(long, env, hide_short_help = true)]
+    pub ssd_model: bool,
+
     // /// Application log level
     // #[arg(long, env, default_value = "info")]
     // pub rust_log: EnvFilter,

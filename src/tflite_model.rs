@@ -169,10 +169,10 @@ impl<'a> TFLiteModel<'a> {
         Ok(m)
     }
 
-    pub fn setup_context(&mut self, args: &Args) {}
+    pub fn setup_context(&mut self, _args: &Args) {}
 
     // Must have 4 output tensors, in order of boxes, classes, scores, num_det
-    fn ssd_decode_boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+    fn ssd_decode_boxes(&self, boxes: &mut Vec<DetectBox>) -> Result<(), ModelError> {
         let box_loc = self.outputs[0].mapro::<f32>()?;
         let classes = self.outputs[1].mapro::<f32>()?;
         let scores = self.outputs[2].mapro::<f32>()?;
@@ -199,12 +199,12 @@ impl<'a> TFLiteModel<'a> {
             score: scores[i],
             label: classes[i].round() as usize,
         }));
-        let num_det = (b.len()).min(boxes.len());
 
-        for (out, b) in boxes.iter_mut().zip(b) {
-            *out = b;
+        for b in b {
+            boxes.push(b);
         }
-        Ok(num_det)
+
+        Ok(())
     }
 
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
@@ -440,6 +440,17 @@ impl Model for TFLiteModel<'_> {
             }
         }
 
+        if matches!(
+            decoder.model_type(),
+            edgefirst_decoder::configs::ModelType::Custom {}
+        ) {
+            // attempt SSD decode
+            let mut boxes = Vec::with_capacity(output_boxes.capacity());
+            self.ssd_decode_boxes(&mut boxes)?;
+
+            return Ok(decoder.decode_custom(boxes, output_boxes)?);
+        }
+
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
             (false, true) => decoder
                 .decode_float(&outputs_float, output_boxes, output_masks)
@@ -454,7 +465,7 @@ impl Model for TFLiteModel<'_> {
                 log::error!("Fixed floating point and quantized outputs for decoder");
             }
         }
-        log::info!("Decoded boxes: {:?}", output_boxes);
+        log::trace!("Decoded boxes: {:?}", output_boxes);
         Ok(())
     }
 
@@ -497,25 +508,37 @@ impl Model for TFLiteModel<'_> {
             }
         }
 
+        if matches!(
+            decoder.model_type(),
+            edgefirst_decoder::configs::ModelType::Custom {}
+        ) {
+            // attempt SSD decode
+            let mut boxes = Vec::with_capacity(output_boxes.capacity());
+            self.ssd_decode_boxes(&mut boxes)?;
+
+            return Ok(decoder.decode_custom_tracked(
+                boxes,
+                output_boxes,
+                output_tracks,
+                timestamp,
+            )?);
+        }
+
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
-            (false, true) => decoder
-                .decode_float_tracked(
-                    &outputs_float,
-                    output_boxes,
-                    output_masks,
-                    output_tracks,
-                    timestamp,
-                )
-                .unwrap(),
-            (true, false) => decoder
-                .decode_quantized_tracked(
-                    &outputs_quant,
-                    output_boxes,
-                    output_masks,
-                    output_tracks,
-                    timestamp,
-                )
-                .unwrap(),
+            (false, true) => decoder.decode_float_tracked(
+                &outputs_float,
+                output_boxes,
+                output_masks,
+                output_tracks,
+                timestamp,
+            )?,
+            (true, false) => decoder.decode_quantized_tracked(
+                &outputs_quant,
+                output_boxes,
+                output_masks,
+                output_tracks,
+                timestamp,
+            )?,
             (false, false) => {
                 log::error!("No outputs for decoder");
             }
@@ -523,7 +546,7 @@ impl Model for TFLiteModel<'_> {
                 log::error!("Fixed floating point and quantized outputs for decoder");
             }
         }
-        log::info!("Decoded boxes tracked: {:?}", output_boxes);
+        log::trace!("Decoded boxes tracked: {:?}", output_boxes);
         Ok(())
     }
 

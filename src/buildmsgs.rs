@@ -16,7 +16,6 @@ use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{
-    ModelTypeActual,
     args::LabelSetting,
     model::{Model, SupportedModel},
 };
@@ -326,7 +325,10 @@ pub fn convert_boxes(
         center_y: (box_.bbox.ymax + box_.bbox.ymin) / 2.0,
         width: box_.bbox.xmax - box_.bbox.xmin,
         height: box_.bbox.ymax - box_.bbox.ymin,
-        label: labels[box_.label].clone(),
+        label: labels
+            .get(box_.label)
+            .cloned()
+            .unwrap_or_else(|| box_.label.to_string()),
         score: box_.score,
         distance: 0.0,
         speed: 0.0,
@@ -400,7 +402,8 @@ pub fn build_model_info_msg(
     in_time: Time,
     model_ctx: Option<&SupportedModel>,
     path: &Path,
-    model_type: &ModelTypeActual,
+    has_det: bool,
+    has_seg: bool,
 ) -> ModelInfo {
     let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
@@ -452,10 +455,10 @@ pub fn build_model_info_msg(
     };
     debug!("Model name = {model_name}");
     let mut model_types = Vec::new();
-    if model_type.segment_output_ind.is_some() {
+    if has_seg {
         model_types.push("Segmentation".to_string());
     }
-    if model_type.detection {
+    if has_det {
         model_types.push("Detection".to_string());
     }
     let (input_shape, input_type) = get_input_info(model_ctx);

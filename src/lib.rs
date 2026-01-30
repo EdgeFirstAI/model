@@ -16,22 +16,21 @@ use edgefirst_schemas::{
     self,
     edgefirst_msgs::{DmaBuf, ModelInfo},
 };
-use log::{error, info, trace, warn};
-use model::{Model, ModelError};
+use log::{error, trace, warn};
 use nix::{
     sys::time::TimeValLike,
-    time::{ClockId, clock_gettime},
+    time::{clock_gettime, ClockId},
 };
-use pidfd_getfd::{GetFdFlags, get_file_from_pidfd};
+use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{fs::File, os::fd::AsRawFd, time::Duration};
-use tokio::sync::mpsc::{Receiver, error::TryRecvError};
+use tokio::sync::mpsc::{error::TryRecvError, Receiver};
 
 use zenoh::{
-    Session,
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
     pubsub::Subscriber,
     sample::Sample,
+    Session,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -49,13 +48,9 @@ pub async fn heart_beat(
     stream_dims: (f64, f64),
 ) -> Subscriber<FifoChannelHandler<Sample>> {
     let model_path = args.model.clone();
-    let model_type = ModelTypeActual {
-        segment_output_ind: None,
-        detection: false,
-        detection_with_mask: false,
-    };
+
     let mut model_info_msg =
-        build_model_info_msg(time_from_ns(0u32), None, &model_path, &model_type);
+        build_model_info_msg(time_from_ns(0u32), None, &model_path, false, false);
     let status = format!("Loading Model: {}", model_path.to_string_lossy());
 
     loop {
@@ -225,59 +220,6 @@ pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuf) -> Result<File, std::io::E
     dma_buf.pid = std::process::id();
     dma_buf.fd = fd.as_raw_fd();
     Ok(fd)
-}
-
-pub fn identify_model<M: Model>(model: &M) -> Result<ModelTypeActual, ModelError> {
-    if model.input_count().is_ok_and(|f| f != 1) {
-        error!(
-            "Model has {} inputs but expected only 1",
-            model.input_count()?
-        );
-    }
-
-    let output_count = model.output_count()?;
-    info!("output_count {output_count:?}");
-    let mut segmentation_index = Vec::new();
-    let mut model_type = ModelTypeActual {
-        segment_output_ind: None,
-        detection: false,
-        detection_with_mask: false,
-    };
-    // first: check if segmentation -> segmentation if output has 4 dimensions and
-    // the W/H is greater than 8
-    // this criteria is wider than the current criteria for MPK segmentation, but
-    // still ensures that detection outputs won't be mistaken for segmentation
-    // output.
-    for i in 0..output_count {
-        let shape = model.output_shape(i)?;
-        info!("output_shape[{i}] {shape:?}");
-        if shape.len() != 4 {
-            continue;
-        }
-        if shape[1] < 8 {
-            continue;
-        }
-        if shape[2] < 8 {
-            continue;
-        }
-        info!("segmentation output shape: {shape:?}");
-        segmentation_index.push(i);
-    }
-    if segmentation_index.len() > 1 {
-        error!("Found more than 1 valid segmentation output tensors");
-    }
-    if !segmentation_index.is_empty() {
-        model_type.segment_output_ind = Some(segmentation_index[0]);
-        info!("Model has segmentation output");
-    }
-
-    // if there are any leftover outputs, assume it is a detection model `boxes`
-    if segmentation_index.len() < output_count {
-        model_type.detection = true;
-        info!("Model has detection output");
-    }
-
-    Ok(model_type)
 }
 
 // If the receiver is empty, waits for the next message, otherwise returns the

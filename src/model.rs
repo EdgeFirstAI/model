@@ -5,7 +5,7 @@ use std::{
 };
 
 use edgefirst_decoder::{
-    ConfigOutput, ConfigOutputs, Decoder,
+    ConfigOutput, ConfigOutputs,
     configs::{
         Boxes, DataType, DecoderType, Detection, DimName, Mask, MaskCoefficients, Protos, Scores,
         Segmentation,
@@ -15,12 +15,8 @@ use edgefirst_image::{ImageProcessor, TensorImage};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
 use edgefirst_tensor::{Tensor, TensorTrait};
 use enum_dispatch::enum_dispatch;
-use log::error;
-use ndarray::Dim;
-use serde::{Deserialize, Serialize};
 use tflitec_sys::TfLiteError;
 use tracing::instrument;
-use zenoh::Config;
 
 #[cfg(feature = "rtm")]
 use crate::rtm_model::RtmModel;
@@ -164,6 +160,15 @@ impl From<edgefirst_image::Error> for ModelError {
     }
 }
 
+impl From<edgefirst_decoder::DecoderError> for ModelError {
+    fn from(value: edgefirst_decoder::DecoderError) -> Self {
+        ModelError {
+            kind: ModelErrorKind::Decoding,
+            source: Box::from(value),
+        }
+    }
+}
+
 impl Error for ModelError {}
 
 impl ModelError {
@@ -241,9 +246,6 @@ pub(crate) fn dmabuf_to_tensor_image(
         None,
     )?;
 
-    log::info!("dma: {:?}", dma);
-    log::info!("tensor: {:?}", tensor);
-
     let fourcc = edgefirst_image::FourCharCode::from_array(dma.fourcc.to_le_bytes())
         .map_err(|e| ModelError::new(ModelErrorKind::Image, format!("Invalid FourCC code: {e}")))?;
     let img = TensorImage::from_tensor(tensor, fourcc)?;
@@ -287,14 +289,22 @@ pub fn guess_model_config(
         let quant1 = &output_quantization[1];
 
         if let Some(cfg) = guess_modelpack_detection([shape0, shape1], [quant0, quant1]) {
+            log::debug!("Guessed modelpack det with 2 outputs");
+            return Some(cfg);
+        }
+
+        if let Some(cfg) = guess_yolo_split_det([shape0, shape1], [quant0, quant1]) {
+            log::debug!("Guessed yolo split det with 2 outputs");
             return Some(cfg);
         }
 
         if let Some(cfg) = guess_yolo_segdet([shape0, shape1], [quant0, quant1]) {
+            log::debug!("Guessed yolo segdet with 2 outputs");
             return Some(cfg);
         }
 
         if let Some(cfg) = guess_modelpack_segmentation_2([shape0, shape1], [quant0, quant1]) {
+            log::debug!("Guessed modelpack seg with 2 outputs");
             return Some(cfg);
         }
     }
@@ -342,9 +352,9 @@ pub fn guess_model_config(
     None
 }
 
-fn guess_modelpack_segmentation<'a>(
+fn guess_modelpack_segmentation(
     shape: [&[usize]; 1],
-    quant: [&'a Option<(f32, i32)>; 1],
+    quant: [&Option<(f32, i32)>; 1],
 ) -> Option<ConfigOutputs> {
     // Modelpack segmentation has one output with NC (num classes) , and
     // the width and height are greater than 160
@@ -383,9 +393,9 @@ fn guess_modelpack_segmentation<'a>(
     None
 }
 
-fn guess_yolo_detection<'a>(
+fn guess_yolo_detection(
     shape: [&[usize]; 1],
-    quant: [&'a Option<(f32, i32)>; 1],
+    quant: [&Option<(f32, i32)>; 1],
 ) -> Option<ConfigOutputs> {
     // Modelpack segmentation has one output with NC (num classes) , and
     // the width and height are greater than 160
@@ -425,9 +435,9 @@ fn guess_yolo_detection<'a>(
     })
 }
 
-fn guess_modelpack_detection<'a>(
+fn guess_modelpack_detection(
     shape: [&[usize]; 2],
-    quant: [&'a Option<(f32, i32)>; 2],
+    quant: [&Option<(f32, i32)>; 2],
 ) -> Option<ConfigOutputs> {
     // Modelpack detection has one output with 1/NB/1/4, where NB is number of boxes
     // Another output with 1/NB/NC, where NC is number of classes
@@ -539,18 +549,18 @@ fn guess_modelpack_segmentation_2(
     let width = width?;
 
     let mut dshape_segmentation: Vec<(DimName, usize)> = vec![(DimName::Batch, 1)];
-    let mut found_height = false;
+    let mut classes = 0;
     for &dim in &shape0[1..] {
         match dim {
             _ if dim == height => {
                 dshape_segmentation.push((DimName::Height, dim));
-                found_height = true;
             }
             _ if dim == width => {
                 dshape_segmentation.push((DimName::Width, dim));
             }
-            _ if dim > 1 => {
+            _ if classes == 0 => {
                 dshape_segmentation.push((DimName::NumClasses, dim));
+                classes = dim;
             }
             _ => return None,
         }
@@ -574,9 +584,9 @@ fn guess_modelpack_segmentation_2(
     })
 }
 
-fn guess_yolo_segdet<'a>(
+fn guess_yolo_segdet(
     shape: [&[usize]; 2],
-    quant: [&'a Option<(f32, i32)>; 2],
+    quant: [&Option<(f32, i32)>; 2],
 ) -> Option<ConfigOutputs> {
     // Yolo segmentation detection has one output with 1/NF/NB, where NB is number
     // of boxes Another output with 1/H/W/NP, where NC is number of protos
@@ -605,8 +615,8 @@ fn guess_yolo_segdet<'a>(
                 160.. if found_height => {
                     dshape_protos.push((DimName::Width, dim));
                 }
-                d if d == 0 => {
-                    dshape_protos.push((DimName::NumFeatures, d));
+                d if num_protos == 0 => {
+                    dshape_protos.push((DimName::NumProtos, d));
                     num_protos = d;
                 }
                 _ => return None,
@@ -639,8 +649,9 @@ fn guess_yolo_segdet<'a>(
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
             }),
-            ConfigOutput::Scores(Scores {
+            ConfigOutput::Detection(Detection {
                 decoder: DecoderType::Ultralytics,
+                anchors: None,
                 quantization: quant1,
                 shape: shape1.to_vec(),
                 dshape: dshape.1,
@@ -738,9 +749,9 @@ fn guess_yolo_split_det(
     })
 }
 
-fn guess_modelpack_segdet_3<'a>(
+fn guess_modelpack_segdet_3(
     shape: [&[usize]; 3],
-    quant: [&'a Option<(f32, i32)>; 3],
+    quant: [&Option<(f32, i32)>; 3],
 ) -> Option<ConfigOutputs> {
     // one output is 1/NB/NC
     // one output is 1/NB/1/4
@@ -847,9 +858,9 @@ fn guess_modelpack_segdet_3<'a>(
     })
 }
 
-fn guess_modelpack_segdet_4<'a>(
+fn guess_modelpack_segdet_4(
     shape: [&[usize]; 4],
-    quant: [&'a Option<(f32, i32)>; 4],
+    quant: [&Option<(f32, i32)>; 4],
 ) -> Option<ConfigOutputs> {
     // one output is 1/NB/NC
     // one output is 1/NB/1/4
@@ -984,9 +995,9 @@ fn guess_modelpack_segdet_4<'a>(
     })
 }
 
-fn guess_yolo_split_segdet<'a>(
+fn guess_yolo_split_segdet(
     shape: [&[usize]; 4],
-    quant: [&'a Option<(f32, i32)>; 4],
+    quant: [&Option<(f32, i32)>; 4],
 ) -> Option<ConfigOutputs> {
     // one output is 1/4/NB
     // one output is 1/H/W/NP
@@ -1014,7 +1025,7 @@ fn guess_yolo_split_segdet<'a>(
 
     let num_boxes = shape0[1..].iter().find(|&&d| d > MIN_NUM_BOXES).cloned()?;
 
-    // find shape with H/W/NP
+    // find shape with 1/H/W/NP
     if shape1.len() == 4 {
         // shape1 is protos
     } else if shape2.len() == 4 {

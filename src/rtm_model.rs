@@ -371,7 +371,7 @@ impl Model for RtmModel {
                 log::error!("Fixed floating point and quantized outputs for decoder");
             }
         }
-        log::info!("Decoded boxes: {:?}", output_boxes);
+        log::trace!("Decoded boxes: {:?}", output_boxes);
         Ok(())
     }
 
@@ -489,7 +489,7 @@ impl Model for RtmModel {
                 log::error!("Fixed floating point and quantized outputs for decoder");
             }
         }
-        log::info!("Decoded boxes tracked: {:?}", output_boxes);
+        log::trace!("Decoded boxes tracked: {:?}", output_boxes);
         Ok(())
     }
 
