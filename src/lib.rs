@@ -474,8 +474,8 @@ impl TryFrom<&DmaBuf> for Image {
     fn try_from(dma_buf: &DmaBuf) -> Result<Self, io::Error> {
         let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
         let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
-        let fourcc = dma_buf.fourcc.into();
-        // println!("src fourcc: {:?}", fourcc);
+        let fourcc = four_char_code::FourCharCode::from_array(dma_buf.fourcc.to_le_bytes())
+            .map_err(|e| io::Error::other(format!("invalid fourcc: {e}")))?;
         Ok(Image {
             fd: fd.into(),
             width: dma_buf.width,
