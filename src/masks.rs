@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use crate::drain_recv;
 use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::{self, edgefirst_msgs::Mask};

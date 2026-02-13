@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use crate::{
     args::Args,
     image::{Image, ImageManager, RGBX, Rotation},

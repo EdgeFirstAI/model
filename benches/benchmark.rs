@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use edgefirst_model::{
     model::{
         DataType, Decoder, DetectBox, Detection, decode_model_pack_detection_outputs, fast_sigmoid,

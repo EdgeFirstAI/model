@@ -1,9 +1,9 @@
 [package]
 name = "g2d-sys"
 description = "Low-level FFI bindings for the G2D Library"
-license = "AGPL-3.0"
-homepage = "https://support.deepviewml.com"
-keywords = ["deepview", "visionpack"]
+license = "Apache-2.0"
+homepage = "https://www.edgefirst.ai"
+keywords = ["edgefirst", "g2d", "nxp"]
 categories = ["computer-vision", "multimedia::video", "external-ffi-bindings"]
 version = "1.0.1"
 edition = "2021"

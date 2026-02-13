@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use crate::{
     metadata_schema_generated::tflite::root_as_model_metadata,
     schema_generated::tflite::root_as_model,

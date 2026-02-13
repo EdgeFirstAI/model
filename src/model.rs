@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
+
 use std::{error::Error, fmt};
 
 use crate::{BoxWithTrack, image::ImageManager, tflite_model::TFLiteModel};
