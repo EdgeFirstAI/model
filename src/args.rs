@@ -42,6 +42,12 @@ pub struct Args {
     #[arg(short, long, env, required = true)]
     pub model: PathBuf,
 
+    /// edgefirst config file. Can be provided to override config in model, or
+    /// in the case where the model does not have a config file. Can be either a
+    /// YAML file (.yaml) or a JSON file (.json)
+    #[arg(long, env)]
+    pub edgefirst_config: Option<PathBuf>,
+
     /// configure the text annotation of the detected bounding boxes
     #[arg(long, env, default_value = "label", value_enum)]
     pub labels: LabelSetting,
@@ -123,6 +129,10 @@ pub struct Args {
     pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
                                              * processing on Vec. This allows us to parse "" as
                                              * Vec::new(). */
+
+    /// Enable SSD model mode when a different model config is not found
+    #[arg(long, env, hide_short_help = true)]
+    pub ssd_model: bool,
 
     // /// Application log level
     // #[arg(long, env, default_value = "info")]

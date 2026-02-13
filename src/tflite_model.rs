@@ -3,18 +3,16 @@
 
 use crate::{
     args::Args,
-    image::{Image, ImageManager, RGBX, Rotation},
     model::{
-        ConfigOutput, ConfigOutputs, DataType, Decoder, DetectBox, Metadata, Model, ModelError,
-        ModelErrorKind, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET,
-        decode_model_pack_detection_outputs, decode_yolo_outputs_det, decode_yolo_outputs_seg,
-        dequant,
+        Metadata, Model, ModelError, Preprocessing, RGB_MEANS_IMAGENET, RGB_STDS_IMAGENET,
+        dmabuf_to_tensor_image,
     },
-    nms::{decode_boxes_and_nms, nms},
 };
+use edgefirst_decoder::{ArrayViewDQuantized, BoundingBox, DetectBox, configs::DataType};
+use edgefirst_image::{Crop, ImageProcessor, ImageProcessorTrait, RGBA, TensorImage};
 use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use edgefirst_tensor::{TensorMapTrait, TensorTrait};
 use log::error;
-use ndarray::{Array2, Array3};
 use std::{
     error::Error,
     io::{self, Read},
@@ -69,43 +67,38 @@ impl TFLiteLib {
     }
 }
 
-impl From<TensorType> for DataType {
-    fn from(value: TensorType) -> Self {
-        match value {
-            TensorType::UnknownType => DataType::Raw,
-            TensorType::NoType => DataType::Raw,
-            TensorType::Float32 => DataType::Float32,
-            TensorType::Int32 => DataType::Int32,
-            TensorType::UInt8 => DataType::UInt8,
-            TensorType::Int64 => DataType::Int64,
-            TensorType::String => DataType::String,
-            TensorType::Bool => DataType::Raw,
-            TensorType::Int16 => DataType::Int16,
-            TensorType::Complex64 => DataType::Raw,
-            TensorType::Int8 => DataType::Int8,
-            TensorType::Float16 => DataType::Float16,
-            TensorType::Float64 => DataType::Float64,
-            TensorType::Complex128 => DataType::Raw,
-            TensorType::UInt64 => DataType::UInt64,
-            TensorType::Resource => DataType::Raw,
-            TensorType::Variant => DataType::Raw,
-            TensorType::UInt32 => DataType::UInt32,
-            TensorType::UInt16 => DataType::UInt16,
-            TensorType::Int4 => DataType::Raw,
-            TensorType::BFloat16 => DataType::Raw,
-        }
+fn tensor_type_to_datatype(value: TensorType) -> DataType {
+    match value {
+        TensorType::UnknownType => DataType::Raw,
+        TensorType::NoType => DataType::Raw,
+        TensorType::Float32 => DataType::Float32,
+        TensorType::Int32 => DataType::Int32,
+        TensorType::UInt8 => DataType::UInt8,
+        TensorType::Int64 => DataType::Int64,
+        TensorType::String => DataType::String,
+        TensorType::Bool => DataType::Raw,
+        TensorType::Int16 => DataType::Int16,
+        TensorType::Complex64 => DataType::Raw,
+        TensorType::Int8 => DataType::Int8,
+        TensorType::Float16 => DataType::Float16,
+        TensorType::Float64 => DataType::Float64,
+        TensorType::Complex128 => DataType::Raw,
+        TensorType::UInt64 => DataType::UInt64,
+        TensorType::Resource => DataType::Raw,
+        TensorType::Variant => DataType::Raw,
+        TensorType::UInt32 => DataType::UInt32,
+        TensorType::UInt16 => DataType::UInt16,
+        TensorType::Int4 => DataType::Raw,
+        TensorType::BFloat16 => DataType::Raw,
     }
 }
 
 pub struct TFLiteModel<'a> {
     model: Interpreter<'a>,
-    img: Image,
+    img_: TensorImage,
     inputs: Vec<TensorMut<'a>>,
     outputs: Vec<Tensor<'a>>,
-    score_threshold: f32,
-    iou_threshold: f32,
     metadata: Metadata,
-    output_index: Vec<usize>,
     labels: Vec<String>,
 }
 
@@ -124,116 +117,6 @@ impl<'a> TFLiteModel<'a> {
             }
         };
         Ok(tensor.shape()?)
-    }
-
-    fn get_outputs_from_metadata(
-        &self,
-        config: &ConfigOutputs,
-    ) -> Result<(Array2<f32>, Array2<f32>), ModelError> {
-        let mut box_ind = None;
-        let mut score_ind = None;
-
-        let box_data;
-        let score_data;
-
-        let output_details = &config.outputs;
-        let mut output_tensors = vec![];
-        let mut detection_details = vec![];
-        let mut yolo_segmentation_outputs = vec![];
-        let mut yolo_segmentation_details = vec![];
-
-        let mut yolo_detect_outputs = None;
-        let mut yolo_detect_details = None;
-        for (details, output_index) in output_details.iter().zip(&self.output_index) {
-            match details {
-                ConfigOutput::Detection(detection)
-                    if matches!(detection.decoder, Decoder::ModelPack) =>
-                {
-                    output_tensors.push(self.dequant_output(*output_index)?);
-                    detection_details.push(detection);
-                }
-                ConfigOutput::Detection(detection)
-                    if matches!(detection.decoder, Decoder::Yolov8) =>
-                {
-                    yolo_detect_outputs = Some(self.dequant_output(*output_index)?);
-                    yolo_detect_details = Some(detection);
-                }
-                ConfigOutput::Scores(_) => {
-                    score_ind = Some(*output_index);
-                }
-                ConfigOutput::Boxes(_) => box_ind = Some(*output_index),
-                ConfigOutput::Segmentation(seg) if matches!(seg.decoder, Decoder::Yolov8) => {
-                    yolo_segmentation_outputs.push(self.dequant_output(*output_index)?);
-                    yolo_segmentation_details.push(seg);
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(score_ind) = score_ind
-            && let Some(box_ind) = box_ind
-        {
-            let box_shape = self.output_shape(box_ind)?;
-            let box_shape = [box_shape[1], box_shape[3]];
-            box_data = Array2::from_shape_vec(box_shape, self.dequant_output(box_ind)?).unwrap();
-            let score_shape = self.output_shape(score_ind)?;
-            let score_shape = [score_shape[1], score_shape[2]];
-            score_data =
-                Array2::from_shape_vec(score_shape, self.dequant_output(score_ind)?).unwrap();
-        } else if !detection_details.is_empty() {
-            (box_data, score_data) =
-                decode_model_pack_detection_outputs(output_tensors, &detection_details);
-        } else if !yolo_segmentation_outputs.is_empty() {
-            let (box_data_, score_data_, _mask_data, _protos) =
-                decode_yolo_outputs_seg(yolo_segmentation_outputs, &yolo_segmentation_details);
-            box_data = box_data_;
-            score_data = score_data_;
-            // mask_data = Some(_mask_data);
-            // protos = Some(_protos);
-        } else if let Some(output) = yolo_detect_outputs
-            && let Some(details) = yolo_detect_details
-        {
-            (box_data, score_data) = decode_yolo_outputs_det(output, details);
-        } else {
-            return Err(ModelError::new(
-                ModelErrorKind::Decoding,
-                "Cannot find detection outputs".to_string(),
-            ));
-        }
-        Ok((box_data, score_data))
-    }
-
-    fn populate_output_index_from_shape(&mut self) -> Result<(), ModelError> {
-        if let Some(config) = &mut self.metadata.config {
-            self.output_index = Vec::new();
-            for out in &mut config.outputs {
-                let config_shape = match out {
-                    ConfigOutput::Detection(config) => &config.shape,
-                    ConfigOutput::Mask(config) => &config.shape,
-                    ConfigOutput::Segmentation(config) => &config.shape,
-                    ConfigOutput::Scores(config) => &config.shape,
-                    ConfigOutput::Boxes(config) => &config.shape,
-                };
-                let out = self.outputs.iter().enumerate().find_map(|(i, tensor)| {
-                    if tensor.shape().ok()? == *config_shape {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                });
-                if let Some(i) = out {
-                    self.output_index.push(i);
-                } else {
-                    return Err(ModelError::new(
-                        ModelErrorKind::Decoding,
-                        format!(
-                            "Cannot find output with shape {config_shape:?} as specified in metadata"
-                        ),
-                    ));
-                }
-            }
-        }
-        Ok(())
     }
 
     pub fn new(model: Interpreter<'a>) -> Result<Self, Box<dyn Error>> {
@@ -275,96 +158,24 @@ impl<'a> TFLiteModel<'a> {
             }
         }
 
-        let img = Image::new(inp_shape[2] as u32, inp_shape[1] as u32, RGBX)?;
+        let img_ = TensorImage::new(inp_shape[2], inp_shape[1], RGBA, None)?;
         let mut m = TFLiteModel {
             model,
-            img,
+            img_,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            score_threshold: 0.5,
-            iou_threshold: 0.5,
             metadata: metadata.into(),
-            output_index: Vec::new(),
             labels,
         };
         m.init_tensors()?;
-        m.populate_output_index_from_shape()?;
         m.run_model()?;
         Ok(m)
     }
 
-    pub fn setup_context(&mut self, args: &Args) {
-        self.score_threshold = args.threshold;
-        self.iou_threshold = args.iou;
-    }
-
-    fn dequant_tensor_(
-        &self,
-        tensor: &Tensor,
-        scale: f32,
-        zero_point: f32,
-    ) -> Result<Vec<f32>, ModelError> {
-        let mut output = vec![0.0f32; tensor.volume()?];
-        match tensor.tensor_type().into() {
-            DataType::Raw => todo!(),
-            DataType::Int8 => {
-                let data: &[i8] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::UInt8 => {
-                let data: &[u8] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::Int16 => {
-                let data: &[i16] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::UInt16 => {
-                let data: &[u16] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::Float16 => todo!(),
-            DataType::Int32 => {
-                let data: &[i32] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::UInt32 => {
-                let data: &[u32] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::Float32 => todo!(),
-            DataType::Int64 => {
-                let data: &[i64] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::UInt64 => {
-                let data: &[u64] = tensor.mapro()?;
-                dequant(data, &mut output, scale, zero_point);
-            }
-            DataType::Float64 => todo!(),
-            DataType::String => todo!(),
-        }
-        Ok(output)
-    }
-
-    fn dequant_output(&self, index: usize) -> Result<Vec<f32>, ModelError> {
-        let tensor = match self.outputs.get(index) {
-            Some(v) => v,
-            None => {
-                let e = io::Error::other(format!(
-                    "Tried to access output tensor {index} of {}",
-                    self.inputs.len()
-                ))
-                .into();
-                return Err(e);
-            }
-        };
-        let quant = tensor.get_quantization_params();
-        self.dequant_tensor_(tensor, quant.scale, quant.zero_point as f32)
-    }
+    pub fn setup_context(&mut self, _args: &Args) {}
 
     // Must have 4 output tensors, in order of boxes, classes, scores, num_det
-    fn ssd_decode_boxes(&self, boxes: &mut [DetectBox]) -> Result<usize, ModelError> {
+    fn ssd_decode_boxes(&self, boxes: &mut Vec<DetectBox>) -> Result<(), ModelError> {
         let box_loc = self.outputs[0].mapro::<f32>()?;
         let classes = self.outputs[1].mapro::<f32>()?;
         let scores = self.outputs[2].mapro::<f32>()?;
@@ -382,21 +193,21 @@ impl<'a> TFLiteModel<'a> {
         assert_eq!(num_det.len(), 1, "num_det tensor isn't size of 1");
         let num_det = num_det[0].round() as usize;
         let b = Vec::from_iter((0..num_det).map(|i| DetectBox {
-            ymin: box_loc[i * 4],
-            xmin: box_loc[i * 4 + 1],
-            ymax: box_loc[i * 4 + 2],
-            xmax: box_loc[i * 4 + 3],
+            bbox: BoundingBox {
+                ymin: box_loc[i * 4],
+                xmin: box_loc[i * 4 + 1],
+                ymax: box_loc[i * 4 + 2],
+                xmax: box_loc[i * 4 + 3],
+            },
             score: scores[i],
             label: classes[i].round() as usize,
-            mask_coeff: None,
         }));
-        let b: Vec<DetectBox> = nms(self.iou_threshold, b, false);
-        let num_det = (b.len()).min(boxes.len());
 
-        for (out, b) in boxes.iter_mut().zip(b) {
-            *out = b;
+        for b in b {
+            boxes.push(b);
         }
-        Ok(num_det)
+
+        Ok(())
     }
 
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
@@ -410,16 +221,22 @@ impl<'a> TFLiteModel<'a> {
 
 impl Model for TFLiteModel<'_> {
     #[instrument(skip_all)]
-    fn load_frame_dmabuf(
+    fn load_frame_dmabuf_(
         &mut self,
         dmabuf: &DmaBuf,
-        img_mgr: &ImageManager,
+        img_proc: &mut ImageProcessor,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {
-        let image = dmabuf.try_into()?;
-        img_mgr.convert(&image, &self.img, None, Rotation::Rotation0)?;
-        let mut dest_mapped = self.img.mmap();
-        let data = dest_mapped.as_slice_mut();
+        let image = dmabuf_to_tensor_image(dmabuf)?;
+        img_proc.convert(
+            &image,
+            &mut self.img_,
+            edgefirst_image::Rotation::None,
+            edgefirst_image::Flip::None,
+            Crop::no_crop(),
+        )?;
+        let dest_mapped = self.img_.tensor().map()?;
+        let data = dest_mapped.as_slice();
         self.load_input(0, data, 4, preprocessing)?;
         Ok(())
     }
@@ -591,73 +408,152 @@ impl Model for TFLiteModel<'_> {
 
     #[instrument(skip_all)]
     fn decode_outputs(
-        &mut self,
-        boxes: &mut Vec<DetectBox>,
-        _protos: &mut Option<Array3<f32>>,
+        &self,
+        decoder: &edgefirst_decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
     ) -> Result<(), ModelError> {
-        if self.output_count()? == 4
-            && self.output_shape(3)?.len() == 1
-            && self.output_shape(3)?[0] == 1
-        {
-            self.ssd_decode_boxes(boxes)?;
-            return Ok(());
-        }
-
-        let box_data;
-        let score_data;
-        // let mut mask_data: Option<
-        //     ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 2]>>,
-        // > = None;
-        // let mut protos: Option<
-        //     ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 3]>>,
-        // > = None;
-
-        if let Some(config) = &self.metadata.config {
-            (box_data, score_data) = self.get_outputs_from_metadata(config)?;
-        } else {
-            let mut box_ind = None;
-            let mut score_ind = None;
-            for i in 0..self.output_count()? {
-                let shape = self.output_shape(i)?;
-                if shape.len() == 3 {
-                    score_ind = Some(i);
-                } else if shape.len() == 4 && shape[2] == 1 && shape[3] == 4 {
-                    box_ind = Some(i);
+        let mut outputs_quant = Vec::new();
+        let mut outputs_float = Vec::new();
+        for o in &self.outputs {
+            match o.tensor_type() {
+                TensorType::Float32 => {
+                    let data: &[f32] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    outputs_float.push(arr);
+                }
+                TensorType::UInt8 => {
+                    let data: &[u8] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    let arr: ArrayViewDQuantized = arr.into();
+                    outputs_quant.push(arr);
+                }
+                TensorType::Int8 => {
+                    let data: &[i8] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    let arr: ArrayViewDQuantized = arr.into();
+                    outputs_quant.push(arr);
+                }
+                _ => {
+                    log::warn!("Output of other type");
                 }
             }
-            if let Some(box_ind) = box_ind
-                && let Some(score_ind) = score_ind
-            {
-                let box_shape = self.output_shape(box_ind)?;
-                let box_shape = [box_shape[1], box_shape[3]];
-                box_data =
-                    Array2::from_shape_vec(box_shape, self.dequant_output(box_ind)?).unwrap();
-                let score_shape = self.output_shape(score_ind)?;
-                let score_shape = [score_shape[1], score_shape[2]];
-                score_data =
-                    Array2::from_shape_vec(score_shape, self.dequant_output(score_ind)?).unwrap();
-            } else {
-                return Err(ModelError::new(
-                    ModelErrorKind::Decoding,
-                    "Cannot find detection outputs".to_string(),
-                ));
-            }
         }
 
-        decode_boxes_and_nms(
-            self.score_threshold,
-            self.iou_threshold,
-            score_data.view(),
-            box_data.view(),
-            // mask_data.as_ref().map(|x| x.view()),
-            None,
-            boxes,
-            false,
-        );
+        if matches!(
+            decoder.model_type(),
+            edgefirst_decoder::configs::ModelType::Custom {}
+        ) {
+            // attempt SSD decode
+            let mut boxes = Vec::with_capacity(output_boxes.capacity());
+            self.ssd_decode_boxes(&mut boxes)?;
+
+            return Ok(decoder.decode_custom(boxes, output_boxes)?);
+        }
+
+        match (outputs_float.is_empty(), outputs_quant.is_empty()) {
+            (false, true) => decoder
+                .decode_float(&outputs_float, output_boxes, output_masks)
+                .unwrap(),
+            (true, false) => decoder
+                .decode_quantized(&outputs_quant, output_boxes, output_masks)
+                .unwrap(),
+            (false, false) => {
+                log::error!("No outputs for decoder");
+            }
+            (true, true) => {
+                log::error!("Fixed floating point and quantized outputs for decoder");
+            }
+        }
+        log::trace!("Decoded boxes: {:?}", output_boxes);
         Ok(())
     }
 
-    fn input_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {
+    #[instrument(skip_all)]
+    fn decode_outputs_tracked(
+        &self,
+        decoder: &mut edgefirst_decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
+        output_tracks: &mut Vec<edgefirst_tracker::TrackInfo<edgefirst_decoder::DetectBox>>,
+        timestamp: u64,
+    ) -> Result<(), ModelError> {
+        let mut outputs_quant = Vec::new();
+        let mut outputs_float = Vec::new();
+        for o in &self.outputs {
+            match o.tensor_type() {
+                TensorType::Float32 => {
+                    let data: &[f32] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    outputs_float.push(arr);
+                }
+                TensorType::UInt8 => {
+                    let data: &[u8] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    let arr: ArrayViewDQuantized = arr.into();
+                    outputs_quant.push(arr);
+                }
+                TensorType::Int8 => {
+                    let data: &[i8] = o.mapro()?;
+                    let shape = o.shape()?;
+                    let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                    let arr: ArrayViewDQuantized = arr.into();
+                    outputs_quant.push(arr);
+                }
+                _ => {
+                    log::warn!("Output of other type");
+                }
+            }
+        }
+
+        if matches!(
+            decoder.model_type(),
+            edgefirst_decoder::configs::ModelType::Custom {}
+        ) {
+            // attempt SSD decode
+            let mut boxes = Vec::with_capacity(output_boxes.capacity());
+            self.ssd_decode_boxes(&mut boxes)?;
+
+            return Ok(decoder.decode_custom_tracked(
+                boxes,
+                output_boxes,
+                output_tracks,
+                timestamp,
+            )?);
+        }
+
+        match (outputs_float.is_empty(), outputs_quant.is_empty()) {
+            (false, true) => decoder.decode_float_tracked(
+                &outputs_float,
+                output_boxes,
+                output_masks,
+                output_tracks,
+                timestamp,
+            )?,
+            (true, false) => decoder.decode_quantized_tracked(
+                &outputs_quant,
+                output_boxes,
+                output_masks,
+                output_tracks,
+                timestamp,
+            )?,
+            (false, false) => {
+                log::error!("No outputs for decoder");
+            }
+            (true, true) => {
+                log::error!("Fixed floating point and quantized outputs for decoder");
+            }
+        }
+        log::trace!("Decoded boxes tracked: {:?}", output_boxes);
+        Ok(())
+    }
+
+    fn input_type(&self, index: usize) -> Result<DataType, ModelError> {
         let tensor = match self.inputs.get(index) {
             Some(v) => v,
             None => {
@@ -669,10 +565,10 @@ impl Model for TFLiteModel<'_> {
                 return Err(e);
             }
         };
-        Ok(tensor.tensor_type().into())
+        Ok(tensor_type_to_datatype(tensor.tensor_type()))
     }
 
-    fn output_type(&self, index: usize) -> Result<crate::model::DataType, ModelError> {
+    fn output_type(&self, index: usize) -> Result<DataType, ModelError> {
         let tensor = match self.outputs.get(index) {
             Some(v) => v,
             None => {
@@ -684,7 +580,7 @@ impl Model for TFLiteModel<'_> {
                 return Err(e);
             }
         };
-        Ok(tensor.tensor_type().into())
+        Ok(tensor_type_to_datatype(tensor.tensor_type()))
     }
 
     fn labels(&self) -> Result<Vec<String>, ModelError> {
@@ -700,5 +596,19 @@ impl Model for TFLiteModel<'_> {
 
     fn get_model_metadata(&self) -> Result<Metadata, ModelError> {
         Ok(self.metadata.clone())
+    }
+
+    fn output_quantization(&self, index: usize) -> Result<Option<(f32, i32)>, ModelError> {
+        let quant = self
+            .outputs
+            .get(index)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "Tried to access output tensor {index} of {}",
+                    self.outputs.len()
+                ))
+            })?
+            .get_quantization_params();
+        Ok(Some((quant.scale, quant.zero_point)))
     }
 }

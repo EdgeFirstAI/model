@@ -3,20 +3,18 @@
 
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
+use edgefirst_decoder::DecoderBuilder;
 use edgefirst_model::{
     args::Args,
     buildmsgs::{
-        build_detect_msg_and_encode, build_image_annotations_msg_and_encode, build_model_info_msg,
-        build_segmentation_msg, time_from_ns,
+        build_detect_msg_and_encode_, build_image_annotations_msg_and_encode_,
+        build_model_info_msg, build_segmentation_msg_, time_from_ns,
     },
-    get_curr_time, heart_beat, identify_model,
-    image::ImageManager,
+    heart_beat,
     masks::{mask_compress_thread, mask_thread},
-    model::{self, DetectBox, Model, SupportedModel},
-    run_detection,
+    model::{self, Model, SupportedModel, guess_model_config},
     tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib},
-    tracker::ByteTrack,
-    wait_for_camera_frame,
+    update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
 use edgefirst_schemas::sensor_msgs::CameraInfo;
 use log::{error, info, trace, warn};
@@ -195,14 +193,123 @@ pub async fn main() -> ExitCode {
     };
     info!("Loaded model");
 
-    let model_type = match identify_model(&model) {
+    let mut decoder_builder = DecoderBuilder::new()
+        .with_score_threshold(args.threshold)
+        .with_iou_threshold(args.iou)
+        .with_tracker(
+            edgefirst_tracker::ByteTrackBuilder::new()
+                .track_extra_lifespan((args.track_extra_lifespan * 1_000_000_000.0) as u64)
+                .track_high_conf(args.track_high_conf)
+                .track_iou(args.track_iou)
+                .track_update(args.track_update)
+                .build(),
+        );
+    if let Some(path) = args.edgefirst_config {
+        let config = match std::fs::read_to_string(&path) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not read edgefirst config file: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+        match path.extension() {
+            Some(v) if v == "yaml" || v == "yml" => {
+                decoder_builder = decoder_builder.with_config_yaml_str(config);
+            }
+            Some(v) if v == "json" => {
+                decoder_builder = decoder_builder.with_config_json_str(config);
+            }
+            Some(v) => {
+                error!(
+                    "Unsupported edgefirst config file extension {}",
+                    v.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            None => {
+                error!("No edgefirst config file extension");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(yaml) = model.get_model_metadata().unwrap().config_yaml {
+        decoder_builder = decoder_builder.with_config_yaml_str(yaml);
+    } else {
+        warn!(
+            "No edgefirst config provided and none found in model metadata, guessing config based on model shape"
+        );
+        let output_count = match model.output_count() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get model output count: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let output_shapes: Result<Vec<Vec<usize>>, _> =
+            (0..output_count).map(|i| model.output_shape(i)).collect();
+
+        let output_shapes = match output_shapes {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get model output shapes: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let output_quants = (0..output_count)
+            .map(|i| model.output_quantization(i))
+            .collect::<Result<Vec<_>, _>>();
+
+        let output_quants = match output_quants {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get model output quantization: {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        let config = guess_model_config(&output_shapes, &output_quants);
+        info!("Model has shape: {:?}", output_shapes);
+        if let Some(cfg) = config {
+            info!(
+                "A config file was not provided. Guessed model config based on model shape: {:?}",
+                cfg,
+            );
+
+            decoder_builder = decoder_builder.with_config(cfg);
+        } else if output_count == 4 && args.ssd_model {
+            warn!(
+                "Could not guess model config, but enabling SSD model mode due to --ssd-model flag"
+            );
+            decoder_builder = decoder_builder.with_config_custom();
+        } else {
+            error!("Could not guess model config from output shapes: {output_shapes:?}");
+            return ExitCode::FAILURE;
+        }
+    }
+
+    let mut decoder = match decoder_builder.build() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not identify model type: {e:?}");
+            error!("Could not build decoder: {e:?}");
             return ExitCode::FAILURE;
         }
     };
-    info!("identified model type: {model_type:?}");
+
+    let model_type_ = decoder.model_type();
+    let (has_box, has_seg, _has_instance_seg) = match model_type_ {
+        edgefirst_decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
+        edgefirst_decoder::configs::ModelType::ModelPackSegDetSplit { .. } => (true, true, false),
+        edgefirst_decoder::configs::ModelType::ModelPackDet { .. } => (true, false, false),
+        edgefirst_decoder::configs::ModelType::ModelPackDetSplit { .. } => (true, false, false),
+        edgefirst_decoder::configs::ModelType::ModelPackSeg { .. } => (false, true, false),
+        edgefirst_decoder::configs::ModelType::YoloDet { .. } => (true, false, false),
+        edgefirst_decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
+        edgefirst_decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
+        edgefirst_decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
+        edgefirst_decoder::configs::ModelType::Custom { .. } => (true, false, false),
+    };
+
     drop(tx);
 
     let publ_model_info = session
@@ -259,8 +366,13 @@ pub async fn main() -> ExitCode {
         mask_compress_tx,
     ));
 
-    let mut model_info_msg =
-        build_model_info_msg(time_from_ns(0u32), Some(&model), &args.model, &model_type);
+    let mut model_info_msg = build_model_info_msg(
+        time_from_ns(0u32),
+        Some(&model),
+        &args.model,
+        has_box,
+        has_seg | _has_instance_seg,
+    );
     info!("built model_info_msg");
 
     let sub_camera = heartbeat.await.unwrap();
@@ -281,31 +393,49 @@ pub async fn main() -> ExitCode {
         }
     };
     info!("got model_labels {model_labels:?}");
-    let mut tracker = ByteTrack::new();
-    let mut detect_boxes: Vec<DetectBox> = vec![DetectBox::default(); args.max_boxes];
+
     let timeout = Duration::from_millis(100);
     let mut fps = edgefirst_model::fps::Fps::<90>::default();
 
-    let img_mgr = match ImageManager::new() {
+    let mut img_proc = match edgefirst_image::ImageProcessor::new() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open G2D: {e:?}");
+            error!("Could not open ImageProcessor: {e:?}");
             return ExitCode::FAILURE;
         }
     };
 
-    info!("Opened G2D with version {}", img_mgr.version());
-
+    let mut output_boxes = Vec::with_capacity(50);
+    let mut output_masks = Vec::with_capacity(50);
+    let mut output_tracks = Vec::with_capacity(50);
     loop {
-        let Some(dma_buf) = wait_for_camera_frame(&sub_camera, timeout) else {
+        let Some(mut dma_buf) = wait_for_camera_frame(&sub_camera, timeout) else {
             continue;
         };
         trace!("Recieved camera frame");
 
-        match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw) {
+        let input_start = Instant::now();
+        // the _fd needs to remain valid while `dma_buf`` is used
+        let _fd = match update_dmabuf_with_pidfd(&mut dma_buf) {
+            Ok(fd) => fd,
+            Err(e) => {
+                error!("Could not update dma_buf with pidfd. Are you running with sudo? {e:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        match model.load_frame_dmabuf_(&dma_buf, &mut img_proc, model::Preprocessing::Raw) {
             Ok(_) => trace!("Loaded frame into model"),
             Err(e) => error!("Could not load frame into model: {e:?}"),
         }
+
+        // match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw)
+        // {     Ok(_) => trace!("Loaded frame into model"),
+        //     Err(e) => error!("Could not load frame into model: {e:?}"),
+        // }
+
+        let input_duration = input_start.elapsed().as_nanos();
+        trace!("Load input: {:.3} ms", input_duration as f32 / 1_000_000.0);
 
         let model_start = Instant::now();
 
@@ -315,64 +445,54 @@ pub async fn main() -> ExitCode {
         }
         let model_duration = model_start.elapsed().as_nanos();
         trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
+        let output_start = Instant::now();
 
-        if model_type.detection {
-            let timestamp = dma_buf.header.stamp.nanosec as u64
-                + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            let (new_boxes, _protos) = run_detection(
-                &mut model,
-                &model_labels,
-                &mut detect_boxes,
-                &mut tracker,
-                timestamp,
-                &args,
-            );
-            if first_run {
-                info!(
-                    "Successfully recieved camera frames and run model, found {:?} boxes",
-                    new_boxes.len()
-                );
-                first_run = false;
-            } else {
-                trace!(
-                    "Detected {:?} boxes. FPS: {}",
-                    new_boxes.len(),
-                    fps.update()
-                );
+        let res = if args.track {
+            model.decode_outputs_tracked(
+                &mut decoder,
+                &mut output_boxes,
+                &mut output_masks,
+                &mut output_tracks,
+                dma_buf.header.stamp.nanosec as u64
+                    + dma_buf.header.stamp.sec as u64 * 1_000_000_000,
+            )
+        } else {
+            model.decode_outputs(&decoder, &mut output_boxes, &mut output_masks)
+        };
+
+        if let Err(e) = res {
+            error!("Failed to decode model outputs: {e:?}");
+            return ExitCode::FAILURE;
+        }
+
+        let output_duration = output_start.elapsed();
+
+        if first_run {
+            info!("First run complete. Found {} boxes", output_boxes.len());
+            first_run = false;
+        }
+
+        if has_seg {
+            let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
+            match mask_tx.send(masks).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Cannot send to mask publishing thread {e:?}");
+                }
             }
-            let curr_time = get_curr_time();
+        }
 
-            // let boxes: Vec<DetectBox2D> = new_boxes.iter().map(|b| b.into()).collect();
-
-            // if model_type.detection_with_mask
-            //     && let Some(protos) = _protos
-            // {
-            //     new_boxes.sort_by_key(|a| {
-            //         if let Some(track) = a.track {
-            //             track.last_updated
-            //         } else {
-            //             a.ts
-            //         }
-            //     });
-            // let masks = decode_masks(&new_boxes, protos.view());
-            // let masks = masks.into_iter().filter_map(|x| {
-            //     x.map(|v| Mask {
-            //         height: v.0.shape()[0] as u32,
-            //         width: v.0.shape()[1] as u32,
-            //         length: 1,
-            //         encoding: "".to_string(),
-            //         mask: v.0.into_raw_vec_and_offset().0,
-            //         boxed: true,
-            //     })
-            // });
-            // }
-
-            let (msg, enc) = build_detect_msg_and_encode(
-                &new_boxes,
-                dma_buf.header.stamp.clone(),
-                time_from_ns(model_duration as u32),
-                time_from_ns(curr_time as u32),
+        if has_box {
+            let (msg, enc) = build_detect_msg_and_encode_(
+                &output_boxes,
+                &output_tracks,
+                &model_labels,
+                dma_buf.header.clone(),
+                time_from_ns(input_duration),
+                time_from_ns(model_duration),
+                time_from_ns(output_duration.as_nanos()),
             );
+
             match publ_detect.put(msg).encoding(enc).await {
                 Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
                 Err(e) => {
@@ -383,36 +503,27 @@ pub async fn main() -> ExitCode {
                     )
                 }
             }
-
-            if publ_visual.is_some() {
-                let publ_visual = publ_visual.as_ref().unwrap();
-                let (msg, enc) = build_image_annotations_msg_and_encode(
-                    &new_boxes,
-                    dma_buf.header.stamp.clone(),
-                    stream_width,
-                    stream_height,
-                    &model_name,
-                    args.labels,
-                );
-
-                match publ_visual.put(msg).encoding(enc).await {
-                    Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
-                    Err(e) => {
-                        error!(
-                            "Error sending message on {}: {:?}",
-                            publ_detect.key_expr(),
-                            e
-                        )
-                    }
-                }
-            }
         }
-        if let Some(i) = model_type.segment_output_ind {
-            let masks = build_segmentation_msg(dma_buf.header.stamp.clone(), Some(&model), i);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
+
+        if has_box && let Some(publ_visual) = publ_visual.as_ref() {
+            let (msg, enc) = build_image_annotations_msg_and_encode_(
+                &output_boxes,
+                &output_tracks,
+                &model_labels,
+                dma_buf.header.stamp.clone(),
+                (stream_width, stream_height),
+                &model_name,
+                args.labels,
+            );
+
+            match publ_visual.put(msg).encoding(enc).await {
+                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
                 Err(e) => {
-                    error! {"Cannot send to mask publishing thread {e:?}"};
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
                 }
             }
         }
@@ -431,6 +542,7 @@ pub async fn main() -> ExitCode {
                 )
             }
         }
+        fps.update();
 
         args.tracy.then(frame_mark);
     }

@@ -2,6 +2,7 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 use cdr::{CdrLe, Infinite};
+use edgefirst_decoder::DetectBox;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::{Detect, DetectBox2D, DetectTrack, Mask, ModelInfo, model_info},
@@ -18,10 +19,10 @@ use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{
-    BoxWithTrack, ModelType,
     args::LabelSetting,
-    model::{DataType, Model, SupportedModel},
+    model::{Model, SupportedModel},
 };
+use edgefirst_decoder::configs::DataType;
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -51,14 +52,16 @@ fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
     }
 }
 
-pub fn build_image_annotations_msg_and_encode(
-    boxes: &[BoxWithTrack],
+pub fn build_image_annotations_msg_and_encode_(
+    boxes: &[edgefirst_decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo<DetectBox>],
+    labels: &[String],
     timestamp: Time,
-    stream_width: f64,
-    stream_height: f64,
+    stream_dims: (f64, f64),
     text: &str,
-    labels: LabelSetting,
+    labels_setting: LabelSetting,
 ) -> (ZBytes, Encoding) {
+    let (stream_width, stream_height) = stream_dims;
     let mut annotations = FoxgloveImageAnnotations {
         circles: Vec::new(),
         points: Vec::new(),
@@ -90,28 +93,28 @@ pub fn build_image_annotations_msg_and_encode(
     annotations.points.push(empty_points);
     annotations.texts.push(empty_text);
 
-    for b in boxes.iter() {
-        let color = match &b.track {
+    for (i, b) in boxes.iter().enumerate() {
+        let color = match tracks.get(i) {
             None => WHITE.clone(),
             Some(track) => u128_to_foxglove_color(track.uuid.as_u128()),
         };
         let outline_colors = vec![color.clone(), color.clone(), color.clone(), color.clone()];
         let points = vec![
             FoxglovePoint2 {
-                x: b.xmin * stream_width,
-                y: b.ymin * stream_height,
+                x: b.bbox.xmin as f64 * stream_width,
+                y: b.bbox.ymin as f64 * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmax * stream_width,
-                y: b.ymin * stream_height,
+                x: b.bbox.xmax as f64 * stream_width,
+                y: b.bbox.ymin as f64 * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmax * stream_width,
-                y: b.ymax * stream_height,
+                x: b.bbox.xmax as f64 * stream_width,
+                y: b.bbox.ymax as f64 * stream_height,
             },
             FoxglovePoint2 {
-                x: b.xmin * stream_width,
-                y: b.ymax * stream_height,
+                x: b.bbox.xmin as f64 * stream_width,
+                y: b.bbox.ymax as f64 * stream_height,
             },
         ];
         let points = FoxglovePointAnnotations {
@@ -124,26 +127,29 @@ pub fn build_image_annotations_msg_and_encode(
             thickness: 2.0,
         };
 
-        match labels {
-            LabelSetting::Index => format!("{:.2}", b.index),
+        let text = match labels_setting {
+            LabelSetting::Index => format!("{:.2}", b.label),
             LabelSetting::Score => format!("{:.2}", b.score),
-            LabelSetting::Label => b.label.clone(),
+            LabelSetting::Label => labels[b.label].clone(),
             LabelSetting::LabelScore => {
                 format!("{} {:.2}", b.label, b.score)
             }
-            LabelSetting::Track => match &b.track {
-                None => format!("{:.2}", b.score),
-                // only shows first 8 characters of the UUID
-                Some(v) => v.uuid.to_string().split_at(8).0.to_owned(),
-            },
+            LabelSetting::Track => {
+                //     match &b.track {
+                //     None => format!("{:.2}", b.score),
+                //     // only shows first 8 characters of the UUID
+                //     Some(v) => v.uuid.to_string().split_at(8).0.to_owned(),
+                // },
+                format!("{:.2}", b.score)
+            }
         };
 
         let text = FoxgloveTextAnnotations {
             timestamp: timestamp.clone(),
-            text: b.label.clone(),
+            text,
             position: FoxglovePoint2 {
-                x: b.xmin * stream_width,
-                y: b.ymin * stream_height,
+                x: b.bbox.xmin as f64 * stream_width,
+                y: b.bbox.ymin as f64 * stream_height,
             },
             font_size: 0.02 * stream_width.max(stream_height),
             text_color: color.clone(),
@@ -213,6 +219,32 @@ pub fn build_segmentation_msg(
 }
 
 #[instrument(skip_all)]
+pub fn build_segmentation_msg_(
+    _in_time: Time,
+    output_masks: &[edgefirst_decoder::Segmentation],
+) -> Mask {
+    let (shape, mask) = if !output_masks.is_empty() {
+        let output_mask = &output_masks[0];
+        let shape = output_mask.segmentation.shape();
+        (
+            (shape[0], shape[1]),
+            output_mask.segmentation.flatten().to_vec(),
+        )
+    } else {
+        ((0, 0), Vec::new())
+    };
+
+    Mask {
+        height: shape.0 as u32,
+        width: shape.1 as u32,
+        length: 1,
+        encoding: "".to_string(),
+        mask,
+        boxed: false,
+    }
+}
+
+#[instrument(skip_all)]
 pub fn build_instance_segmentation_msg(
     _in_time: Time,
     model_ctx: Option<&SupportedModel>,
@@ -273,50 +305,60 @@ pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     }
 }
 
-impl From<&BoxWithTrack> for DetectBox2D {
-    fn from(box2d: &BoxWithTrack) -> Self {
-        let track = match &box2d.track {
-            Some(v) => DetectTrack {
-                id: v.uuid.to_string(),
-                lifetime: v.count,
-                created: time_from_ns(v.created),
-            },
-            None => DetectTrack {
-                id: String::from(""),
-                lifetime: 1,
-                created: time_from_ns(box2d.ts),
-            },
-        };
-        DetectBox2D {
-            center_x: ((box2d.xmax + box2d.xmin) / 2.0) as f32,
-            center_y: ((box2d.ymax + box2d.ymin) / 2.0) as f32,
-            width: (box2d.xmax - box2d.xmin) as f32,
-            height: (box2d.ymax - box2d.ymin) as f32,
-            label: box2d.label.clone(),
-            score: box2d.score as f32,
-            distance: 0.0,
-            speed: 0.0,
-            track,
-        }
+pub fn convert_boxes(
+    box_: &edgefirst_decoder::DetectBox,
+    track: Option<&edgefirst_tracker::TrackInfo<DetectBox>>,
+    labels: &[String],
+    ts: Time,
+) -> DetectBox2D {
+    let track = match track {
+        Some(v) => DetectTrack {
+            id: v.uuid.to_string(),
+            lifetime: v.count,
+            created: time_from_ns(v.created),
+        },
+        None => DetectTrack {
+            id: String::from(""),
+            lifetime: 1,
+            created: ts.clone(),
+        },
+    };
+    DetectBox2D {
+        center_x: (box_.bbox.xmax + box_.bbox.xmin) / 2.0,
+        center_y: (box_.bbox.ymax + box_.bbox.ymin) / 2.0,
+        width: box_.bbox.xmax - box_.bbox.xmin,
+        height: box_.bbox.ymax - box_.bbox.ymin,
+        label: labels
+            .get(box_.label)
+            .cloned()
+            .unwrap_or_else(|| box_.label.to_string()),
+        score: box_.score,
+        distance: 0.0,
+        speed: 0.0,
+        track,
     }
 }
 
 #[instrument(skip_all)]
-pub fn build_detect_msg_and_encode(
-    boxes: &[BoxWithTrack],
+pub fn build_detect_msg_and_encode_(
+    boxes: &[edgefirst_decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo<DetectBox>],
+    labels: &[String],
+    header: Header,
     in_time: Time,
     model_time: Time,
     curr_time: Time,
 ) -> (ZBytes, Encoding) {
     let detect = Detect {
-        header: Header {
-            stamp: in_time.clone(),
-            frame_id: String::new(),
-        },
+        header,
         input_timestamp: in_time,
         model_time,
-        output_time: curr_time,
-        boxes: boxes.iter().map(|b| b.into()).collect(),
+        output_time: curr_time.clone(),
+        boxes: boxes
+            .iter()
+            .enumerate()
+            .map(|(ind, b)| convert_boxes(b, tracks.get(ind), labels, curr_time.clone()))
+            .collect(),
     };
     let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&detect, Infinite).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
@@ -342,24 +384,6 @@ fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {
     }
 }
 
-// fn tensor_type_to_model_info_datatype(t: TensorType) -> u8 {
-//     match t {
-//         TensorType::RAW => model_info::RAW,
-//         TensorType::STR => model_info::STRING,
-//         TensorType::I8 => model_info::INT8,
-//         TensorType::U8 => model_info::UINT8,
-//         TensorType::I16 => model_info::INT16,
-//         TensorType::U16 => model_info::UINT16,
-//         TensorType::F16 => model_info::FLOAT16,
-//         TensorType::I32 => model_info::INT32,
-//         TensorType::U32 => model_info::UINT32,
-//         TensorType::F32 => model_info::FLOAT32,
-//         TensorType::I64 => model_info::INT64,
-//         TensorType::U64 => model_info::UINT64,
-//         TensorType::F64 => model_info::FLOAT64,
-//     }
-// }
-
 fn get_input_info(model_ctx: Option<&SupportedModel>) -> (Vec<u32>, u8) {
     let mut input_shape = vec![0, 0, 0, 0];
     let mut input_type = model_info::RAW;
@@ -381,7 +405,8 @@ pub fn build_model_info_msg(
     in_time: Time,
     model_ctx: Option<&SupportedModel>,
     path: &Path,
-    model_type: &ModelType,
+    has_det: bool,
+    has_seg: bool,
 ) -> ModelInfo {
     let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
@@ -433,10 +458,10 @@ pub fn build_model_info_msg(
     };
     debug!("Model name = {model_name}");
     let mut model_types = Vec::new();
-    if model_type.segment_output_ind.is_some() {
+    if has_seg {
         model_types.push("Segmentation".to_string());
     }
-    if model_type.detection {
+    if has_det {
         model_types.push("Detection".to_string());
     }
     let (input_shape, input_type) = get_input_info(model_ctx);
