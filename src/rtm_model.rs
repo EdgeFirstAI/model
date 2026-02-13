@@ -3,7 +3,7 @@
 
 use edgefirst_decoder::configs::DataType;
 use edgefirst_image::{Crop, ImageProcessor, ImageProcessorTrait, TensorImage};
-use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
 use edgefirst_tensor::{TensorMapTrait, TensorTrait};
 use log::trace;
 use ndarray::{ArrayView, ArrayViewD};

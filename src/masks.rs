@@ -2,8 +2,7 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 use crate::drain_recv;
-use cdr::{CdrLe, Infinite};
-use edgefirst_schemas::{self, edgefirst_msgs::Mask};
+use edgefirst_schemas::{self, edgefirst_msgs::Mask, schema_registry::SchemaType, serde_cdr};
 use log::{error, trace};
 use std::time::Instant;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -39,8 +38,8 @@ pub async fn mask_thread(
         }
 
         let (buf, enc) = info_span!("mask_publish").in_scope(|| {
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+            let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
             (buf, enc)
         });
         let publ = if let Some(mask_compress_tx) = mask_compress_tx.as_ref() {
@@ -83,8 +82,8 @@ pub async fn mask_compress_thread(
             );
             msg.encoding = "zstd".to_string();
 
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+            let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
 
             (buf, enc)
         });

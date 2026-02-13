@@ -71,12 +71,12 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-clippy-
 
       - name: Run Clippy (main crate)
-        run: cargo clippy -p edgefirst-model --all-targets -- -D warnings
+        run: cargo clippy -p edgefirst-model --no-deps --all-targets -- -D warnings
 
       - name: Generate Clippy report for SonarCloud
         run: |
           # Generate JSON report for SonarCloud (allow warnings for report generation)
-          cargo clippy -p edgefirst-model --all-targets --message-format=json 2>&1 \
+          cargo clippy -p edgefirst-model --no-deps --all-targets --message-format=json 2>&1 \
             | tee clippy-report.json || true
 
       - name: Upload Clippy report
@@ -138,7 +138,7 @@ jobs:
       - name: Run unit tests with coverage
         run: |
           # Run library unit tests with coverage
-          # Unit tests exist in: tracker.rs, kalman.rs, masks.rs, nms.rs
+          # Unit tests exist in: masks.rs
           cargo llvm-cov nextest --workspace --lib --lcov --output-path coverage.lcov
 
       - name: Upload coverage artifact

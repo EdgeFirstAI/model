@@ -10,7 +10,7 @@ use crate::{
 };
 use edgefirst_decoder::{ArrayViewDQuantized, BoundingBox, DetectBox, configs::DataType};
 use edgefirst_image::{Crop, ImageProcessor, ImageProcessorTrait, RGBA, TensorImage};
-use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use edgefirst_tensor::{TensorMapTrait, TensorTrait};
 use log::error;
 use std::{
@@ -223,7 +223,7 @@ impl Model for TFLiteModel<'_> {
     #[instrument(skip_all)]
     fn load_frame_dmabuf_(
         &mut self,
-        dmabuf: &DmaBuf,
+        dmabuf: &DmaBuffer,
         img_proc: &mut ImageProcessor,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError> {

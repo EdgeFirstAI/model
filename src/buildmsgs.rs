@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use cdr::{CdrLe, Infinite};
 use edgefirst_decoder::DetectBox;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{Detect, DetectBox2D, DetectTrack, Mask, ModelInfo, model_info},
+    edgefirst_msgs::{Box, Detect, Mask, ModelInfo, Track, model_info},
     foxglove_msgs::{
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
         FoxgloveTextAnnotations,
         point_annotation_type::{LINE_LOOP, UNKNOWN},
     },
+    schema_registry::SchemaType,
+    serde_cdr,
     std_msgs::Header,
 };
 use log::{debug, error};
@@ -159,7 +160,7 @@ pub fn build_image_annotations_msg_and_encode_(
         annotations.texts.push(text);
     }
 
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&annotations, Infinite).unwrap());
+    let msg = ZBytes::from(serde_cdr::serialize(&annotations).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/ImageAnnotations");
 
     (msg, enc)
@@ -310,20 +311,20 @@ pub fn convert_boxes(
     track: Option<&edgefirst_tracker::TrackInfo<DetectBox>>,
     labels: &[String],
     ts: Time,
-) -> DetectBox2D {
+) -> Box {
     let track = match track {
-        Some(v) => DetectTrack {
+        Some(v) => Track {
             id: v.uuid.to_string(),
             lifetime: v.count,
             created: time_from_ns(v.created),
         },
-        None => DetectTrack {
+        None => Track {
             id: String::from(""),
             lifetime: 1,
             created: ts.clone(),
         },
     };
-    DetectBox2D {
+    Box {
         center_x: (box_.bbox.xmax + box_.bbox.xmin) / 2.0,
         center_y: (box_.bbox.ymax + box_.bbox.ymin) / 2.0,
         width: box_.bbox.xmax - box_.bbox.xmin,
@@ -360,8 +361,8 @@ pub fn build_detect_msg_and_encode_(
             .map(|(ind, b)| convert_boxes(b, tracks.get(ind), labels, curr_time.clone()))
             .collect(),
     };
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&detect, Infinite).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
+    let msg = ZBytes::from(serde_cdr::serialize(&detect).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema(Detect::SCHEMA_NAME);
 
     (msg, enc)
 }

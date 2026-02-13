@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_decoder::DecoderBuilder;
 use edgefirst_model::{
@@ -16,7 +15,9 @@ use edgefirst_model::{
     tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib},
     update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
-use edgefirst_schemas::sensor_msgs::CameraInfo;
+use edgefirst_schemas::{
+    edgefirst_msgs::ModelInfo, schema_registry::SchemaType, sensor_msgs::CameraInfo, serde_cdr,
+};
 use log::{error, info, trace, warn};
 use std::{
     process::ExitCode,
@@ -78,7 +79,7 @@ pub async fn main() -> ExitCode {
         info!("Declared subscriber on {:?}", &args.camera_info_topic);
         match info_sub.recv_timeout(Duration::from_secs(10)) {
             Ok(v) => {
-                match cdr::deserialize::<CameraInfo>(&v.unwrap().payload().to_bytes()) {
+                match serde_cdr::deserialize::<CameraInfo>(&v.unwrap().payload().to_bytes()) {
                     Ok(v) => {
                         stream_width = v.width as f64;
                         stream_height = v.height as f64;
@@ -529,8 +530,8 @@ pub async fn main() -> ExitCode {
         }
 
         model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-        let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
+        let msg = ZBytes::from(serde_cdr::serialize(&model_info_msg).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema(ModelInfo::SCHEMA_NAME);
 
         match publ_model_info.put(msg).encoding(enc).await {
             Ok(_) => (),

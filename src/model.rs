@@ -15,7 +15,7 @@ use edgefirst_decoder::{
     },
 };
 use edgefirst_image::{ImageProcessor, TensorImage};
-use edgefirst_schemas::edgefirst_msgs::DmaBuf;
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use edgefirst_tensor::{Tensor, TensorTrait};
 use enum_dispatch::enum_dispatch;
 use tflitec_sys::TfLiteError;
@@ -189,7 +189,7 @@ pub trait Model {
 
     fn load_frame_dmabuf_(
         &mut self,
-        dmabuf: &DmaBuf,
+        dmabuf: &DmaBuffer,
         img_mgr: &mut ImageProcessor,
         preprocessing: Preprocessing,
     ) -> Result<(), ModelError>;
@@ -237,7 +237,7 @@ pub trait Model {
 use nix::libc::dup;
 #[instrument(skip_all)]
 pub(crate) fn dmabuf_to_tensor_image(
-    dma: &DmaBuf,
+    dma: &DmaBuffer,
 ) -> Result<edgefirst_image::TensorImage, ModelError> {
     let tensor = Tensor::from_fd(
         unsafe { OwnedFd::from_raw_fd(dup(dma.fd)) },

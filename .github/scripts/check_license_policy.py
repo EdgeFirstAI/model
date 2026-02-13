@@ -28,8 +28,7 @@ from typing import Set, List, Dict, Tuple
 
 # License overrides for dependencies with missing or incorrect metadata
 LICENSE_OVERRIDES = {
-    "dma-buf@0.4.0": "MIT",  # Confirmed from https://github.com/mripard/dma-buf
-    "dma-heap@0.4.1": "MIT"  # Confirmed from https://github.com/mripard/dma-heap
+    # No project-specific overrides needed at this time
 }
 
 # Proprietary licenses requiring conditional approval
@@ -74,6 +73,7 @@ ALLOWED_LICENSES: Set[str] = {
     "IJG",  # Independent JPEG Group License
     "Public Domain",  # Public Domain (various notations)
     "Public-Domain",
+    "bzip2-1.0.6",  # bzip2 license - permissive BSD-like (used by libbz2-rs-sys)
 }
 
 # Weak copyleft licenses requiring manual review

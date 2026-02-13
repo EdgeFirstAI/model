@@ -14,26 +14,27 @@ pub mod rtm_model;
 use crate::buildmsgs::*;
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
-use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::{
     self,
-    edgefirst_msgs::{DmaBuf, ModelInfo},
+    edgefirst_msgs::{DmaBuffer, Mask, ModelInfo},
+    schema_registry::SchemaType,
+    serde_cdr,
 };
 use log::{error, trace, warn};
 use nix::{
     sys::time::TimeValLike,
-    time::{clock_gettime, ClockId},
+    time::{ClockId, clock_gettime},
 };
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
+use pidfd_getfd::{GetFdFlags, get_file_from_pidfd};
 use std::{fs::File, os::fd::AsRawFd, time::Duration};
-use tokio::sync::mpsc::{error::TryRecvError, Receiver};
+use tokio::sync::mpsc::{Receiver, error::TryRecvError};
 
 use zenoh::{
+    Session,
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
     pubsub::Subscriber,
     sample::Sample,
-    Session,
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -94,8 +95,8 @@ async fn heart_beat_loop(
     trace!("Opened DMA buffer from camera");
 
     let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&mask, Infinite).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+    let msg = ZBytes::from(serde_cdr::serialize(&mask).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
 
     match session.put(&args.mask_topic, msg).encoding(enc).await {
         Ok(_) => (),
@@ -122,8 +123,8 @@ async fn heart_beat_loop(
     }
 
     model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&model_info_msg, Infinite).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
+    let msg = ZBytes::from(serde_cdr::serialize(&model_info_msg).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema(ModelInfo::SCHEMA_NAME);
 
     match session.put(&args.info_topic, msg).encoding(enc).await {
         Ok(_) => (),
@@ -165,7 +166,7 @@ pub fn get_curr_time() -> u64 {
 pub fn wait_for_camera_frame(
     sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
     timeout: Duration,
-) -> Option<DmaBuf> {
+) -> Option<DmaBuffer> {
     let dma_buf = if let Some(v) = sub_camera.drain().last() {
         v
     } else {
@@ -190,7 +191,7 @@ pub fn wait_for_camera_frame(
             }
         }
     };
-    match cdr::deserialize(&dma_buf.payload().to_bytes()) {
+    match serde_cdr::deserialize(&dma_buf.payload().to_bytes()) {
         Ok(v) => Some(v),
         Err(e) => {
             error!("Failed to deserialize message: {e:?}");
@@ -199,7 +200,7 @@ pub fn wait_for_camera_frame(
     }
 }
 
-pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuf) -> Result<File, std::io::Error> {
+pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuffer) -> Result<File, std::io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
         Ok(v) => v,
         Err(e) => {
