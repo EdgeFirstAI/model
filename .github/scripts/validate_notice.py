@@ -151,7 +151,7 @@ def parse_notice_file(notice_path: str) -> Set[str]:
         sys.exit(1)
 
     # Match patterns like: "  * package-name 1.2.3 (License)"
-    pattern = r'^\s*\*\s+(\S+)\s+([\d.]+(?:-[\w.]+)?)\s+\(.*?\)'
+    pattern = r'^\s*\*\s+(\S+)\s+([\d.]+(?:[-+][\w.]+)?)\s+\(.*?\)'
 
     # Also match proprietary entries: "  * NXP BSP - NXP Proprietary"
     proprietary_pattern = r'^\s*\*\s+(.+?)\s+-\s+.*Proprietary'

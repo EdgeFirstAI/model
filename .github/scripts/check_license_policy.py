@@ -28,7 +28,7 @@ from typing import Set, List, Dict, Tuple
 
 # License overrides for dependencies with missing or incorrect metadata
 LICENSE_OVERRIDES = {
-    # No project-specific overrides needed at this time
+    "dma-heap@0.4.1": "MIT",  # cargo-cyclonedx reports as "Unknown"
 }
 
 # Proprietary licenses requiring conditional approval
