@@ -182,4 +182,4 @@ jobs:
             release-assets/*
           draft: false
           prerelease: ${{ contains(needs.prepare-release.outputs.version, '-') }}
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
