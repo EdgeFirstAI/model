@@ -5,7 +5,7 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.6.0] - 2026-02-13
+## [2.6.0] - 2026-02-15
 
 ### Changed
 
@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive open-source documentation (README, CONTRIBUTING, ARCHITECTURE,
   SECURITY, TESTING, NOTICE, CHANGELOG)
 - SPDX license headers on all source files
-- CODE_OF_CONDUCT.md (Contributor Covenant v2.1)
+- CODE_OF_CONDUCT.md (Contributor Covenant v3.0)
 - Apache-2.0 LICENSE file
 - Support for YoloEndToEndDet and YoloEndToEndSegDet model types
 
