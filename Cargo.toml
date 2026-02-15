@@ -4,7 +4,7 @@ description = "EdgeFirst Model Node - AI inference service for EdgeFirst Percept
 repository = "https://github.com/EdgeFirstAI/model"
 homepage = "https://www.edgefirst.ai"
 license = "Apache-2.0"
-version = "2.6.0"
+version = "2.6.1"
 edition = "2024"
 
 [workspace]

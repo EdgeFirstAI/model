@@ -5,6 +5,15 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-02-15
+
+### Fixed
+
+- Contributor Covenant version reference corrected from v2.1 to v3.0 in CHANGELOG
+- Release date corrected to 2026-02-15
+- Release workflow now fails when build artifacts are missing
+- Removed redundant `workflow_call` trigger from build workflow
+
 ## [2.6.0] - 2026-02-15
 
 ### Changed
