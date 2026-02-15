@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use edgefirst_decoder::DetectBox;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::{Box, Detect, Mask, ModelInfo, Track, model_info},
@@ -23,7 +22,7 @@ use crate::{
     args::LabelSetting,
     model::{Model, SupportedModel},
 };
-use edgefirst_decoder::configs::DataType;
+use edgefirst_hal::decoder::configs::DataType;
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -54,8 +53,8 @@ fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
 }
 
 pub fn build_image_annotations_msg_and_encode_(
-    boxes: &[edgefirst_decoder::DetectBox],
-    tracks: &[edgefirst_tracker::TrackInfo<DetectBox>],
+    boxes: &[edgefirst_hal::decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo],
     labels: &[String],
     timestamp: Time,
     stream_dims: (f64, f64),
@@ -131,17 +130,16 @@ pub fn build_image_annotations_msg_and_encode_(
         let text = match labels_setting {
             LabelSetting::Index => format!("{:.2}", b.label),
             LabelSetting::Score => format!("{:.2}", b.score),
-            LabelSetting::Label => labels[b.label].clone(),
+            LabelSetting::Label => labels
+                .get(b.label)
+                .cloned()
+                .unwrap_or_else(|| b.label.to_string()),
             LabelSetting::LabelScore => {
                 format!("{} {:.2}", b.label, b.score)
             }
-            LabelSetting::Track => {
-                //     match &b.track {
-                //     None => format!("{:.2}", b.score),
-                //     // only shows first 8 characters of the UUID
-                //     Some(v) => v.uuid.to_string().split_at(8).0.to_owned(),
-                // },
-                format!("{:.2}", b.score)
+            LabelSetting::Track => match tracks.get(i) {
+                Some(track) => track.uuid.to_string()[..8].to_owned(),
+                None => format!("{:.2}", b.score),
             }
         };
 
@@ -222,7 +220,7 @@ pub fn build_segmentation_msg(
 #[instrument(skip_all)]
 pub fn build_segmentation_msg_(
     _in_time: Time,
-    output_masks: &[edgefirst_decoder::Segmentation],
+    output_masks: &[edgefirst_hal::decoder::Segmentation],
 ) -> Mask {
     let (shape, mask) = if !output_masks.is_empty() {
         let output_mask = &output_masks[0];
@@ -245,59 +243,6 @@ pub fn build_segmentation_msg_(
     }
 }
 
-#[instrument(skip_all)]
-pub fn build_instance_segmentation_msg(
-    _in_time: Time,
-    model_ctx: Option<&SupportedModel>,
-    output_index: usize,
-) -> Mask {
-    let mut output_shape = vec![0, 0, 0, 0];
-    let mask = if let Some(model) = model_ctx {
-        match model.output_shape(output_index) {
-            Ok(v) => output_shape = v,
-            Err(e) => error!("Could not get output shape: {e:?}"),
-        }
-        let len = output_shape.iter().product();
-
-        let output_type = match model.output_type(output_index) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get output type: {e:?}");
-                DataType::UInt8
-            }
-        };
-
-        match output_type {
-            DataType::Int8 => {
-                let mut buffer = vec![0i8; len];
-                if let Err(e) = model.output_data(output_index, &mut buffer) {
-                    error!("Could not get output data from segmentation tensor: {e:?}");
-                }
-                buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
-            }
-            DataType::UInt8 => {
-                let mut buffer = vec![0u8; len];
-                if let Err(e) = model.output_data(output_index, &mut buffer) {
-                    error!("Could not get output data from segmentation tensor: {e:?}");
-                }
-                buffer
-            }
-            _ => todo!(),
-        }
-    } else {
-        Vec::new()
-    };
-
-    Mask {
-        height: output_shape[1] as u32,
-        width: output_shape[2] as u32,
-        length: 1,
-        encoding: "".to_string(),
-        mask,
-        boxed: false,
-    }
-}
-
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     let ts: u128 = ts.into();
     Time {
@@ -307,8 +252,8 @@ pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
 }
 
 pub fn convert_boxes(
-    box_: &edgefirst_decoder::DetectBox,
-    track: Option<&edgefirst_tracker::TrackInfo<DetectBox>>,
+    box_: &edgefirst_hal::decoder::DetectBox,
+    track: Option<&edgefirst_tracker::TrackInfo>,
     labels: &[String],
     ts: Time,
 ) -> Box {
@@ -342,8 +287,8 @@ pub fn convert_boxes(
 
 #[instrument(skip_all)]
 pub fn build_detect_msg_and_encode_(
-    boxes: &[edgefirst_decoder::DetectBox],
-    tracks: &[edgefirst_tracker::TrackInfo<DetectBox>],
+    boxes: &[edgefirst_hal::decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo],
     labels: &[String],
     header: Header,
     in_time: Time,

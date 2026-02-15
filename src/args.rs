@@ -100,7 +100,7 @@ pub struct Args {
     #[arg(long, env, default_value = "0.25")]
     pub track_update: f32,
 
-    /// enable publising visualization message
+    /// enable publishing visualization message
     #[arg(long, env, action)]
     pub visualization: bool,
 
@@ -123,7 +123,7 @@ pub struct Args {
     pub mask_compression_level: i32,
 
     /// The classes that will be output in the mask. Leave empty to keep all
-    /// classes. Otherwise input the classes as space seperated integers.
+    /// classes. Otherwise input the classes as space separated integers.
     /// Classes with index too high will be ignored.
     #[arg(long, env, hide_short_help = true, value_parser=parse_classes, default_value="")]
     pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
@@ -156,6 +156,10 @@ pub struct Args {
     /// disable zenoh multicast scouting
     #[arg(long, env)]
     no_multicast_scouting: bool,
+
+    /// zenoh multicast scouting interface
+    #[arg(long, env)]
+    multicast_interface: Option<String>,
 }
 
 fn parse_classes(arg: &str) -> Result<Vec<usize>, std::num::ParseIntError> {
@@ -196,9 +200,11 @@ impl From<Args> for Config {
                 .unwrap();
         }
 
-        config
-            .insert_json5("scouting/multicast/interface", &json!("lo").to_string())
-            .unwrap();
+        if let Some(iface) = args.multicast_interface {
+            config
+                .insert_json5("scouting/multicast/interface", &json!(iface).to_string())
+                .unwrap();
+        }
 
         config
     }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use edgefirst_decoder::configs::DataType;
-use edgefirst_image::{Crop, ImageProcessor, ImageProcessorTrait, TensorImage};
+use edgefirst_hal::decoder::configs::DataType;
+use edgefirst_hal::image::{Crop, ImageProcessor, ImageProcessorTrait, TensorImage};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
-use edgefirst_tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
 use log::trace;
 use ndarray::{ArrayView, ArrayViewD};
 use std::{error::Error, io};
@@ -60,7 +60,7 @@ impl RtmModel {
         let img_ = TensorImage::new(
             inp_shape[2] as usize,
             inp_shape[1] as usize,
-            edgefirst_image::RGBA,
+            edgefirst_hal::image::RGBA,
             None,
         )?;
         let rtm_model = RtmModel { ctx, img_ };
@@ -109,8 +109,8 @@ impl Model for RtmModel {
         img_proc.convert(
             &image,
             &mut self.img_,
-            edgefirst_image::Rotation::None,
-            edgefirst_image::Flip::None,
+            edgefirst_hal::image::Rotation::None,
+            edgefirst_hal::image::Flip::None,
             Crop::no_crop(),
         )?;
         let dest_mapped = self.img_.tensor().map()?;
@@ -276,9 +276,9 @@ impl Model for RtmModel {
 
     fn decode_outputs(
         &self,
-        decoder: &edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
     ) -> Result<(), ModelError> {
         let mut outputs_quant = Vec::new();
         let mut outputs_float = Vec::new();
@@ -367,11 +367,11 @@ impl Model for RtmModel {
                     .decode_quantized(&array_views, output_boxes, output_masks)
                     .unwrap()
             }
-            (false, false) => {
+            (true, true) => {
                 log::error!("No outputs for decoder");
             }
-            (true, true) => {
-                log::error!("Fixed floating point and quantized outputs for decoder");
+            (false, false) => {
+                log::error!("Mixed floating point and quantized outputs for decoder");
             }
         }
         log::trace!("Decoded boxes: {:?}", output_boxes);
@@ -380,120 +380,14 @@ impl Model for RtmModel {
 
     fn decode_outputs_tracked(
         &self,
-        decoder: &mut edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
-        output_tracks: &mut Vec<edgefirst_tracker::TrackInfo<edgefirst_decoder::DetectBox>>,
-        timestamp: u64,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
+        _output_tracks: &mut Vec<edgefirst_tracker::TrackInfo>,
+        _timestamp: u64,
     ) -> Result<(), ModelError> {
-        let mut outputs_quant = Vec::new();
-        let mut outputs_float = Vec::new();
-        for ind in 0..self.output_count()? {
-            let o = match self.ctx.output_tensor(ind as i32) {
-                Some(v) => v,
-                None => {
-                    let e = io::Error::other(format!(
-                        "Tried to access output tensor {ind} of {}",
-                        model::outputs(self.ctx.model()?)?.len()
-                    ))
-                    .into();
-                    return Err(e);
-                }
-            };
-            match o.tensor_type() {
-                TensorType::F32 => {
-                    // let shape = o.shape().iter().map(|f| *f as usize).collect::<Vec<_>>();
-                    // let arr = ndarray::ArrayView::from_shape(shape, &data).unwrap();
-                    outputs_float.push(o);
-                }
-                TensorType::U8 => {
-                    // let shape = o.shape();
-                    // let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
-                    // let arr: ArrayViewDQuantized = arr.into();
-                    outputs_quant.push(o);
-                }
-                TensorType::I8 => {
-                    // let shape = o.shape();
-                    // let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
-                    // let arr: ArrayViewDQuantized = arr.into();
-                    outputs_quant.push(o);
-                }
-                _ => {
-                    log::warn!("Output of other type");
-                }
-            }
-        }
-
-        match (outputs_float.is_empty(), outputs_quant.is_empty()) {
-            (false, true) => {
-                let tensor_maps = outputs_float
-                    .iter()
-                    .map(|x| -> Result<_, ModelError> { Ok(x.mapro_f32()?) })
-                    .collect::<Result<Vec<TensorData<'_, f32>>, _>>()?;
-                let array_views = outputs_float
-                    .iter()
-                    .zip(tensor_maps.iter())
-                    .map(|(tensor, map)| {
-                        let shape = tensor
-                            .shape()
-                            .iter()
-                            .map(|x| *x as usize)
-                            .collect::<Vec<_>>();
-                        ArrayView::<f32, _>::from_shape(shape, map).unwrap()
-                    })
-                    .collect::<Vec<_>>();
-                decoder
-                    .decode_float_tracked(
-                        &array_views,
-                        output_boxes,
-                        output_masks,
-                        output_tracks,
-                        timestamp,
-                    )
-                    .unwrap()
-            }
-            (true, false) => {
-                let tensor_maps = outputs_quant
-                    .iter()
-                    .map(|x| -> Result<_, ModelError> {
-                        match x.tensor_type() {
-                            TensorType::U8 => Ok(x.mapro_u8()?.into()),
-                            TensorType::I8 => Ok(x.mapro_i8()?.into()),
-                            _ => Err(io::Error::other("Unexpected tensor type").into()),
-                        }
-                    })
-                    .collect::<Result<Vec<TensorDataHolderQuant<'_>>, _>>()?;
-                let array_views = outputs_quant
-                    .iter()
-                    .zip(tensor_maps.iter())
-                    .map(|(tensor, map)| {
-                        let shape = tensor
-                            .shape()
-                            .iter()
-                            .map(|x| *x as usize)
-                            .collect::<Vec<_>>();
-                        map.as_arrayview(&shape)
-                    })
-                    .collect::<Vec<_>>();
-                decoder
-                    .decode_quantized_tracked(
-                        &array_views,
-                        output_boxes,
-                        output_masks,
-                        output_tracks,
-                        timestamp,
-                    )
-                    .unwrap()
-            }
-            (false, false) => {
-                log::error!("No outputs for decoder");
-            }
-            (true, true) => {
-                log::error!("Fixed floating point and quantized outputs for decoder");
-            }
-        }
-        log::trace!("Decoded boxes tracked: {:?}", output_boxes);
-        Ok(())
+        // Tracking is handled separately by the caller; delegate to decode_outputs
+        self.decode_outputs(decoder, output_boxes, output_masks)
     }
 
     fn input_type(&self, index: usize) -> Result<DataType, ModelError> {
@@ -571,7 +465,7 @@ enum TensorDataHolderQuant<'a> {
 }
 
 impl<'a> TensorDataHolderQuant<'a> {
-    fn as_arrayview(&'a self, shape: &[usize]) -> edgefirst_decoder::ArrayViewDQuantized<'a> {
+    fn as_arrayview(&'a self, shape: &[usize]) -> edgefirst_hal::decoder::ArrayViewDQuantized<'a> {
         match self {
             TensorDataHolderQuant::TensorU8(arr) => {
                 ArrayViewD::<'a, u8>::from_shape(shape, arr).unwrap().into()

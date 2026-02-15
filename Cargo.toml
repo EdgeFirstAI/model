@@ -35,11 +35,10 @@ rtm = ["vaal"]
 [dependencies]
 async-pidfd = "0.1.4"
 clap = { version = "4.5.47", features = ["derive", "env"] }
-edgefirst-decoder = { git = "https://github.com/EdgeFirstAI/hal.git", branch = "EDGEAI-1022" }
-edgefirst-image = { git = "https://github.com/EdgeFirstAI/hal.git", branch = "EDGEAI-1022" }
+edgefirst-hal = "0.6.2"
+four-char-code = "2.3.0"
 edgefirst-schemas = "1.5.3"
-edgefirst-tensor = { git = "https://github.com/EdgeFirstAI/hal.git", branch = "EDGEAI-1022" }
-edgefirst-tracker = { git = "https://github.com/EdgeFirstAI/hal.git", branch = "EDGEAI-1022" }
+edgefirst-tracker = "0.6.2"
 enum_dispatch = "0.3.13"
 log = { version = "0.4.28" }
 ndarray = { version = "0.16.1", features = ["rayon"] }

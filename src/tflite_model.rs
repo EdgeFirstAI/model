@@ -8,10 +8,10 @@ use crate::{
         dmabuf_to_tensor_image,
     },
 };
-use edgefirst_decoder::{ArrayViewDQuantized, BoundingBox, DetectBox, configs::DataType};
-use edgefirst_image::{Crop, ImageProcessor, ImageProcessorTrait, RGBA, TensorImage};
+use edgefirst_hal::decoder::{ArrayViewDQuantized, configs::DataType};
+use edgefirst_hal::image::{Crop, ImageProcessor, ImageProcessorTrait, RGBA, TensorImage};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
-use edgefirst_tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
 use log::error;
 use std::{
     error::Error,
@@ -174,42 +174,6 @@ impl<'a> TFLiteModel<'a> {
 
     pub fn setup_context(&mut self, _args: &Args) {}
 
-    // Must have 4 output tensors, in order of boxes, classes, scores, num_det
-    fn ssd_decode_boxes(&self, boxes: &mut Vec<DetectBox>) -> Result<(), ModelError> {
-        let box_loc = self.outputs[0].mapro::<f32>()?;
-        let classes = self.outputs[1].mapro::<f32>()?;
-        let scores = self.outputs[2].mapro::<f32>()?;
-        let num_det = self.outputs[3].mapro::<f32>()?;
-        assert_eq!(
-            scores.len(),
-            classes.len(),
-            "classes and scores tensor don't have the same size"
-        );
-        assert_eq!(
-            box_loc.len(),
-            classes.len() * 4,
-            "boxes tensor isn't 4x the size of the classes tensor"
-        );
-        assert_eq!(num_det.len(), 1, "num_det tensor isn't size of 1");
-        let num_det = num_det[0].round() as usize;
-        let b = Vec::from_iter((0..num_det).map(|i| DetectBox {
-            bbox: BoundingBox {
-                ymin: box_loc[i * 4],
-                xmin: box_loc[i * 4 + 1],
-                ymax: box_loc[i * 4 + 2],
-                xmax: box_loc[i * 4 + 3],
-            },
-            score: scores[i],
-            label: classes[i].round() as usize,
-        }));
-
-        for b in b {
-            boxes.push(b);
-        }
-
-        Ok(())
-    }
-
     fn init_tensors(&mut self) -> Result<(), Box<dyn Error>> {
         let mut outputs = self.model.outputs()?;
         self.outputs.append(&mut outputs);
@@ -231,8 +195,8 @@ impl Model for TFLiteModel<'_> {
         img_proc.convert(
             &image,
             &mut self.img_,
-            edgefirst_image::Rotation::None,
-            edgefirst_image::Flip::None,
+            edgefirst_hal::image::Rotation::None,
+            edgefirst_hal::image::Flip::None,
             Crop::no_crop(),
         )?;
         let dest_mapped = self.img_.tensor().map()?;
@@ -409,9 +373,9 @@ impl Model for TFLiteModel<'_> {
     #[instrument(skip_all)]
     fn decode_outputs(
         &self,
-        decoder: &edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
     ) -> Result<(), ModelError> {
         let mut outputs_quant = Vec::new();
         let mut outputs_float = Vec::new();
@@ -443,29 +407,16 @@ impl Model for TFLiteModel<'_> {
             }
         }
 
-        if matches!(
-            decoder.model_type(),
-            edgefirst_decoder::configs::ModelType::Custom {}
-        ) {
-            // attempt SSD decode
-            let mut boxes = Vec::with_capacity(output_boxes.capacity());
-            self.ssd_decode_boxes(&mut boxes)?;
-
-            return Ok(decoder.decode_custom(boxes, output_boxes)?);
-        }
-
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
             (false, true) => decoder
-                .decode_float(&outputs_float, output_boxes, output_masks)
-                .unwrap(),
+                .decode_float(&outputs_float, output_boxes, output_masks)?,
             (true, false) => decoder
-                .decode_quantized(&outputs_quant, output_boxes, output_masks)
-                .unwrap(),
-            (false, false) => {
+                .decode_quantized(&outputs_quant, output_boxes, output_masks)?,
+            (true, true) => {
                 log::error!("No outputs for decoder");
             }
-            (true, true) => {
-                log::error!("Fixed floating point and quantized outputs for decoder");
+            (false, false) => {
+                log::error!("Mixed floating point and quantized outputs for decoder");
             }
         }
         log::trace!("Decoded boxes: {:?}", output_boxes);
@@ -475,11 +426,11 @@ impl Model for TFLiteModel<'_> {
     #[instrument(skip_all)]
     fn decode_outputs_tracked(
         &self,
-        decoder: &mut edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
-        output_tracks: &mut Vec<edgefirst_tracker::TrackInfo<edgefirst_decoder::DetectBox>>,
-        timestamp: u64,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
+        _output_tracks: &mut Vec<edgefirst_tracker::TrackInfo>,
+        _timestamp: u64,
     ) -> Result<(), ModelError> {
         let mut outputs_quant = Vec::new();
         let mut outputs_float = Vec::new();
@@ -511,42 +462,17 @@ impl Model for TFLiteModel<'_> {
             }
         }
 
-        if matches!(
-            decoder.model_type(),
-            edgefirst_decoder::configs::ModelType::Custom {}
-        ) {
-            // attempt SSD decode
-            let mut boxes = Vec::with_capacity(output_boxes.capacity());
-            self.ssd_decode_boxes(&mut boxes)?;
-
-            return Ok(decoder.decode_custom_tracked(
-                boxes,
-                output_boxes,
-                output_tracks,
-                timestamp,
-            )?);
-        }
-
+        // Decode outputs (tracking is handled separately by the caller)
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
-            (false, true) => decoder.decode_float_tracked(
-                &outputs_float,
-                output_boxes,
-                output_masks,
-                output_tracks,
-                timestamp,
-            )?,
-            (true, false) => decoder.decode_quantized_tracked(
-                &outputs_quant,
-                output_boxes,
-                output_masks,
-                output_tracks,
-                timestamp,
-            )?,
-            (false, false) => {
+            (false, true) => decoder
+                .decode_float(&outputs_float, output_boxes, output_masks)?,
+            (true, false) => decoder
+                .decode_quantized(&outputs_quant, output_boxes, output_masks)?,
+            (true, true) => {
                 log::error!("No outputs for decoder");
             }
-            (true, true) => {
-                log::error!("Fixed floating point and quantized outputs for decoder");
+            (false, false) => {
+                log::error!("Mixed floating point and quantized outputs for decoder");
             }
         }
         log::trace!("Decoded boxes tracked: {:?}", output_boxes);
@@ -574,7 +500,7 @@ impl Model for TFLiteModel<'_> {
             None => {
                 let e = io::Error::other(format!(
                     "Tried to access output tensor {index} of {}",
-                    self.inputs.len()
+                    self.outputs.len()
                 ))
                 .into();
                 return Err(e);

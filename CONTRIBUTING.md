@@ -95,53 +95,48 @@ cargo run -- --model <path-to-model>
 Create branches from `develop` using the pattern:
 
 ```
-feature/<description>
-bugfix/<description>
-hotfix/<description>
+feature/<PROJECTKEY-###>[-description]
+bugfix/<PROJECTKEY-###>[-description]
+hotfix/<PROJECTKEY-###>[-description]
 ```
+
+External contributors without JIRA access may use `feature/issue-<N>-description` referencing GitHub issue numbers.
 
 **Example:**
 
 ```bash
 git checkout develop
 git pull origin develop
-git checkout -b feature/add-yolo-decoder
+git checkout -b feature/EDGEAI-123-add-yolo-decoder
 ```
 
 ### Commit Messages
 
-Use clear, descriptive commit messages:
+Use clear, descriptive commit messages with the JIRA key:
 
 ```
-<type>: <short summary>
+PROJECTKEY-###: Brief description of what was done
 
-<detailed description if needed>
+Optional detailed description with bullet points
 ```
 
-**Types:**
-
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation only
-- `style`: Code style/formatting (no logic change)
-- `refactor`: Code refactoring (no functional change)
-- `perf`: Performance improvement
-- `test`: Add or update tests
-- `chore`: Build process, dependencies, etc.
+**Rules:**
+- Subject line: 50-72 characters ideal
+- Focus on WHAT changed, not HOW
+- No type prefixes (`feat:`, `fix:`, etc.) - JIRA provides context
 
 **Examples:**
 
 ```
-feat: add YOLO v8 decoder support
+EDGEAI-123: Add YOLO v8 decoder support
 
-Implements decoder for YOLO v8 models with configurable NMS
-thresholds and box format conversion.
+- Implemented decoder for YOLO v8 models with configurable NMS
+- Added box format conversion from YOLO to normalized coordinates
 
-fix: correct bounding box coordinates for rotated frames
-
-Box coordinates were not accounting for camera rotation parameter,
-causing misaligned detections on rotated input.
+EDGEAI-456: Fix bounding box coordinates for rotated frames
 ```
+
+External contributors without JIRA access may use `#<issue>:` referencing GitHub issue numbers.
 
 ### Development Loop
 

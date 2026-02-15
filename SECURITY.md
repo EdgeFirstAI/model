@@ -61,4 +61,4 @@ We kindly ask security researchers to:
 
 **Last Updated:** 2026-02-13
 
-For general questions, see our [Contributing Guide](CONTRIBUTING.md) or visit [EdgeFirst Documentation](https://doc.edgefirst.ai/test/perception/).
+For general questions, see our [Contributing Guide](CONTRIBUTING.md) or visit [EdgeFirst Documentation](https://doc.edgefirst.ai/latest/perception/).

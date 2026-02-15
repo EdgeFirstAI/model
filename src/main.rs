@@ -2,7 +2,7 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 use clap::Parser;
-use edgefirst_decoder::DecoderBuilder;
+use edgefirst_hal::decoder::DecoderBuilder;
 use edgefirst_model::{
     args::Args,
     buildmsgs::{
@@ -194,17 +194,15 @@ pub async fn main() -> ExitCode {
     };
     info!("Loaded model");
 
+    let mut tracker = edgefirst_tracker::bytetrack::ByteTrack::new();
+    tracker.track_extra_lifespan = (args.track_extra_lifespan * 1_000_000_000.0) as u64;
+    tracker.track_high_conf = args.track_high_conf;
+    tracker.track_iou = args.track_iou;
+    tracker.track_update = args.track_update;
+
     let mut decoder_builder = DecoderBuilder::new()
         .with_score_threshold(args.threshold)
-        .with_iou_threshold(args.iou)
-        .with_tracker(
-            edgefirst_tracker::ByteTrackBuilder::new()
-                .track_extra_lifespan((args.track_extra_lifespan * 1_000_000_000.0) as u64)
-                .track_high_conf(args.track_high_conf)
-                .track_iou(args.track_iou)
-                .track_update(args.track_update)
-                .build(),
-        );
+        .with_iou_threshold(args.iou);
     if let Some(path) = args.edgefirst_config {
         let config = match std::fs::read_to_string(&path) {
             Ok(v) => v,
@@ -278,18 +276,13 @@ pub async fn main() -> ExitCode {
             );
 
             decoder_builder = decoder_builder.with_config(cfg);
-        } else if output_count == 4 && args.ssd_model {
-            warn!(
-                "Could not guess model config, but enabling SSD model mode due to --ssd-model flag"
-            );
-            decoder_builder = decoder_builder.with_config_custom();
         } else {
             error!("Could not guess model config from output shapes: {output_shapes:?}");
             return ExitCode::FAILURE;
         }
     }
 
-    let mut decoder = match decoder_builder.build() {
+    let decoder = match decoder_builder.build() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not build decoder: {e:?}");
@@ -299,16 +292,17 @@ pub async fn main() -> ExitCode {
 
     let model_type_ = decoder.model_type();
     let (has_box, has_seg, _has_instance_seg) = match model_type_ {
-        edgefirst_decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
-        edgefirst_decoder::configs::ModelType::ModelPackSegDetSplit { .. } => (true, true, false),
-        edgefirst_decoder::configs::ModelType::ModelPackDet { .. } => (true, false, false),
-        edgefirst_decoder::configs::ModelType::ModelPackDetSplit { .. } => (true, false, false),
-        edgefirst_decoder::configs::ModelType::ModelPackSeg { .. } => (false, true, false),
-        edgefirst_decoder::configs::ModelType::YoloDet { .. } => (true, false, false),
-        edgefirst_decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
-        edgefirst_decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
-        edgefirst_decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
-        edgefirst_decoder::configs::ModelType::Custom { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDetSplit { .. } => (true, true, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackDet { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackDetSplit { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackSeg { .. } => (false, true, false),
+        edgefirst_hal::decoder::configs::ModelType::YoloDet { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
+        edgefirst_hal::decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
+        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndDet { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndSegDet { .. } => (true, false, true),
     };
 
     drop(tx);
@@ -398,7 +392,7 @@ pub async fn main() -> ExitCode {
     let timeout = Duration::from_millis(100);
     let mut fps = edgefirst_model::fps::Fps::<90>::default();
 
-    let mut img_proc = match edgefirst_image::ImageProcessor::new() {
+    let mut img_proc = match edgefirst_hal::image::ImageProcessor::new() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open ImageProcessor: {e:?}");
@@ -413,7 +407,7 @@ pub async fn main() -> ExitCode {
         let Some(mut dma_buf) = wait_for_camera_frame(&sub_camera, timeout) else {
             continue;
         };
-        trace!("Recieved camera frame");
+        trace!("Received camera frame");
 
         let input_start = Instant::now();
         // the _fd needs to remain valid while `dma_buf`` is used
@@ -430,11 +424,6 @@ pub async fn main() -> ExitCode {
             Err(e) => error!("Could not load frame into model: {e:?}"),
         }
 
-        // match model.load_frame_dmabuf(&dma_buf, &img_mgr, model::Preprocessing::Raw)
-        // {     Ok(_) => trace!("Loaded frame into model"),
-        //     Err(e) => error!("Could not load frame into model: {e:?}"),
-        // }
-
         let input_duration = input_start.elapsed().as_nanos();
         trace!("Load input: {:.3} ms", input_duration as f32 / 1_000_000.0);
 
@@ -448,18 +437,18 @@ pub async fn main() -> ExitCode {
         trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
         let output_start = Instant::now();
 
-        let res = if args.track {
-            model.decode_outputs_tracked(
-                &mut decoder,
-                &mut output_boxes,
-                &mut output_masks,
-                &mut output_tracks,
-                dma_buf.header.stamp.nanosec as u64
-                    + dma_buf.header.stamp.sec as u64 * 1_000_000_000,
-            )
-        } else {
-            model.decode_outputs(&decoder, &mut output_boxes, &mut output_masks)
-        };
+        let res = model.decode_outputs(&decoder, &mut output_boxes, &mut output_masks);
+
+        if res.is_ok() && args.track {
+            use edgefirst_model::TrackerBox;
+            use edgefirst_tracker::Tracker;
+            let timestamp = dma_buf.header.stamp.nanosec as u64
+                + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
+            let wrapped: Vec<_> = output_boxes.iter().map(TrackerBox).collect();
+            let tracks = tracker.update(&wrapped, timestamp);
+            output_tracks.clear();
+            output_tracks.extend(tracks.into_iter().flatten());
+        }
 
         if let Err(e) = res {
             error!("Failed to decode model outputs: {e:?}");

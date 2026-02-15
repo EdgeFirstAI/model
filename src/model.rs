@@ -7,17 +7,18 @@ use std::{
     os::fd::{FromRawFd, OwnedFd},
 };
 
-use edgefirst_decoder::{
+use edgefirst_hal::decoder::{
     ConfigOutput, ConfigOutputs,
     configs::{
         Boxes, DataType, DecoderType, Detection, DimName, Mask, MaskCoefficients, Protos, Scores,
         Segmentation,
     },
 };
-use edgefirst_image::{ImageProcessor, TensorImage};
+use edgefirst_hal::image::{ImageProcessor, TensorImage};
+use edgefirst_hal::tensor::{Tensor, TensorTrait};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
-use edgefirst_tensor::{Tensor, TensorTrait};
 use enum_dispatch::enum_dispatch;
+use four_char_code::FourCharCode;
 use tflitec_sys::TfLiteError;
 use tracing::instrument;
 
@@ -145,8 +146,8 @@ impl From<Box<dyn Error>> for ModelError {
     }
 }
 
-impl From<edgefirst_tensor::Error> for ModelError {
-    fn from(value: edgefirst_tensor::Error) -> Self {
+impl From<edgefirst_hal::tensor::Error> for ModelError {
+    fn from(value: edgefirst_hal::tensor::Error) -> Self {
         ModelError {
             kind: ModelErrorKind::Tensor,
             source: Box::from(value),
@@ -154,8 +155,8 @@ impl From<edgefirst_tensor::Error> for ModelError {
     }
 }
 
-impl From<edgefirst_image::Error> for ModelError {
-    fn from(value: edgefirst_image::Error) -> Self {
+impl From<edgefirst_hal::image::Error> for ModelError {
+    fn from(value: edgefirst_hal::image::Error) -> Self {
         ModelError {
             kind: ModelErrorKind::Image,
             source: Box::from(value),
@@ -163,8 +164,8 @@ impl From<edgefirst_image::Error> for ModelError {
     }
 }
 
-impl From<edgefirst_decoder::DecoderError> for ModelError {
-    fn from(value: edgefirst_decoder::DecoderError) -> Self {
+impl From<edgefirst_hal::decoder::DecoderError> for ModelError {
+    fn from(value: edgefirst_hal::decoder::DecoderError) -> Self {
         ModelError {
             kind: ModelErrorKind::Decoding,
             source: Box::from(value),
@@ -217,18 +218,18 @@ pub trait Model {
 
     fn decode_outputs(
         &self,
-        decoder: &edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
     ) -> Result<(), ModelError>;
 
     fn decode_outputs_tracked(
         &self,
-        decoder: &mut edgefirst_decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_decoder::Segmentation>,
-        output_tracks: &mut Vec<edgefirst_tracker::TrackInfo<edgefirst_decoder::DetectBox>>,
-        timestamp: u64,
+        decoder: &edgefirst_hal::decoder::Decoder,
+        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
+        _output_tracks: &mut Vec<edgefirst_tracker::TrackInfo>,
+        _timestamp: u64,
     ) -> Result<(), ModelError>;
 
     fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
@@ -238,7 +239,7 @@ use nix::libc::dup;
 #[instrument(skip_all)]
 pub(crate) fn dmabuf_to_tensor_image(
     dma: &DmaBuffer,
-) -> Result<edgefirst_image::TensorImage, ModelError> {
+) -> Result<edgefirst_hal::image::TensorImage, ModelError> {
     let tensor = Tensor::from_fd(
         unsafe { OwnedFd::from_raw_fd(dup(dma.fd)) },
         &[
@@ -249,7 +250,7 @@ pub(crate) fn dmabuf_to_tensor_image(
         None,
     )?;
 
-    let fourcc = edgefirst_image::FourCharCode::from_array(dma.fourcc.to_le_bytes())
+    let fourcc = FourCharCode::new(dma.fourcc)
         .map_err(|e| ModelError::new(ModelErrorKind::Image, format!("Invalid FourCC code: {e}")))?;
     let img = TensorImage::from_tensor(tensor, fourcc)?;
     Ok(img)
@@ -391,6 +392,8 @@ fn guess_modelpack_segmentation(
                 shape: shape.to_vec(),
                 dshape,
             })],
+            nms: None,
+            decoder_version: None,
         });
     }
     None
@@ -434,7 +437,10 @@ fn guess_yolo_detection(
             quantization,
             shape: shape.to_vec(),
             dshape,
+            normalized: None,
         })],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -502,6 +508,7 @@ fn guess_modelpack_detection(
                 quantization: quant0,
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
+                normalized: None,
             }),
             ConfigOutput::Scores(Scores {
                 decoder: DecoderType::ModelPack,
@@ -510,6 +517,8 @@ fn guess_modelpack_detection(
                 dshape: dshape.1,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -584,6 +593,8 @@ fn guess_modelpack_segmentation_2(
                 dshape: dshape.1,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -658,8 +669,11 @@ fn guess_yolo_segdet(
                 quantization: quant1,
                 shape: shape1.to_vec(),
                 dshape: dshape.1,
+                normalized: None,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -741,6 +755,7 @@ fn guess_yolo_split_det(
                 quantization: quant0,
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
+                normalized: None,
             }),
             ConfigOutput::Scores(Scores {
                 decoder: DecoderType::Ultralytics,
@@ -749,6 +764,8 @@ fn guess_yolo_split_det(
                 dshape: dshape.1,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -844,6 +861,7 @@ fn guess_modelpack_segdet_3(
                 quantization: quant0,
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
+                normalized: None,
             }),
             ConfigOutput::Scores(Scores {
                 decoder: DecoderType::ModelPack,
@@ -858,6 +876,8 @@ fn guess_modelpack_segdet_3(
                 dshape: dshape.2,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -975,6 +995,7 @@ fn guess_modelpack_segdet_4(
                 quantization: quant0,
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
+                normalized: None,
             }),
             ConfigOutput::Scores(Scores {
                 decoder: DecoderType::ModelPack,
@@ -995,6 +1016,8 @@ fn guess_modelpack_segdet_4(
                 dshape: dshape.3,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 
@@ -1120,6 +1143,7 @@ fn guess_yolo_split_segdet(
                 quantization: quant0,
                 shape: shape0.to_vec(),
                 dshape: dshape.0,
+                normalized: None,
             }),
             ConfigOutput::Protos(Protos {
                 decoder: DecoderType::Ultralytics,
@@ -1140,6 +1164,8 @@ fn guess_yolo_split_segdet(
                 dshape: dshape.3,
             }),
         ],
+        nms: None,
+        decoder_version: None,
     })
 }
 

@@ -11,6 +11,30 @@ pub mod tflite_model;
 #[cfg(feature = "rtm")]
 pub mod rtm_model;
 
+/// Newtype wrapper to bridge `edgefirst_tracker::DetectionBox` for
+/// `edgefirst_hal::decoder::DetectBox`.
+pub struct TrackerBox<'a>(pub &'a edgefirst_hal::decoder::DetectBox);
+
+impl std::fmt::Debug for TrackerBox<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl edgefirst_tracker::DetectionBox for TrackerBox<'_> {
+    fn bbox(&self) -> [f32; 4] {
+        [self.0.bbox.xmin, self.0.bbox.ymin, self.0.bbox.xmax, self.0.bbox.ymax]
+    }
+
+    fn score(&self) -> f32 {
+        self.0.score
+    }
+
+    fn label(&self) -> usize {
+        self.0.label
+    }
+}
+
 use crate::buildmsgs::*;
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
@@ -86,7 +110,7 @@ async fn heart_beat_loop(
     let Some(mut dma_buf) = wait_for_camera_frame(sub_camera, Duration::from_millis(100)) else {
         return;
     };
-    trace!("Recieved camera frame");
+    trace!("Received camera frame");
 
     let Ok(_fd) = update_dmabuf_with_pidfd(&mut dma_buf) else {
         return;

@@ -466,14 +466,15 @@ This section is customized for the **EdgeFirst Model Node** project.
   - `edgefirst-model`: Main inference service binary
   - `tflitec-sys`: TensorFlow Lite C bindings (internal)
 - **Key dependencies**:
+  - `edgefirst-hal 0.6.2`: Hardware abstraction (decoder, image processing, tensor)
+  - `edgefirst-tracker 0.6.2`: ByteTrack multi-object tracking
+  - `edgefirst-schemas 1.5.3`: Message schemas for EdgeFirst Perception
   - `zenoh 1.5.0`: Pub/sub communication layer
   - `tokio`: Async runtime for Zenoh and concurrent operations
-  - `edgefirst-schemas 1.3.1`: Message schemas for EdgeFirst Perception
-  - `g2d-sys 1.2.0`: NXP G2D hardware acceleration bindings (from crates.io)
   - `four-char-code 2.3.0`: FourCharCode type for pixel format identification
   - `tflitec-sys`: TensorFlow Lite inference engine (internal crate)
   - `vaal` (optional): RTM/Ara-2 runtime support (feature-gated)
-  - `ndarray`, `nalgebra`: Numerical computing
+  - `ndarray`: Numerical computing
   - `tracing`, `tracing-tracy`: Logging and profiling
 - **Target platforms**: Linux on x86_64 and aarch64 (primary: NXP i.MX8)
 - **Hardware acceleration**: NPU via VX delegate, G2D for image operations
@@ -489,14 +490,14 @@ This section is customized for the **EdgeFirst Model Node** project.
   - Zero-copy DMA buffer passing via pidfd
 - **Module organization**:
   - `main.rs`: Application entry, Zenoh session, main inference loop
-  - `lib.rs`: Core detection pipeline, model identification
-  - `model.rs`: Model trait, decoder implementations (YOLO, ModelPack)
+  - `lib.rs`: Public library interface, TrackerBox wrapper, DmaBuf handling
+  - `model.rs`: Model trait, enum_dispatch, model config guessing
   - `tflite_model.rs` / `rtm_model.rs`: Model loading and inference
   - `buildmsgs.rs`: Zenoh message construction (CDR serialization)
-  - `tracker.rs`: ByteTrack multi-object tracking
-  - `image.rs`: G2D operations, DMA buffer handling
-  - Supporting: `nms.rs`, `masks.rs`, `kalman.rs`, `fps.rs`, `args.rs`
-- **Error handling**: Result types with anyhow/thiserror for error propagation
+  - `masks.rs`: Segmentation mask processing and compression
+  - `args.rs`: CLI argument parsing, `fps.rs`: FPS monitoring
+  - External: `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
+- **Error handling**: Result types with ModelError for error propagation
 
 ### Build and Deployment
 
@@ -571,7 +572,7 @@ Critical performance characteristics for edge AI inference:
 ### Testing Conventions
 
 - **Unit tests**: Co-located in `#[cfg(test)] mod tests` at end of implementation files
-  - Currently exist in: `tracker.rs`, `kalman.rs`, `masks.rs`, `nms.rs`
+  - Currently exist in: `masks.rs`
   - Target: All modules should have unit tests
 - **Integration tests**: To be created in `tests/` directory
   - Will include mock Zenoh nodes for end-to-end testing

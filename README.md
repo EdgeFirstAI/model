@@ -17,7 +17,7 @@ The EdgeFirst Model Node is a high-performance AI inference service designed for
 - **ROS2 Compatibility** - Standard `edgefirst_msgs` and `sensor_msgs` interfaces for drop-in integration
 - **Hardware Acceleration** - NXP i.MX8 NPU inference with G2D preprocessing
 - **Zero-Copy DMA** - Direct memory access for ultra-low latency vision pipelines
-- **Object Detection** - YOLO, SSD, and custom detection models
+- **Object Detection** - YOLO detection models with auto-detection of model architecture
 - **Instance Segmentation** - Semantic and instance segmentation with mask compression
 - **ByteTrack Tracking** - Multi-object tracking with Kalman filtering
 - **Multi-Format Output** - Bounding boxes, masks, tracking IDs, and Foxglove visualization
@@ -69,7 +69,7 @@ graph LR
 - **Consumes** camera DMA buffers from EdgeFirst Camera Node
 - **Preprocesses** frames with hardware-accelerated G2D format conversion and scaling
 - **Infers** using TFLite models on NPU (or CPU/GPU fallback)
-- **Decodes** YOLO/SSD outputs into bounding boxes, scores, and labels
+- **Decodes** YOLO outputs into bounding boxes, scores, and labels
 - **Tracks** objects across frames using ByteTrack multi-object tracking
 - **Segments** images with semantic and instance segmentation models
 - **Publishes** to Zenoh topics using ROS2 message formats
@@ -82,7 +82,7 @@ graph LR
 - **Web UI**: Live visualization with Foxglove-compatible annotations
 - **Custom Applications**: ROS2-compatible message access via zenoh-bridge-dds
 
-**Learn More:** [EdgeFirst Perception Documentation](https://doc.edgefirst.ai/test/perception/)
+**Learn More:** [EdgeFirst Perception Documentation](https://doc.edgefirst.ai/latest/perception/)
 
 ---
 
@@ -273,7 +273,7 @@ graph LR
 
 **Performance Benefits:**
 
-- **5-15ms total latency** (camera capture to published results)
+- **12-18ms total latency** (camera capture to published results)
 - **30+ FPS** on NXP i.MX8M Plus with 640×640 models
 - **Zero memory copies** from camera to inference
 - **Hardware-accelerated** format conversion, scaling, and inference
@@ -320,9 +320,7 @@ subscriber.on_message(|dma_msg: DmaBuf| {
 
 **Supported Model Architectures:**
 
-- **YOLO**: YOLOv5, YOLOv8, YOLOv9, YOLOv10 (detection and segmentation)
-- **SSD**: Single Shot Detector variants
-- **Custom Models**: Via metadata configuration (edgefirst.yaml)
+- **YOLO**: YOLOv5, YOLOv8, YOLOv10, YOLO11, YOLO26 (detection and segmentation)
 
 **Detection Features:**
 
@@ -475,6 +473,7 @@ edgefirst-model --help
 - `--connect <ENDPOINT>` - Connect to Zenoh router
 - `--listen <ENDPOINT>` - Listen for Zenoh connections
 - `--no-multicast-scouting` - Disable multicast discovery
+- `--multicast-interface <IFACE>` - Network interface for multicast scouting
 
 **Debugging:**
 
@@ -572,9 +571,9 @@ edgefirst-model --tracy --model model.tflite
 
 **Model Architecture Support:**
 
-- Object Detection: YOLO (v5, v8, v9, v10), SSD
-- Instance Segmentation: YOLOv8-seg, custom architectures
-- Semantic Segmentation: DeepLab, custom architectures
+- Object Detection: YOLO (v5, v8, v10, v11, v26)
+- Instance Segmentation: YOLOv8-seg
+- Semantic Segmentation: DeepLab
 
 ---
 
@@ -605,18 +604,14 @@ cargo doc --no-deps --open
 ```
 model/
 ├── src/
-│   ├── main.rs          # Main loop, Zenoh pub/sub, model orchestration
-│   ├── lib.rs           # Public library interface, DmaBuf→Image conversion
-│   ├── image.rs         # DMA allocation, G2D operations, format conversion
-│   ├── model.rs         # Model trait, detection box types, YOLO decoders
+│   ├── main.rs          # Application entry, Zenoh session, main inference loop
+│   ├── lib.rs           # Public library interface, TrackerBox wrapper, DmaBuf handling
+│   ├── model.rs         # Model trait, enum_dispatch, model config guessing
 │   ├── tflite_model.rs  # TFLite model loading and inference via NPU
-│   ├── rtm_model.rs     # RTM model support (feature-gated)
-│   ├── tracker.rs       # ByteTrack multi-object tracker
-│   ├── kalman.rs        # Kalman filter for track prediction
-│   ├── nms.rs           # Non-maximum suppression
-│   ├── masks.rs         # Segmentation mask processing
-│   ├── args.rs          # CLI argument parsing
-│   ├── buildmsgs.rs     # ROS2 CDR message construction
+│   ├── rtm_model.rs     # RTM/VAAL model support (feature-gated)
+│   ├── buildmsgs.rs     # Zenoh message construction (CDR serialization)
+│   ├── masks.rs         # Segmentation mask processing and compression
+│   ├── args.rs          # CLI argument parsing (Clap)
 │   └── fps.rs           # FPS monitoring
 ├── tflitec-sys/         # TFLite C API FFI bindings (internal)
 ├── benches/             # Divan benchmarks
@@ -626,6 +621,7 @@ model/
 
 **See also:**
 
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Internal architecture and design documentation
 - [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines and development workflow
 - [SECURITY.md](SECURITY.md) - Security policy and vulnerability reporting
 
@@ -752,7 +748,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 **Community Resources:**
 
-- 📚 **Documentation**: https://doc.edgefirst.ai/test/perception/
+- 📚 **Documentation**: https://doc.edgefirst.ai/latest/perception/
 - 💬 **Discussions**: https://github.com/orgs/EdgeFirstAI/discussions
 - 🐛 **Issues**: https://github.com/EdgeFirstAI/model/issues
 
