@@ -3,8 +3,8 @@
 
 use edgefirst_hal::decoder::configs::DataType;
 use edgefirst_hal::image::{Crop, ImageProcessor, ImageProcessorTrait, TensorImage};
-use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
 use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
 use log::trace;
 use ndarray::{ArrayView, ArrayViewD};
 use std::{error::Error, io};

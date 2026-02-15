@@ -140,7 +140,7 @@ pub fn build_image_annotations_msg_and_encode_(
             LabelSetting::Track => match tracks.get(i) {
                 Some(track) => track.uuid.to_string()[..8].to_owned(),
                 None => format!("{:.2}", b.score),
-            }
+            },
         };
 
         let text = FoxgloveTextAnnotations {

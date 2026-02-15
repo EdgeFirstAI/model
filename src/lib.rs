@@ -23,7 +23,12 @@ impl std::fmt::Debug for TrackerBox<'_> {
 
 impl edgefirst_tracker::DetectionBox for TrackerBox<'_> {
     fn bbox(&self) -> [f32; 4] {
-        [self.0.bbox.xmin, self.0.bbox.ymin, self.0.bbox.xmax, self.0.bbox.ymax]
+        [
+            self.0.bbox.xmin,
+            self.0.bbox.ymin,
+            self.0.bbox.xmax,
+            self.0.bbox.ymax,
+        ]
     }
 
     fn score(&self) -> f32 {

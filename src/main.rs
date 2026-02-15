@@ -293,16 +293,22 @@ pub async fn main() -> ExitCode {
     let model_type_ = decoder.model_type();
     let (has_box, has_seg, _has_instance_seg) = match model_type_ {
         edgefirst_hal::decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
-        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDetSplit { .. } => (true, true, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDetSplit { .. } => {
+            (true, true, false)
+        }
         edgefirst_hal::decoder::configs::ModelType::ModelPackDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::ModelPackDetSplit { .. } => (true, false, false),
+        edgefirst_hal::decoder::configs::ModelType::ModelPackDetSplit { .. } => {
+            (true, false, false)
+        }
         edgefirst_hal::decoder::configs::ModelType::ModelPackSeg { .. } => (false, true, false),
         edgefirst_hal::decoder::configs::ModelType::YoloDet { .. } => (true, false, false),
         edgefirst_hal::decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
         edgefirst_hal::decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
         edgefirst_hal::decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
         edgefirst_hal::decoder::configs::ModelType::YoloEndToEndDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndSegDet { .. } => (true, false, true),
+        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndSegDet { .. } => {
+            (true, false, true)
+        }
     };
 
     drop(tx);

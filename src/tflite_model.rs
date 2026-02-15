@@ -10,8 +10,8 @@ use crate::{
 };
 use edgefirst_hal::decoder::{ArrayViewDQuantized, configs::DataType};
 use edgefirst_hal::image::{Crop, ImageProcessor, ImageProcessorTrait, RGBA, TensorImage};
-use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use log::error;
 use std::{
     error::Error,
@@ -408,10 +408,10 @@ impl Model for TFLiteModel<'_> {
         }
 
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
-            (false, true) => decoder
-                .decode_float(&outputs_float, output_boxes, output_masks)?,
-            (true, false) => decoder
-                .decode_quantized(&outputs_quant, output_boxes, output_masks)?,
+            (false, true) => decoder.decode_float(&outputs_float, output_boxes, output_masks)?,
+            (true, false) => {
+                decoder.decode_quantized(&outputs_quant, output_boxes, output_masks)?
+            }
             (true, true) => {
                 log::error!("No outputs for decoder");
             }
@@ -464,10 +464,10 @@ impl Model for TFLiteModel<'_> {
 
         // Decode outputs (tracking is handled separately by the caller)
         match (outputs_float.is_empty(), outputs_quant.is_empty()) {
-            (false, true) => decoder
-                .decode_float(&outputs_float, output_boxes, output_masks)?,
-            (true, false) => decoder
-                .decode_quantized(&outputs_quant, output_boxes, output_masks)?,
+            (false, true) => decoder.decode_float(&outputs_float, output_boxes, output_masks)?,
+            (true, false) => {
+                decoder.decode_quantized(&outputs_quant, output_boxes, output_masks)?
+            }
             (true, true) => {
                 log::error!("No outputs for decoder");
             }
