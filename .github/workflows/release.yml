@@ -152,6 +152,9 @@ jobs:
                "release-assets/edgefirst-model-v${RELEASE_VERSION}-sbom.json"
           fi
 
+          # Copy default configuration file
+          cp model.default release-assets/model.default
+
           echo "Release assets prepared:"
           ls -lh release-assets/
 
@@ -164,6 +167,17 @@ jobs:
           |----------|--------|
           | Linux x86_64 | `edgefirst-model-linux-x86_64` |
           | Linux ARM64 | `edgefirst-model-linux-aarch64` |
+          | Configuration | `model.default` |
+
+          ```bash
+          # Download and install (ARM64 example)
+          wget https://github.com/EdgeFirstAI/model/releases/latest/download/edgefirst-model-linux-aarch64
+          chmod +x edgefirst-model-linux-aarch64
+          sudo mv edgefirst-model-linux-aarch64 /usr/local/bin/edgefirst-model
+
+          # Install default configuration (optional)
+          sudo cp model.default /etc/default/model
+          ```
 
           ## What's Changed
 

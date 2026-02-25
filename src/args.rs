@@ -6,159 +6,174 @@ use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
+/// Bounding-box label annotation options.
+///
+/// Controls what text is drawn next to each detected bounding box.
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum LabelSetting {
+    /// Show class index only
     Index,
+    /// Show class label name
     Label,
+    /// Show confidence score only
     Score,
+    /// Show label and score
     LabelScore,
+    /// Show tracking ID
     Track,
 }
 
+/// Command-line arguments for EdgeFirst Model Node.
+///
+/// This structure defines all configuration options for the model inference
+/// node, including model selection, detection parameters, tracking, mask
+/// processing, Zenoh configuration, and debugging options. Arguments can be
+/// specified via command line or environment variables.
+///
+/// # Example
+///
+/// ```bash
+/// # Via command line
+/// edgefirst-model --model /path/to/model.tflite --engine npu
+///
+/// # Via environment variables
+/// export MODEL=/path/to/model.tflite
+/// export ENGINE=npu
+/// export THRESHOLD=0.5
+/// edgefirst-model
+/// ```
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// zenoh key expression for camera DMA buffers
+    /// Zenoh key expression for camera DMA buffers
     #[arg(long, default_value = "rt/camera/dma")]
     pub camera_topic: String,
 
-    /// zenoh key expression for publishing detection results
+    /// Zenoh key expression for publishing detection results
     #[arg(long, default_value = "rt/model/boxes2d")]
     pub detect_topic: String,
 
-    /// zenoh key expression for publishing model info
+    /// Zenoh key expression for publishing model info
     #[arg(long, default_value = "rt/model/info")]
     pub info_topic: String,
 
-    /// zenoh key expression for publishing mask results
+    /// Zenoh key expression for publishing mask results
     #[arg(long, default_value = "rt/model/mask")]
     pub mask_topic: String,
 
-    /// zenoh key expression for publishing compressed mask results
+    /// Zenoh key expression for publishing compressed mask results
     #[arg(long, default_value = "rt/model/mask_compressed")]
     pub mask_compressed_topic: String,
 
-    /// model
-    #[arg(short, long, env, required = true)]
+    /// Path to the inference model file (e.g., .tflite)
+    #[arg(short, long, env = "MODEL", required = true)]
     pub model: PathBuf,
 
-    /// edgefirst config file. Can be provided to override config in model, or
-    /// in the case where the model does not have a config file. Can be either a
-    /// YAML file (.yaml) or a JSON file (.json)
-    #[arg(long, env)]
+    /// EdgeFirst config file to override config in model, or supply one
+    /// when the model does not include a config. Can be YAML or JSON.
+    #[arg(long, env = "EDGEFIRST_CONFIG")]
     pub edgefirst_config: Option<PathBuf>,
 
-    /// configure the text annotation of the detected bounding boxes
-    #[arg(long, env, default_value = "label", value_enum)]
+    /// Text annotation style for detected bounding boxes
+    #[arg(long, env = "LABELS", default_value = "label", value_enum)]
     pub labels: LabelSetting,
 
-    /// engine for model context
-    #[arg(long, env, default_value = "npu")]
+    /// Inference engine / delegate for model execution
+    #[arg(long, env = "ENGINE", default_value = "npu")]
     pub engine: String,
 
-    /// score threshold for detections
-    #[arg(short, long, env, default_value = "0.45")]
+    /// Score threshold for detections
+    #[arg(short, long, env = "THRESHOLD", default_value = "0.45")]
     pub threshold: f32,
 
-    /// IOU for detections
-    #[arg(short, long, env, default_value = "0.45")]
+    /// IOU threshold for non-maximum suppression
+    #[arg(short, long, env = "IOU", default_value = "0.45")]
     pub iou: f32,
 
-    /// max boxes for detections
-    #[arg(long, env, default_value = "100")]
+    /// Maximum number of detection boxes to output
+    #[arg(long, env = "MAX_BOXES", default_value = "100")]
     pub max_boxes: usize,
 
-    /// Label offset for detections
-    #[arg(long, env, default_value = "0")]
+    /// Label index offset for detections
+    #[arg(long, env = "LABEL_OFFSET", default_value = "0")]
     pub label_offset: i32,
 
-    /// optional decoder model that always runs on CPU
-    #[arg(long, env)]
+    /// Optional decoder model that always runs on CPU
+    #[arg(long, env = "DECODER_MODEL")]
     pub decoder_model: Option<PathBuf>,
 
-    /// enable tracking objects. Must be enabled for other --track_[...] flags
-    /// to work
-    #[arg(long, env, action)]
+    /// Enable multi-object tracking (required for other --track-* flags)
+    #[arg(long, env = "TRACK", action)]
     pub track: bool,
 
-    /// number of seconds the tracked object can be missing for before being
-    /// removed.
-    #[arg(long, env, default_value = "0.5")]
+    /// Seconds a tracked object can be missing before removal
+    #[arg(long, env = "TRACK_EXTRA_LIFESPAN", default_value = "0.5")]
     pub track_extra_lifespan: f32,
 
-    /// high score threshold for ByteTrack algorithm.
-    #[arg(long, env, default_value = "0.7")]
+    /// High score threshold for ByteTrack algorithm
+    #[arg(long, env = "TRACK_HIGH_CONF", default_value = "0.7")]
     pub track_high_conf: f32,
 
-    /// tracking iou threshold for box association. Higher values will require
-    /// boxes to have higher IOU to the predicted track to be associated.
-    #[arg(long, env, default_value = "0.25")]
+    /// Tracking IOU threshold for box association (higher = stricter)
+    #[arg(long, env = "TRACK_IOU", default_value = "0.25")]
     pub track_iou: f32,
 
-    /// tracking update factor. Higher update factor will also mean
-    /// less smoothing but more rapid response to change (0.0 to 1.0)
-    #[arg(long, env, default_value = "0.25")]
+    /// Tracking update factor — higher means less smoothing (0.0 to 1.0)
+    #[arg(long, env = "TRACK_UPDATE", default_value = "0.25")]
     pub track_update: f32,
 
-    /// enable publishing visualization message
-    #[arg(long, env, action)]
+    /// Enable publishing visualization message
+    #[arg(long, env = "VISUALIZATION", action)]
     pub visualization: bool,
 
-    /// zenoh key expression for publishing foxglove visualization topic
+    /// Zenoh key expression for publishing Foxglove visualization topic
     #[arg(long, default_value = "rt/model/visualization")]
     pub visual_topic: String,
 
-    /// resolution info topic, needed for visualization message type
+    /// Zenoh key expression for camera info (needed for visualization)
     #[arg(long, default_value = "rt/camera/info")]
     pub camera_info_topic: String,
 
-    /// Enables publishing compressed mask
-    #[arg(long, env)]
+    /// Enable publishing zstd-compressed segmentation masks
+    #[arg(long, env = "MASK_COMPRESSION")]
     pub mask_compression: bool,
 
-    /// Set the mask zstd compression level. Valid from -7 to 22. A value of 0
-    /// will be the same as a value of 3. Lower values are faster but less
-    /// compressed.
-    #[arg(long, env, default_value = "1")]
+    /// Mask zstd compression level (-7 to 22; 0 behaves as 3)
+    #[arg(long, env = "MASK_COMPRESSION_LEVEL", default_value = "1")]
     pub mask_compression_level: i32,
 
-    /// The classes that will be output in the mask. Leave empty to keep all
-    /// classes. Otherwise input the classes as space separated integers.
-    /// Classes with index too high will be ignored.
-    #[arg(long, env, hide_short_help = true, value_parser=parse_classes, default_value="")]
+    /// Class indices to include in mask output (space-separated; empty = all)
+    #[arg(long, env = "MASK_CLASSES", hide_short_help = true, value_parser=parse_classes, default_value="")]
     pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
                                              * processing on Vec. This allows us to parse "" as
                                              * Vec::new(). */
 
     /// Enable SSD model mode when a different model config is not found
-    #[arg(long, env, hide_short_help = true)]
+    #[arg(long, env = "SSD_MODEL", hide_short_help = true)]
     pub ssd_model: bool,
 
-    // /// Application log level
-    // #[arg(long, env, default_value = "info")]
-    // pub rust_log: EnvFilter,
     /// Enable Tracy profiler broadcast
-    #[arg(long, env)]
+    #[arg(long, env = "TRACY")]
     pub tracy: bool,
 
-    /// zenoh connection mode
-    #[arg(long, env, default_value = "peer")]
+    /// Zenoh participant mode (peer, client, or router)
+    #[arg(long, env = "MODE", default_value = "peer")]
     mode: WhatAmI,
 
-    /// connect to zenoh endpoints
-    #[arg(long, env)]
+    /// Zenoh endpoints to connect to (can specify multiple)
+    #[arg(long, env = "CONNECT")]
     connect: Vec<String>,
 
-    /// listen to zenoh endpoints
-    #[arg(long, env)]
+    /// Zenoh endpoints to listen on (can specify multiple)
+    #[arg(long, env = "LISTEN")]
     listen: Vec<String>,
 
-    /// disable zenoh multicast scouting
-    #[arg(long, env)]
+    /// Disable Zenoh multicast peer discovery
+    #[arg(long, env = "NO_MULTICAST_SCOUTING")]
     no_multicast_scouting: bool,
 
-    /// zenoh multicast scouting interface
-    #[arg(long, env)]
+    /// Zenoh multicast scouting interface
+    #[arg(long, env = "MULTICAST_INTERFACE")]
     multicast_interface: Option<String>,
 }
 
