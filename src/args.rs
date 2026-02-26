@@ -171,10 +171,6 @@ pub struct Args {
     /// Disable Zenoh multicast peer discovery
     #[arg(long, env = "NO_MULTICAST_SCOUTING")]
     no_multicast_scouting: bool,
-
-    /// Zenoh multicast scouting interface
-    #[arg(long, env = "MULTICAST_INTERFACE")]
-    multicast_interface: Option<String>,
 }
 
 fn parse_classes(arg: &str) -> Result<Vec<usize>, std::num::ParseIntError> {
@@ -215,11 +211,9 @@ impl From<Args> for Config {
                 .unwrap();
         }
 
-        if let Some(iface) = args.multicast_interface {
-            config
-                .insert_json5("scouting/multicast/interface", &json!(iface).to_string())
-                .unwrap();
-        }
+        config
+            .insert_json5("scouting/multicast/interface", &json!("lo").to_string())
+            .unwrap();
 
         config
     }

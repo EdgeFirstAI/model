@@ -150,11 +150,6 @@ LISTEN=""
 # CONNECT/LISTEN for explicit endpoint configuration instead.
 NO_MULTICAST_SCOUTING="false"
 
-# Zenoh multicast scouting network interface. Set this to restrict multicast
-# discovery to a specific interface (e.g., "eth0"). Leave empty to use the
-# system default.
-MULTICAST_INTERFACE="lo"
-
 # ---------------------------------------------------------------------------
 # Debugging / Profiling
 # ---------------------------------------------------------------------------
