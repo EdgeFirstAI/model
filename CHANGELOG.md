@@ -5,6 +5,18 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-02-26
+
+### Changed
+
+- Replaced long environment variable names with short names (e.g. EDGEFIRST_MODEL → MODEL)
+- Added complete model.default configuration file with all supported options
+- Hardcoded multicast interface to loopback, removed --multicast-interface CLI flag
+
+### Removed
+
+- Configurable --multicast-interface CLI option (multicast now always uses loopback)
+
 ## [2.6.1] - 2026-02-15
 
 ### Fixed
