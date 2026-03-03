@@ -7,16 +7,19 @@ use edgefirst_model::{
     args::Args,
     buildmsgs::{
         build_detect_msg_and_encode_, build_image_annotations_msg_and_encode_,
-        build_model_info_msg, build_segmentation_msg_, time_from_ns,
+        build_model_info_msg, build_model_output_msg, build_segmentation_msg_, time_from_ns,
     },
     heart_beat,
-    masks::{mask_compress_thread, mask_thread},
+    masks::mask_thread,
     model::{self, Model, SupportedModel, guess_model_config},
     tflite_model::{DEFAULT_NPU_DELEGATE_PATH, TFLiteLib},
     update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
 use edgefirst_schemas::{
-    edgefirst_msgs::ModelInfo, schema_registry::SchemaType, sensor_msgs::CameraInfo, serde_cdr,
+    edgefirst_msgs::{Model as ModelMsg, ModelInfo},
+    schema_registry::SchemaType,
+    sensor_msgs::CameraInfo,
+    serde_cdr,
 };
 use log::{error, info, trace, warn};
 use std::{
@@ -203,8 +206,8 @@ pub async fn main() -> ExitCode {
     let mut decoder_builder = DecoderBuilder::new()
         .with_score_threshold(args.threshold)
         .with_iou_threshold(args.iou);
-    if let Some(path) = args.edgefirst_config {
-        let config = match std::fs::read_to_string(&path) {
+    if let Some(path) = args.edgefirst_config() {
+        let config = match std::fs::read_to_string(path) {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not read edgefirst config file: {e:?}");
@@ -291,7 +294,7 @@ pub async fn main() -> ExitCode {
     };
 
     let model_type_ = decoder.model_type();
-    let (has_box, has_seg, _has_instance_seg) = match model_type_ {
+    let (has_box, has_seg, has_instance_seg) = match model_type_ {
         edgefirst_hal::decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
         edgefirst_hal::decoder::configs::ModelType::ModelPackSegDetSplit { .. } => {
             (true, true, false)
@@ -309,6 +312,12 @@ pub async fn main() -> ExitCode {
         edgefirst_hal::decoder::configs::ModelType::YoloEndToEndSegDet { .. } => {
             (true, false, true)
         }
+        edgefirst_hal::decoder::configs::ModelType::YoloSplitEndToEndDet { .. } => {
+            (true, false, false)
+        }
+        edgefirst_hal::decoder::configs::ModelType::YoloSplitEndToEndSegDet { .. } => {
+            (true, false, true)
+        }
     };
 
     drop(tx);
@@ -317,24 +326,24 @@ pub async fn main() -> ExitCode {
         .declare_publisher(args.info_topic.clone())
         .await
         .unwrap();
-    let publ_detect = session
-        .declare_publisher(args.detect_topic.clone())
-        .await
-        .unwrap();
-    let publ_mask = session
-        .declare_publisher(args.mask_topic.clone())
-        .await
-        .unwrap();
 
-    let publ_mask_compressed = match args.mask_compression {
-        true => Some(
+    let publ_detect = if !args.detect_topic.is_empty() {
+        info!("Legacy detect topic enabled: {}", args.detect_topic);
+        Some(
             session
-                .declare_publisher(args.mask_compressed_topic.clone())
+                .declare_publisher(args.detect_topic.clone())
                 .await
                 .unwrap(),
-        ),
-        false => None,
+        )
+    } else {
+        info!("Legacy detect topic disabled (empty DETECT_TOPIC)");
+        None
     };
+
+    let publ_output = session
+        .declare_publisher(args.output_topic.clone())
+        .await
+        .unwrap();
 
     let publ_visual = match args.visualization {
         true => Some(
@@ -346,33 +355,26 @@ pub async fn main() -> ExitCode {
         false => None,
     };
 
-    let (mask_tx, mask_rx) = mpsc::channel(50);
-
-    let mask_compress_tx = if let Some(publ_mask_compressed) = publ_mask_compressed {
-        let (mask_compress_tx, mask_compress_rx) = mpsc::channel(50);
-        tokio::spawn(mask_compress_thread(
-            mask_compress_rx,
-            publ_mask_compressed,
-            args.mask_compression_level,
-        ));
-        Some(mask_compress_tx)
+    let mask_tx = if !args.mask_topic.is_empty() {
+        info!("Legacy mask topic enabled: {}", args.mask_topic);
+        let publ_mask = session
+            .declare_publisher(args.mask_topic.clone())
+            .await
+            .unwrap();
+        let (mask_tx, mask_rx) = mpsc::channel(50);
+        tokio::spawn(mask_thread(mask_rx, args.mask_classes.clone(), publ_mask));
+        Some(mask_tx)
     } else {
+        info!("Legacy mask topic disabled (empty MASK_TOPIC)");
         None
     };
-
-    tokio::spawn(mask_thread(
-        mask_rx,
-        args.mask_classes.clone(),
-        publ_mask,
-        mask_compress_tx,
-    ));
 
     let mut model_info_msg = build_model_info_msg(
         time_from_ns(0u32),
         Some(&model),
         &args.model,
         has_box,
-        has_seg | _has_instance_seg,
+        has_seg | has_instance_seg,
     );
     info!("built model_info_msg");
 
@@ -398,7 +400,10 @@ pub async fn main() -> ExitCode {
     let timeout = Duration::from_millis(100);
     let mut fps = edgefirst_model::fps::Fps::<90>::default();
 
-    let mut img_proc = match edgefirst_hal::image::ImageProcessor::new() {
+    let mut img_proc = match tokio::task::spawn_blocking(edgefirst_hal::image::ImageProcessor::new)
+        .await
+        .unwrap()
+    {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open ImageProcessor: {e:?}");
@@ -469,34 +474,38 @@ pub async fn main() -> ExitCode {
         }
 
         if has_seg {
-            let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Cannot send to mask publishing thread {e:?}");
+            if let Some(mask_tx) = mask_tx.as_ref() {
+                let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
+                match mask_tx.send(masks).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Cannot send to mask publishing thread {e:?}");
+                    }
                 }
             }
         }
 
         if has_box {
-            let (msg, enc) = build_detect_msg_and_encode_(
-                &output_boxes,
-                &output_tracks,
-                &model_labels,
-                dma_buf.header.clone(),
-                time_from_ns(input_duration),
-                time_from_ns(model_duration),
-                time_from_ns(output_duration.as_nanos()),
-            );
+            if let Some(publ_detect) = publ_detect.as_ref() {
+                let (msg, enc) = build_detect_msg_and_encode_(
+                    &output_boxes,
+                    &output_tracks,
+                    &model_labels,
+                    dma_buf.header.clone(),
+                    time_from_ns(input_duration),
+                    time_from_ns(model_duration),
+                    time_from_ns(output_duration.as_nanos()),
+                );
 
-            match publ_detect.put(msg).encoding(enc).await {
-                Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
-                Err(e) => {
-                    error!(
-                        "Error sending message on {}: {:?}",
-                        publ_detect.key_expr(),
-                        e
-                    )
+                match publ_detect.put(msg).encoding(enc).await {
+                    Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
+                    Err(e) => {
+                        error!(
+                            "Error sending message on {}: {:?}",
+                            publ_detect.key_expr(),
+                            e
+                        )
+                    }
                 }
             }
         }
@@ -513,11 +522,38 @@ pub async fn main() -> ExitCode {
             );
 
             match publ_visual.put(msg).encoding(enc).await {
-                Ok(_) => trace!("Sent message on {}", publ_detect.key_expr()),
+                Ok(_) => trace!("Sent message on {}", publ_visual.key_expr()),
                 Err(e) => {
                     error!(
                         "Error sending message on {}: {:?}",
-                        publ_detect.key_expr(),
+                        publ_visual.key_expr(),
+                        e
+                    )
+                }
+            }
+        }
+
+        {
+            let model_output = build_model_output_msg(
+                &output_boxes,
+                &output_tracks,
+                &model_labels,
+                &output_masks,
+                dma_buf.header.clone(),
+                input_duration,
+                model_duration,
+                output_duration.as_nanos(),
+                has_instance_seg,
+            );
+            let msg = ZBytes::from(serde_cdr::serialize(&model_output).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema(ModelMsg::SCHEMA_NAME);
+
+            match publ_output.put(msg).encoding(enc).await {
+                Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_output.key_expr(),
                         e
                     )
                 }

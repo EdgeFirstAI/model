@@ -3,7 +3,7 @@
 
 use clap::Parser;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use zenoh::config::{Config, WhatAmI};
 
 /// Bounding-box label annotation options.
@@ -30,6 +30,10 @@ pub enum LabelSetting {
 /// processing, Zenoh configuration, and debugging options. Arguments can be
 /// specified via command line or environment variables.
 ///
+/// Empty-string environment variables (e.g. `EDGEFIRST_CONFIG=""`) are treated
+/// as unset so that systemd EnvironmentFile defaults work without commenting
+/// out optional parameters.
+///
 /// # Example
 ///
 /// ```bash
@@ -46,24 +50,24 @@ pub enum LabelSetting {
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Zenoh key expression for camera DMA buffers
-    #[arg(long, default_value = "rt/camera/dma")]
+    #[arg(long, env = "CAMERA_TOPIC", default_value = "rt/camera/dma")]
     pub camera_topic: String,
 
-    /// Zenoh key expression for publishing detection results
-    #[arg(long, default_value = "rt/model/boxes2d")]
+    /// Legacy: use --output-topic instead. Empty string disables publishing.
+    #[arg(long, env = "DETECT_TOPIC", default_value = "")]
     pub detect_topic: String,
 
     /// Zenoh key expression for publishing model info
-    #[arg(long, default_value = "rt/model/info")]
+    #[arg(long, env = "INFO_TOPIC", default_value = "rt/model/info")]
     pub info_topic: String,
 
-    /// Zenoh key expression for publishing mask results
-    #[arg(long, default_value = "rt/model/mask")]
+    /// Legacy: use --output-topic instead. Empty string disables publishing.
+    #[arg(long, env = "MASK_TOPIC", default_value = "")]
     pub mask_topic: String,
 
-    /// Zenoh key expression for publishing compressed mask results
-    #[arg(long, default_value = "rt/model/mask_compressed")]
-    pub mask_compressed_topic: String,
+    /// Zenoh key expression for publishing unified model output
+    #[arg(long, env = "OUTPUT_TOPIC", default_value = "rt/model/output")]
+    pub output_topic: String,
 
     /// Path to the inference model file (e.g., .tflite)
     #[arg(short, long, env = "MODEL", required = true)]
@@ -71,8 +75,9 @@ pub struct Args {
 
     /// EdgeFirst config file to override config in model, or supply one
     /// when the model does not include a config. Can be YAML or JSON.
-    #[arg(long, env = "EDGEFIRST_CONFIG")]
-    pub edgefirst_config: Option<PathBuf>,
+    /// An empty string is treated as unset.
+    #[arg(long, env = "EDGEFIRST_CONFIG", default_value = "", value_parser = parse_optional_path)]
+    edgefirst_config: PathBuf,
 
     /// Text annotation style for detected bounding boxes
     #[arg(long, env = "LABELS", default_value = "label", value_enum)]
@@ -98,12 +103,8 @@ pub struct Args {
     #[arg(long, env = "LABEL_OFFSET", default_value = "0")]
     pub label_offset: i32,
 
-    /// Optional decoder model that always runs on CPU
-    #[arg(long, env = "DECODER_MODEL")]
-    pub decoder_model: Option<PathBuf>,
-
     /// Enable multi-object tracking (required for other --track-* flags)
-    #[arg(long, env = "TRACK", action)]
+    #[arg(long, env = "TRACK", default_value = "false", value_parser = parse_bool)]
     pub track: bool,
 
     /// Seconds a tracked object can be missing before removal
@@ -123,37 +124,29 @@ pub struct Args {
     pub track_update: f32,
 
     /// Enable publishing visualization message
-    #[arg(long, env = "VISUALIZATION", action)]
+    #[arg(long, env = "VISUALIZATION", default_value = "false", value_parser = parse_bool)]
     pub visualization: bool,
 
     /// Zenoh key expression for publishing Foxglove visualization topic
-    #[arg(long, default_value = "rt/model/visualization")]
+    #[arg(long, env = "VISUAL_TOPIC", default_value = "rt/model/visualization")]
     pub visual_topic: String,
 
     /// Zenoh key expression for camera info (needed for visualization)
-    #[arg(long, default_value = "rt/camera/info")]
+    #[arg(long, env = "CAMERA_INFO_TOPIC", default_value = "rt/camera/info")]
     pub camera_info_topic: String,
 
-    /// Enable publishing zstd-compressed segmentation masks
-    #[arg(long, env = "MASK_COMPRESSION")]
-    pub mask_compression: bool,
-
-    /// Mask zstd compression level (-7 to 22; 0 behaves as 3)
-    #[arg(long, env = "MASK_COMPRESSION_LEVEL", default_value = "1")]
-    pub mask_compression_level: i32,
-
     /// Class indices to include in mask output (space-separated; empty = all)
-    #[arg(long, env = "MASK_CLASSES", hide_short_help = true, value_parser=parse_classes, default_value="")]
+    #[arg(long, env = "MASK_CLASSES", hide_short_help = true, value_parser = parse_classes, default_value = "")]
     pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
                                              * processing on Vec. This allows us to parse "" as
                                              * Vec::new(). */
 
     /// Enable SSD model mode when a different model config is not found
-    #[arg(long, env = "SSD_MODEL", hide_short_help = true)]
+    #[arg(long, env = "SSD_MODEL", hide_short_help = true, default_value = "false", value_parser = parse_bool)]
     pub ssd_model: bool,
 
     /// Enable Tracy profiler broadcast
-    #[arg(long, env = "TRACY")]
+    #[arg(long, env = "TRACY", default_value = "false", value_parser = parse_bool)]
     pub tracy: bool,
 
     /// Zenoh participant mode (peer, client, or router)
@@ -169,8 +162,35 @@ pub struct Args {
     listen: Vec<String>,
 
     /// Disable Zenoh multicast peer discovery
-    #[arg(long, env = "NO_MULTICAST_SCOUTING")]
+    #[arg(long, env = "NO_MULTICAST_SCOUTING", default_value = "false", value_parser = parse_bool)]
     no_multicast_scouting: bool,
+}
+
+impl Args {
+    /// Returns the EdgeFirst config path, or `None` if empty / unset.
+    pub fn edgefirst_config(&self) -> Option<&Path> {
+        if self.edgefirst_config.as_os_str().is_empty() {
+            None
+        } else {
+            Some(&self.edgefirst_config)
+        }
+    }
+}
+
+/// Parse a boolean from a string value. Accepts "true"/"false" (case-insensitive)
+/// and "1"/"0". An empty string is treated as false.
+fn parse_bool(arg: &str) -> Result<bool, String> {
+    match arg.to_ascii_lowercase().as_str() {
+        "" | "false" | "0" | "no" => Ok(false),
+        "true" | "1" | "yes" => Ok(true),
+        other => Err(format!("invalid boolean value '{other}'")),
+    }
+}
+
+/// Parse a path that may be empty. An empty string produces an empty PathBuf
+/// which `Args::edgefirst_config()` maps to `None`.
+fn parse_optional_path(arg: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(arg))
 }
 
 fn parse_classes(arg: &str) -> Result<Vec<usize>, std::num::ParseIntError> {
@@ -193,15 +213,17 @@ impl From<Args> for Config {
             .insert_json5("mode", &json!(args.mode).to_string())
             .unwrap();
 
-        if !args.connect.is_empty() {
+        let connect: Vec<_> = args.connect.into_iter().filter(|s| !s.is_empty()).collect();
+        if !connect.is_empty() {
             config
-                .insert_json5("connect/endpoints", &json!(args.connect).to_string())
+                .insert_json5("connect/endpoints", &json!(connect).to_string())
                 .unwrap();
         }
 
-        if !args.listen.is_empty() {
+        let listen: Vec<_> = args.listen.into_iter().filter(|s| !s.is_empty()).collect();
+        if !listen.is_empty() {
             config
-                .insert_json5("listen/endpoints", &json!(args.listen).to_string())
+                .insert_json5("listen/endpoints", &json!(listen).to_string())
                 .unwrap();
         }
 

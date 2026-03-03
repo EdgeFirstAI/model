@@ -45,13 +45,13 @@ All topic key expressions are configurable via CLI arguments.
 
 ### Published Topics
 
-| Topic (default)              | CLI flag                    | Message Type                       | Description                                                  |
-| ---------------------------- | --------------------------- | ---------------------------------- | ------------------------------------------------------------ |
-| `rt/model/boxes2d`           | `--detect-topic`            | `edgefirst_msgs/Detect`            | Detection bounding boxes                                     |
-| `rt/model/info`              | `--info-topic`              | `edgefirst_msgs/ModelInfo`         | Model metadata                                               |
-| `rt/model/mask`              | `--mask-topic`              | `edgefirst_msgs/Mask`              | Segmentation masks (raw)                                     |
-| `rt/model/mask_compressed`   | `--mask-compressed-topic`   | `edgefirst_msgs/Mask`              | Compressed masks (when `--mask-compression` enabled)         |
-| `rt/model/visualization`     | `--visual-topic`            | `foxglove_msgs/ImageAnnotations`   | Visualization overlays (when `--visualization` enabled)      |
+| Topic (default)              | CLI flag / Env var                     | Message Type                       | Description                                                  |
+| ---------------------------- | -------------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
+| `rt/model/output`            | `--output-topic` / `OUTPUT_TOPIC`      | `edgefirst_msgs/Model`             | Unified model output (boxes, masks, timing)                  |
+| `rt/model/info`              | `--info-topic` / `INFO_TOPIC`          | `edgefirst_msgs/ModelInfo`         | Model metadata                                               |
+| `rt/model/visualization`     | `--visual-topic` / `VISUAL_TOPIC`      | `foxglove_msgs/ImageAnnotations`   | Visualization overlays (when `--visualization` enabled)      |
+| *(disabled by default)*      | `--detect-topic` / `DETECT_TOPIC`      | `edgefirst_msgs/Detect`            | Legacy detection boxes (set to `rt/model/boxes2d` to enable) |
+| *(disabled by default)*      | `--mask-topic` / `MASK_TOPIC`          | `edgefirst_msgs/Mask`              | Legacy segmentation masks (set to `rt/model/mask` to enable) |
 
 ---
 
@@ -81,11 +81,42 @@ On-target testing requires:
 ./edgefirst-model --model model.tflite --visualization
 ```
 
-### Test with mask compression
+### Test with legacy topics re-enabled
 
 ```bash
-./edgefirst-model --model model.tflite --mask-compression
+./edgefirst-model --model model.tflite \
+  --detect-topic rt/model/boxes2d \
+  --mask-topic rt/model/mask
 ```
+
+### Test unified model output (`rt/model/output`)
+
+The unified `Model` message is published on every frame for all model types. Verify it with:
+
+```bash
+# Subscribe to the unified output topic
+z_sub -k "rt/model/output"
+```
+
+**Detection model** — verify `boxes` is populated and `masks` is empty:
+
+```bash
+./edgefirst-model --model yolov8n.tflite
+```
+
+**Instance segmentation model** — verify `masks` has one entry per box with `boxed: true`:
+
+```bash
+./edgefirst-model --model yolov8n-seg.tflite
+```
+
+**Semantic segmentation model** — verify `masks` has a single entry with `boxed: false`:
+
+```bash
+./edgefirst-model --model deeplab.tflite
+```
+
+For all model types, verify that the `input_time`, `model_time`, and `decode_time` fields contain non-zero durations.
 
 Hardware-dependent unit tests (marked `#[ignore]`) can be run on the device with:
 
@@ -184,7 +215,13 @@ Use Zenoh CLI tools to monitor and verify pub/sub communication during testing.
 z_sub -k "rt/model/**"
 ```
 
-### Subscribe to a specific topic
+### Subscribe to the unified model output
+
+```bash
+z_sub -k "rt/model/output"
+```
+
+### Subscribe to a specific legacy topic
 
 ```bash
 z_sub -k "rt/model/boxes2d"
@@ -206,7 +243,6 @@ The model node supports the following Zenoh connection options:
 | `--connect <endpoint>`      | Connect to a specific Zenoh endpoint     |
 | `--listen <endpoint>`       | Listen on a specific Zenoh endpoint      |
 | `--no-multicast-scouting`   | Disable multicast discovery              |
-| `--multicast-interface`     | Set the multicast scouting interface     |
 
 These flags are useful for testing across network boundaries or when multicast is unavailable.
 

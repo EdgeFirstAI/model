@@ -2,8 +2,8 @@
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
 use edgefirst_schemas::{
-    builtin_interfaces::Time,
-    edgefirst_msgs::{Box, Detect, Mask, ModelInfo, Track, model_info},
+    builtin_interfaces::{Duration, Time},
+    edgefirst_msgs::{Box, Detect, Mask, Model as ModelMsg, ModelInfo, Track, model_info},
     foxglove_msgs::{
         FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
         FoxgloveTextAnnotations,
@@ -251,6 +251,14 @@ pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
     }
 }
 
+pub fn duration_from_ns<T: Into<u128>>(ts: T) -> Duration {
+    let ts: u128 = ts.into();
+    Duration {
+        sec: (ts / 1_000_000_000) as i32,
+        nanosec: (ts % 1_000_000_000) as u32,
+    }
+}
+
 pub fn convert_boxes(
     box_: &edgefirst_hal::decoder::DetectBox,
     track: Option<&edgefirst_tracker::TrackInfo>,
@@ -310,6 +318,66 @@ pub fn build_detect_msg_and_encode_(
     let enc = Encoding::APPLICATION_CDR.with_schema(Detect::SCHEMA_NAME);
 
     (msg, enc)
+}
+
+#[instrument(skip_all)]
+pub fn build_model_output_msg(
+    boxes: &[edgefirst_hal::decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo],
+    labels: &[String],
+    output_masks: &[edgefirst_hal::decoder::Segmentation],
+    header: Header,
+    input_duration: u128,
+    model_duration: u128,
+    decode_duration: u128,
+    has_instance_seg: bool,
+) -> ModelMsg {
+    let timestamp = header.stamp.clone();
+    let msg_boxes: Vec<Box> = boxes
+        .iter()
+        .enumerate()
+        .map(|(ind, b)| convert_boxes(b, tracks.get(ind), labels, timestamp.clone()))
+        .collect();
+
+    let masks = if has_instance_seg {
+        output_masks
+            .iter()
+            .map(|seg| {
+                let shape = seg.segmentation.shape();
+                Mask {
+                    height: shape[0] as u32,
+                    width: shape[1] as u32,
+                    length: 1,
+                    encoding: "".to_string(),
+                    mask: seg.segmentation.iter().copied().collect(),
+                    boxed: true,
+                }
+            })
+            .collect()
+    } else if !output_masks.is_empty() {
+        let seg = &output_masks[0];
+        let shape = seg.segmentation.shape();
+        vec![Mask {
+            height: shape[0] as u32,
+            width: shape[1] as u32,
+            length: 1,
+            encoding: "".to_string(),
+            mask: seg.segmentation.iter().copied().collect(),
+            boxed: false,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    ModelMsg {
+        header,
+        input_time: duration_from_ns(input_duration),
+        model_time: duration_from_ns(model_duration),
+        output_time: Duration { sec: 0, nanosec: 0 },
+        decode_time: duration_from_ns(decode_duration),
+        boxes: msg_boxes,
+        masks,
+    }
 }
 
 fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {

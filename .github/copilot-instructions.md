@@ -494,7 +494,7 @@ This section is customized for the **EdgeFirst Model Node** project.
   - `model.rs`: Model trait, enum_dispatch, model config guessing
   - `tflite_model.rs` / `rtm_model.rs`: Model loading and inference
   - `buildmsgs.rs`: Zenoh message construction (CDR serialization)
-  - `masks.rs`: Segmentation mask processing and compression
+  - `masks.rs`: Segmentation mask processing and class slicing
   - `args.rs`: CLI argument parsing, `fps.rs`: FPS monitoring
   - External: `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
 - **Error handling**: Result types with ModelError for error propagation
@@ -605,12 +605,13 @@ cargo llvm-cov --html --open
 - **Topic structure**: `{namespace}/component/topic`
   - Namespace typically: `edgefirst` or user-defined
 - **Subscriptions**:
-  - Camera frames: `{namespace}/camera/frame` (with DMA buffer FD via pidfd)
+  - Camera frames: `{namespace}/camera/dma` (with DMA buffer FD via pidfd)
 - **Publications**:
-  - Detections: `{namespace}/model/detect` (CDR serialized, edgefirst-schemas)
-  - Segmentation masks: `{namespace}/model/mask` (zstd compressed)
-  - Model metadata: `{namespace}/model/model_info`
-  - Visualization: `{namespace}/model/visualization` (annotated images)
+  - Unified model output: `{namespace}/model/output` (boxes, masks, timing — primary topic)
+  - Model metadata: `{namespace}/model/info`
+  - Visualization: `{namespace}/model/visualization` (annotated images, opt-in)
+  - Legacy detections: `{namespace}/model/boxes2d` (opt-in, disabled by default)
+  - Legacy masks: `{namespace}/model/mask` (opt-in, disabled by default)
 - **Message format**: CDR serialization via `edgefirst-schemas` crate
 - **DMA buffer passing**: Use `pidfd_getfd` to pass file descriptors between processes
 

@@ -123,31 +123,35 @@ async fn heart_beat_loop(
 
     trace!("Opened DMA buffer from camera");
 
-    let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
-    let msg = ZBytes::from(serde_cdr::serialize(&mask).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
+    if !args.mask_topic.is_empty() {
+        let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
+        let msg = ZBytes::from(serde_cdr::serialize(&mask).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
 
-    match session.put(&args.mask_topic, msg).encoding(enc).await {
-        Ok(_) => (),
-        Err(e) => {
-            error!("Error sending message on {}: {:?}", args.mask_topic, e)
+        match session.put(&args.mask_topic, msg).encoding(enc).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error sending message on {}: {:?}", args.mask_topic, e)
+            }
         }
     }
 
-    let (msg, enc) = build_detect_msg_and_encode_(
-        &[],
-        &[],
-        &[],
-        dma_buf.header.clone(),
-        time_from_ns(0u32),
-        time_from_ns(0u32),
-        time_from_ns(0u32),
-    );
+    if !args.detect_topic.is_empty() {
+        let (msg, enc) = build_detect_msg_and_encode_(
+            &[],
+            &[],
+            &[],
+            dma_buf.header.clone(),
+            time_from_ns(0u32),
+            time_from_ns(0u32),
+            time_from_ns(0u32),
+        );
 
-    match session.put(&args.detect_topic, msg).encoding(enc).await {
-        Ok(_) => (),
-        Err(e) => {
-            error!("Error sending message on {}: {:?}", args.detect_topic, e)
+        match session.put(&args.detect_topic, msg).encoding(enc).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error sending message on {}: {:?}", args.detect_topic, e)
+            }
         }
     }
 

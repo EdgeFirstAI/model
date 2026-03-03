@@ -35,10 +35,10 @@ rtm = ["vaal"]
 [dependencies]
 async-pidfd = "0.1.4"
 clap = { version = "4.5.47", features = ["derive", "env"] }
-edgefirst-hal = "0.6.2"
+edgefirst-hal = { path = "../../EdgeFirst/hal/crates/hal" }
 four-char-code = "2.3.0"
-edgefirst-schemas = "1.5.3"
-edgefirst-tracker = "0.6.2"
+edgefirst-schemas = "1.5.5"
+edgefirst-tracker = { path = "../../EdgeFirst/hal/crates/tracker" }
 enum_dispatch = "0.3.13"
 log = { version = "0.4.28" }
 ndarray = { version = "0.16.1", features = ["rayon"] }
@@ -74,7 +74,6 @@ uuid = { version = "1.18.1", features = ["v4"] }
 vaal = { git = "https://github.com/DeepViewML/vaal-rs.git", optional = true}
 zip = "5.0.0"
 zenoh = "1.5.0"
-zstd = "0.13.3"
 fast-math = "0.1.1"
 
 [dev-dependencies]

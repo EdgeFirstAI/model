@@ -49,15 +49,14 @@ graph TB
 
     subgraph "Background Tasks (Tokio)"
         Heartbeat["Heartbeat Loop<br/>(model loading status)"]
-        MaskTask["Mask Processing Task<br/>(class slicing)"]
-        CompressTask["Mask Compression Task<br/>(zstd compression)"]
+        MaskTask["Mask Processing Task<br/>(class slicing, opt-in)"]
     end
 
     subgraph "Zenoh Topics (Published)"
-        DetectTop["rt/model/boxes2d<br/>edgefirst_msgs/Detect"]
+        OutputTop["rt/model/output<br/>edgefirst_msgs/Model"]
         InfoTop["rt/model/info<br/>edgefirst_msgs/ModelInfo"]
-        MaskTop["rt/model/mask<br/>edgefirst_msgs/Mask"]
-        MaskCompTop["rt/model/mask_compressed<br/>edgefirst_msgs/Mask (zstd)"]
+        DetectTop["rt/model/boxes2d<br/>edgefirst_msgs/Detect (opt-in)"]
+        MaskTop["rt/model/mask<br/>edgefirst_msgs/Mask (opt-in)"]
         VisualTop["rt/model/visualization<br/>foxglove_msgs/ImageAnnotations"]
     end
 
@@ -67,14 +66,13 @@ graph TB
         DMA["DMA Memory<br/>(CMA heap, zero-copy)"]
     end
 
+    Publish --> OutputTop
     Publish --> DetectTop
     Publish --> InfoTop
     Publish --> MaskTop
     Publish --> VisualTop
 
     MaskTask --> MaskTop
-    MaskTask --> CompressTask
-    CompressTask --> MaskCompTop
 
     G2DPrep -.->|"DMA-to-DMA"| G2D
     Inference -.->|"accelerated"| NPU
@@ -86,7 +84,7 @@ graph TB
 - **Async Main Loop**: Single-threaded async runtime for I/O-bound operations (Zenoh subscribe/publish)
 - **Zero-Copy DMA**: Camera buffers transferred via PidFd; only metadata crosses process boundaries
 - **Hardware Acceleration**: G2D for image preprocessing, NPU for inference (with CPU fallback)
-- **Parallel Mask Processing**: Segmentation mask handling runs on separate Tokio tasks for non-blocking pipeline
+- **Parallel Mask Processing**: Segmentation mask handling runs on a separate Tokio task when the legacy mask topic is enabled
 - **External Tracker**: Multi-object tracking via `edgefirst-tracker` crate (ByteTrack with Kalman filter)
 - **External Decoder**: YOLO/ModelPack decoding and NMS via `edgefirst_hal::decoder` module
 - **Runtime Dynamic Loading**: Both G2D and TFLite loaded via `libloading` (dlopen) for platform portability
@@ -122,7 +120,7 @@ src/
   buildmsgs.rs     Zenoh message construction (Detect, ModelInfo, Mask, ImageAnnotations)
   args.rs          CLI argument parsing (Clap)
   fps.rs           Rolling FPS average calculator
-  masks.rs         Async mask slicing and zstd compression tasks
+  masks.rs         Async mask slicing and publishing (legacy mask topic)
 ```
 
 ---
@@ -162,7 +160,7 @@ loop {
         output_tracks.extend(tracks.into_iter().flatten());
     }
 
-    // Publish: Detect, ModelInfo, Mask, ImageAnnotations
+    // Publish: Model (unified output), Detect (legacy), ModelInfo, Mask (legacy), ImageAnnotations
     fps.update();
     args.tracy.then(frame_mark);
 }
@@ -292,23 +290,24 @@ pub enum Preprocessing {
 
 **Functions:**
 
-- `build_detect_msg_and_encode_()` -- Constructs `Detect` message with boxes, tracks, timing
+- `build_model_output_msg()` -- Constructs the unified `Model` message with boxes, masks, and timing durations. Handles all three model types: detection-only (empty masks), semantic segmentation (single mask with `boxed: false`), and instance segmentation (one mask per box with `boxed: true`)
+- `build_detect_msg_and_encode_()` -- Constructs legacy `Detect` message with boxes, tracks, timing
 - `build_model_info_msg()` -- Constructs `ModelInfo` message with model metadata
-- `build_segmentation_msg_()` -- Constructs `Mask` message from decoder segmentation output
+- `build_segmentation_msg_()` -- Constructs legacy `Mask` message from decoder segmentation output (semantic segmentation only)
 - `build_image_annotations_msg_and_encode_()` -- Constructs Foxglove `ImageAnnotations` for visualization
-- `convert_boxes()` -- Converts `DetectBox` + `TrackInfo` to the schema `Box` type
+- `convert_boxes()` -- Converts `DetectBox` + `TrackInfo` to the schema `Box` type (shared by both `Model` and `Detect` messages)
 - `time_from_ns()` -- Converts nanosecond timestamp to `Time` struct
+- `duration_from_ns()` -- Converts nanosecond duration to `Duration` struct (used by `Model` message timing fields)
 
 ---
 
 ### Mask Processing (`masks.rs`)
 
-**Purpose:** Asynchronous segmentation mask handling and publishing.
+**Purpose:** Asynchronous segmentation mask handling and publishing for the legacy mask topic.
 
-**Background Tasks:**
+**Background Task:**
 
-1. **`mask_thread()`** -- Receives masks via mpsc channel, optionally slices to specific classes (`--mask-classes`), publishes to `rt/model/mask`, forwards to compression task if enabled
-2. **`mask_compress_thread()`** -- Compresses masks using zstd (`--mask-compression-level`), publishes to `rt/model/mask_compressed`
+- **`mask_thread()`** -- Receives masks via mpsc channel, optionally slices to specific classes (`--mask-classes`), publishes to the legacy mask topic. Only spawned when `mask_topic` is non-empty.
 
 **Non-Blocking Design:** Mask processing runs in parallel with the main inference loop. Bounded channels (size 50) provide backpressure. `drain_recv()` ensures the latest mask is processed if a backlog occurs.
 
@@ -316,7 +315,7 @@ pub enum Preprocessing {
 
 ### CLI Arguments (`args.rs`)
 
-**Purpose:** Clap-based argument parsing. Key arguments include model path, engine selection (NPU/CPU), score threshold, IOU threshold, tracking parameters, mask compression settings, Zenoh connection options, and Tracy profiler toggle.
+**Purpose:** Clap-based argument parsing. Key arguments include model path, engine selection (NPU/CPU), score threshold, IOU threshold, tracking parameters, topic configuration, Zenoh connection options, and Tracy profiler toggle. All topic fields support environment variable configuration via `env` attributes for systemd EnvironmentFile integration. Legacy topics (`detect_topic`, `mask_topic`) default to empty (disabled).
 
 ---
 
@@ -354,12 +353,13 @@ sequenceDiagram
     Model->>Model: Decoder: decode + NMS (edgefirst_hal)
     Model->>Model: ByteTrack update (edgefirst_tracker)
 
-    Model->>Zenoh: Detect msg (rt/model/boxes2d)
+    Model->>Zenoh: Model msg (rt/model/output)
+    Note over Model: Unified output with boxes,<br/>masks, and timing
     Model->>Zenoh: ModelInfo msg (rt/model/info)
-    Model->>Zenoh: Mask msg (rt/model/mask)
-
-    Note over Model: Parallel mask compression
-    Model->>Zenoh: Compressed Mask (rt/model/mask_compressed)
+    opt Legacy topics enabled
+    Model->>Zenoh: Detect msg (rt/model/boxes2d, opt-in)
+    Model->>Zenoh: Mask msg (rt/model/mask, opt-in)
+    end
 ```
 
 ### Zero-Copy DMA Transfer
@@ -455,6 +455,43 @@ pub struct Track {
 
 **Published Rate:** Same as camera FPS (typically 30 Hz)
 
+> **Note:** The `Detect` message is a legacy topic retained for backwards compatibility. New subscribers should use the unified `Model` message on `rt/model/output` instead (see below).
+
+---
+
+### Model Message (Published — Unified Output)
+
+```rust
+// edgefirst_msgs/Model (from edgefirst-schemas)
+pub struct Model {
+    pub header: Header,
+    pub input_time: Duration,     // Preprocessing + frame load duration
+    pub model_time: Duration,     // NPU inference duration
+    pub output_time: Duration,    // Tensor readout duration (currently zero)
+    pub decode_time: Duration,    // Post-processing (NMS, mask decode) duration
+    pub boxes: Vec<Box>,          // Same Box type as Detect message
+    pub masks: Vec<Mask>,         // Segmentation masks (empty if detection-only)
+}
+```
+
+The `Model` message supersedes the separate `Detect` and `Mask` topics by combining detection boxes, segmentation masks, and detailed per-stage timing in a single message. It is published on **every frame** for **all model types**.
+
+**Key differences from the legacy topics:**
+
+| Aspect | Legacy (`Detect` + `Mask`) | Unified (`Model`) |
+|--------|----------------------------|---------------------|
+| **Topics** | Two separate topics (`boxes2d`, `mask`) | Single topic (`output`) |
+| **Instance seg masks** | Never published (instance seg flag was unused) | Published as `masks[]` with `boxed: true` |
+| **Timing fields** | Uses `Time` type (ambiguous for durations) | Uses `Duration` type (semantically correct) |
+| **Scope** | `Detect` only for detection models; `Mask` only for semantic seg | Published for all model types |
+| **Box-mask association** | No association possible across topics | `masks[i]` corresponds to `boxes[i]` when `boxed: true` |
+
+**Mask behavior by model type:**
+
+- **Detection only:** `masks` is empty, `boxes` contains detections
+- **Semantic segmentation:** `masks` contains a single entry with `boxed: false`, holding the full-frame class mask
+- **Instance segmentation:** `masks` contains one entry per detected box with `boxed: true`, where `masks[i]` is the per-object mask for `boxes[i]`
+
 ---
 
 ### ModelInfo Message (Published)
@@ -476,7 +513,7 @@ pub struct ModelInfo {
 
 ---
 
-### Mask Message (Published)
+### Mask Message (Published — Legacy, Opt-In)
 
 ```rust
 // edgefirst_msgs/Mask (from edgefirst-schemas)
@@ -484,13 +521,15 @@ pub struct Mask {
     pub height: u32,
     pub width: u32,
     pub length: u32,              // Number of frames (always 1)
-    pub encoding: String,         // "" (raw) or "zstd" (compressed)
+    pub encoding: String,         // "" (raw)
     pub mask: Vec<u8>,            // HxWxC mask data (C = number of classes)
-    pub boxed: bool,
+    pub boxed: bool,              // true = per-box mask, false = full-frame mask
 }
 ```
 
 **Class Slicing:** The `--mask-classes` argument filters masks to specific class indices, reducing bandwidth for applications that only need specific objects.
+
+> **Note:** The legacy `Mask` topic is disabled by default. Enable with `MASK_TOPIC=rt/model/mask` or `--mask-topic rt/model/mask`. It only publishes for semantic segmentation models. Instance segmentation masks were never published on this topic. The unified `Model` message on `rt/model/output` publishes masks for both semantic and instance segmentation.
 
 ---
 

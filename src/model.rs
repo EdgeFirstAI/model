@@ -250,7 +250,10 @@ pub(crate) fn dmabuf_to_tensor_image(
         None,
     )?;
 
-    let fourcc = FourCharCode::new(dma.fourcc)
+    // DmaBuffer.fourcc uses V4L2/DRM convention where characters are packed
+    // little-endian (first char in lowest byte), while FourCharCode uses
+    // big-endian (first char in highest byte). Swap bytes to convert.
+    let fourcc = FourCharCode::new(dma.fourcc.swap_bytes())
         .map_err(|e| ModelError::new(ModelErrorKind::Image, format!("Invalid FourCC code: {e}")))?;
     let img = TensorImage::from_tensor(tensor, fourcc)?;
     Ok(img)
