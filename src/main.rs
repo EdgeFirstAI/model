@@ -28,6 +28,7 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
+use tracing::info_span;
 use tokio::sync::mpsc;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
@@ -541,7 +542,10 @@ pub async fn main() -> ExitCode {
     let mut output_masks = Vec::with_capacity(50);
     let mut output_tracks = Vec::with_capacity(50);
     loop {
-        let Some(mut dma_buf) = wait_for_camera_frame(&sub_camera, timeout) else {
+        let Some(mut dma_buf) = ({
+            let _span = info_span!("wait_for_camera_frame").entered();
+            wait_for_camera_frame(&sub_camera, timeout)
+        }) else {
             continue;
         };
         trace!("Received camera frame");
@@ -564,19 +568,23 @@ pub async fn main() -> ExitCode {
             }
         };
 
-        if let Err(e) = img_proc.convert(
-            &src_image,
-            &mut dst_image,
-            Rotation::None,
-            Flip::None,
-            Crop::no_crop(),
-        ) {
-            error!("Image conversion failed: {e:?}");
-            continue;
+        {
+            let _span = info_span!("preprocess").entered();
+            if let Err(e) = img_proc.convert(
+                &src_image,
+                &mut dst_image,
+                Rotation::None,
+                Flip::None,
+                Crop::no_crop(),
+            ) {
+                error!("Image conversion failed: {e:?}");
+                continue;
+            }
         }
 
         // Write preprocessed pixels to input tensor
         {
+            let _span = info_span!("load_input").entered();
             let map = match dst_image.tensor().map() {
                 Ok(v) => v,
                 Err(e) => {
@@ -664,9 +672,12 @@ pub async fn main() -> ExitCode {
         trace!("Load input: {:.3} ms", input_duration as f32 / 1_000_000.0);
 
         let model_start = Instant::now();
-        if let Err(e) = interpreter.invoke() {
-            error!("Failed to run model: {e:?}");
-            return ExitCode::FAILURE;
+        {
+            let _span = info_span!("invoke").entered();
+            if let Err(e) = interpreter.invoke() {
+                error!("Failed to run model: {e:?}");
+                return ExitCode::FAILURE;
+            }
         }
         let model_duration = model_start.elapsed().as_nanos();
         trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
@@ -681,9 +692,13 @@ pub async fn main() -> ExitCode {
         }
 
         let output_start = Instant::now();
-        let res = decode_outputs(&interpreter, &decoder, &mut output_boxes, &mut output_masks);
+        let res = {
+            let _span = info_span!("decode_outputs").entered();
+            decode_outputs(&interpreter, &decoder, &mut output_boxes, &mut output_masks)
+        };
 
         if res.is_ok() && args.track {
+            let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
             let timestamp = dma_buf.header.stamp.nanosec as u64
@@ -741,6 +756,7 @@ pub async fn main() -> ExitCode {
             first_run = false;
         }
 
+        let _pub_span = info_span!("zenoh_publish").entered();
         if has_seg
             && let Some(mask_tx) = mask_tx.as_ref()
         {

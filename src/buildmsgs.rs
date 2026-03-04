@@ -296,6 +296,7 @@ pub fn build_detect_msg_and_encode_(
     (msg, enc)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 pub fn build_model_output_msg(
     boxes: &[edgefirst_hal::decoder::DetectBox],
