@@ -38,11 +38,11 @@ pub enum LabelSetting {
 ///
 /// ```bash
 /// # Via command line
-/// edgefirst-model --model /path/to/model.tflite --engine npu
+/// edgefirst-model --model /path/to/model.tflite --delegate /usr/lib/libvx_delegate.so
 ///
 /// # Via environment variables
 /// export MODEL=/path/to/model.tflite
-/// export ENGINE=npu
+/// export DELEGATE=/usr/lib/libvx_delegate.so
 /// export THRESHOLD=0.5
 /// edgefirst-model
 /// ```
@@ -83,9 +83,9 @@ pub struct Args {
     #[arg(long, env = "LABELS", default_value = "label", value_enum)]
     pub labels: LabelSetting,
 
-    /// Inference engine / delegate for model execution
-    #[arg(long, env = "ENGINE", default_value = "npu")]
-    pub engine: String,
+    /// Path to TFLite delegate shared library (empty = CPU only)
+    #[arg(long, env = "DELEGATE", default_value = "")]
+    pub delegate: String,
 
     /// Score threshold for detections
     #[arg(short, long, env = "THRESHOLD", default_value = "0.45")]
