@@ -13,14 +13,14 @@ use edgefirst_schemas::{
     serde_cdr,
     std_msgs::Header,
 };
-use log::{debug, error};
+use log::debug;
 use std::path::Path;
 use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{
     args::LabelSetting,
-    model::{Model, SupportedModel},
+    model::ModelContext,
 };
 use edgefirst_hal::decoder::configs::DataType;
 
@@ -171,49 +171,21 @@ pub fn build_image_annotations_msg_and_encode_(
 #[instrument(skip_all)]
 pub fn build_segmentation_msg(
     _in_time: Time,
-    model_ctx: Option<&SupportedModel>,
+    model_ctx: Option<&ModelContext>,
     output_index: usize,
+    output_data: Option<&[u8]>,
 ) -> Mask {
-    let mut output_shape = vec![0, 0, 0, 0];
-    let mask = if let Some(model) = model_ctx {
-        match model.output_shape(output_index) {
-            Ok(v) => output_shape = v,
-            Err(e) => error!("Could not get output shape: {e:?}"),
-        }
-        let len = output_shape.iter().product();
+    let output_shape = model_ctx
+        .and_then(|ctx| ctx.output_shapes.get(output_index).cloned())
+        .unwrap_or_else(|| vec![0, 0, 0, 0]);
 
-        let output_type = match model.output_type(output_index) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get output type: {e:?}");
-                DataType::UInt8
-            }
-        };
-
-        match output_type {
-            DataType::Int8 => {
-                let mut buffer = vec![0i8; len];
-                if let Err(e) = model.output_data(output_index, &mut buffer) {
-                    error!("Could not get output data from segmentation tensor: {e:?}");
-                }
-                buffer.into_iter().map(|x| (x as i32 + 128) as u8).collect()
-            }
-            DataType::UInt8 => {
-                let mut buffer = vec![0u8; len];
-                if let Err(e) = model.output_data(output_index, &mut buffer) {
-                    error!("Could not get output data from segmentation tensor: {e:?}");
-                }
-                buffer
-            }
-            _ => todo!(),
-        }
-    } else {
-        Vec::new()
-    };
+    let mask = output_data
+        .map(|d| d.to_vec())
+        .unwrap_or_default();
 
     Mask {
-        height: output_shape[1] as u32,
-        width: output_shape[2] as u32,
+        height: output_shape.get(1).copied().unwrap_or(0) as u32,
+        width: output_shape.get(2).copied().unwrap_or(0) as u32,
         length: 1,
         encoding: "".to_string(),
         mask,
@@ -402,26 +374,24 @@ fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {
     }
 }
 
-fn get_input_info(model_ctx: Option<&SupportedModel>) -> (Vec<u32>, u8) {
+fn get_input_info(model_ctx: Option<&ModelContext>) -> (Vec<u32>, u8) {
     let mut input_shape = vec![0, 0, 0, 0];
     let mut input_type = model_info::RAW;
 
     if let Some(ctx) = model_ctx {
-        match ctx.input_shape(0) {
-            Ok(v) => input_shape = v.iter().map(|f| *f as u32).collect(),
-            Err(e) => error!("Cannot get input shape: {e:?}"),
+        if let Some(shape) = ctx.input_shapes.first() {
+            input_shape = shape.iter().map(|f| *f as u32).collect();
         }
-        match ctx.input_type(0) {
-            Ok(v) => input_type = tensor_type_to_model_info_datatype(v),
-            Err(e) => error!("Cannot get input datatype: {e:?}"),
-        };
+        if let Some(dt) = ctx.input_types.first() {
+            input_type = tensor_type_to_model_info_datatype(dt.clone());
+        }
     }
     (input_shape, input_type)
 }
 
 pub fn build_model_info_msg(
     in_time: Time,
-    model_ctx: Option<&SupportedModel>,
+    model_ctx: Option<&ModelContext>,
     path: &Path,
     has_det: bool,
     has_seg: bool,
@@ -429,44 +399,26 @@ pub fn build_model_info_msg(
     let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
     let mut labels = Vec::new();
-    if let Some(model_ctx) = model_ctx {
-        match model_ctx.output_shape(0) {
-            Ok(v) => output_shape = v.iter().map(|f| *f as u32).collect(),
-            Err(e) => {
-                error!("Cannot get output shape of model: {e:?}");
-            }
-        };
-        let model_output_type = match model_ctx.output_type(0) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Cannot get output data type of model: {e:?}");
-                DataType::Raw
-            }
-        };
-        output_type = tensor_type_to_model_info_datatype(model_output_type);
-
-        match model_ctx.labels() {
-            Ok(v) => labels = v,
-            Err(e) => {
-                error!("Cannot get labels of model: {e:?}");
-            }
-        };
+    if let Some(ctx) = model_ctx {
+        if let Some(shape) = ctx.output_shapes.first() {
+            output_shape = shape.iter().map(|f| *f as u32).collect();
+        }
+        if let Some(dt) = ctx.output_types.first() {
+            output_type = tensor_type_to_model_info_datatype(dt.clone());
+        }
+        labels = ctx.labels.clone();
     }
 
     let model_format = match path.extension() {
-        // , HailoRT, RKNN, TensorRT, TFLite
         Some(v) => match v.to_string_lossy().to_ascii_lowercase().as_str() {
-            "rtm" => String::from("DeepViewRT"),
-            "rknn" => String::from("RKNN"),
             "tflite" => String::from("TFLite"),
-            "hef" => String::from("HailoRT"),
             _ => v.to_string_lossy().into_owned(),
         },
         None => String::from("unknown"),
     };
 
     let model_name = match model_ctx {
-        Some(ctx) if ctx.model_name().is_ok_and(|n| !n.is_empty()) => ctx.model_name().unwrap(),
+        Some(ctx) if !ctx.name.is_empty() => ctx.name.clone(),
         Some(_) => path
             .file_name()
             .unwrap_or_default()
@@ -489,7 +441,7 @@ pub fn build_model_info_msg(
             stamp: in_time.clone(),
             frame_id: String::new(),
         },
-        labels, // input_shape = model_ctx.
+        labels,
         input_shape,
         input_type,
         output_shape,

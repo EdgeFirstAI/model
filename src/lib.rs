@@ -120,7 +120,7 @@ async fn heart_beat_loop(
     trace!("Opened DMA buffer from camera");
 
     if !args.mask_topic.is_empty() {
-        let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0);
+        let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0, None);
         let msg = ZBytes::from(serde_cdr::serialize(&mask).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
 
