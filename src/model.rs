@@ -143,16 +143,24 @@ pub struct Metadata {
 
 // ── dmabuf_to_tensor_image ───────────────────────────────────────────────────
 
-use nix::libc::dup;
 #[instrument(skip_all)]
-pub fn dmabuf_to_tensor_image(
-    dma: &DmaBuffer,
-) -> Result<TensorImage, ModelError> {
+pub fn dmabuf_to_tensor_image(dma: &DmaBuffer) -> Result<TensorImage, ModelError> {
     // Force DMA tensor type — the camera fd is always a DMA-BUF but
     // Tensor::from_fd auto-detection may misclassify it as SHM based on
     // anon_inode minor numbers, which prevents G2D hardware acceleration.
+    let raw_fd = unsafe { nix::libc::dup(dma.fd) };
+    if raw_fd < 0 {
+        return Err(ModelError::new(
+            ModelErrorKind::Io,
+            format!(
+                "Failed to dup DMA-BUF fd: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let dma_tensor = DmaTensor::<u8>::from_fd(
-        unsafe { OwnedFd::from_raw_fd(dup(dma.fd)) },
+        fd,
         &[
             dma.height as usize,
             dma.width as usize,
@@ -185,9 +193,9 @@ pub fn decode_outputs(
     output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
     output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
 ) -> Result<(), ModelError> {
-    let outputs = interpreter.outputs().map_err(|e| {
-        ModelError::new(ModelErrorKind::TFLite, format!("Cannot get outputs: {e}"))
-    })?;
+    let outputs = interpreter
+        .outputs()
+        .map_err(|e| ModelError::new(ModelErrorKind::TFLite, format!("Cannot get outputs: {e}")))?;
 
     let mut float_views = Vec::new();
     let mut quant_views = Vec::new();
@@ -201,14 +209,24 @@ pub fn decode_outputs(
                 let data = tensor.as_slice::<f32>().map_err(|e| {
                     ModelError::new(ModelErrorKind::TFLite, format!("Cannot read f32: {e}"))
                 })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
+                    ModelError::new(
+                        ModelErrorKind::TFLite,
+                        format!("f32 shape/data mismatch: {e}"),
+                    )
+                })?;
                 float_views.push(arr);
             }
             edgefirst_tflite::TensorType::UInt8 => {
                 let data = tensor.as_slice::<u8>().map_err(|e| {
                     ModelError::new(ModelErrorKind::TFLite, format!("Cannot read u8: {e}"))
                 })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
+                    ModelError::new(
+                        ModelErrorKind::TFLite,
+                        format!("u8 shape/data mismatch: {e}"),
+                    )
+                })?;
                 let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
                 quant_views.push(arr);
             }
@@ -216,7 +234,12 @@ pub fn decode_outputs(
                 let data = tensor.as_slice::<i8>().map_err(|e| {
                     ModelError::new(ModelErrorKind::TFLite, format!("Cannot read i8: {e}"))
                 })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
+                    ModelError::new(
+                        ModelErrorKind::TFLite,
+                        format!("i8 shape/data mismatch: {e}"),
+                    )
+                })?;
                 let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
                 quant_views.push(arr);
             }
@@ -1153,4 +1176,30 @@ fn guess_yolo_split_segdet(
 
 fn get_count_in_iter<T: PartialEq>(iter: impl Iterator<Item = T>, val: T) -> usize {
     iter.filter(|x| x == &val).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guess_yolo_det_shape() {
+        // YOLOv8n detection: 1x84x8400 (84 = 4 bbox + 80 classes)
+        let shapes = vec![vec![1, 84, 8400]];
+        let quants = vec![None];
+        let config = guess_model_config(&shapes, &quants);
+        assert!(config.is_some(), "Should detect YOLOv8 detection shape");
+    }
+
+    #[test]
+    fn guess_empty_shapes() {
+        let config = guess_model_config(&[], &[]);
+        assert!(config.is_none(), "Empty shapes should return None");
+    }
+
+    #[test]
+    fn model_error_display() {
+        let err = ModelError::new(ModelErrorKind::TFLite, "test error".to_string());
+        assert_eq!(format!("{err}"), "kind: TFLite, source: \"test error\"");
+    }
 }

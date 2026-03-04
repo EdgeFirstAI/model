@@ -104,7 +104,14 @@ pub struct Args {
     pub label_offset: i32,
 
     /// Enable multi-object tracking (required for other --track-* flags)
-    #[arg(long, env = "TRACK", default_value = "false", value_parser = parse_bool)]
+    #[arg(
+        long,
+        env = "TRACK",
+        default_value = "false",
+        default_missing_value = "true",
+        num_args(0..=1),
+        value_parser = parse_bool
+    )]
     pub track: bool,
 
     /// Seconds a tracked object can be missing before removal
@@ -124,7 +131,14 @@ pub struct Args {
     pub track_update: f32,
 
     /// Enable publishing visualization message
-    #[arg(long, env = "VISUALIZATION", default_value = "false", value_parser = parse_bool)]
+    #[arg(
+        long,
+        env = "VISUALIZATION",
+        default_value = "false",
+        default_missing_value = "true",
+        num_args(0..=1),
+        value_parser = parse_bool
+    )]
     pub visualization: bool,
 
     /// Zenoh key expression for publishing Foxglove visualization topic
