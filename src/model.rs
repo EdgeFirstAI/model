@@ -15,7 +15,7 @@ use edgefirst_hal::decoder::{
     },
 };
 use edgefirst_hal::image::TensorImage;
-use edgefirst_hal::tensor::{Tensor, TensorTrait};
+use edgefirst_hal::tensor::{DmaTensor, Tensor, TensorTrait};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use four_char_code::FourCharCode;
 use tracing::instrument;
@@ -148,7 +148,10 @@ use nix::libc::dup;
 pub fn dmabuf_to_tensor_image(
     dma: &DmaBuffer,
 ) -> Result<TensorImage, ModelError> {
-    let tensor = Tensor::from_fd(
+    // Force DMA tensor type — the camera fd is always a DMA-BUF but
+    // Tensor::from_fd auto-detection may misclassify it as SHM based on
+    // anon_inode minor numbers, which prevents G2D hardware acceleration.
+    let dma_tensor = DmaTensor::<u8>::from_fd(
         unsafe { OwnedFd::from_raw_fd(dup(dma.fd)) },
         &[
             dma.height as usize,
@@ -157,6 +160,7 @@ pub fn dmabuf_to_tensor_image(
         ],
         None,
     )?;
+    let tensor = Tensor::Dma(dma_tensor);
 
     // DmaBuffer.fourcc uses V4L2/DRM convention where characters are packed
     // little-endian (first char in lowest byte), while FourCharCode uses
