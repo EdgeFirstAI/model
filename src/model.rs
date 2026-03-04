@@ -14,60 +14,13 @@ use edgefirst_hal::decoder::{
         Segmentation,
     },
 };
-use edgefirst_hal::image::{ImageProcessor, TensorImage};
+use edgefirst_hal::image::TensorImage;
 use edgefirst_hal::tensor::{Tensor, TensorTrait};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
-use enum_dispatch::enum_dispatch;
 use four_char_code::FourCharCode;
-use tflitec_sys::TfLiteError;
 use tracing::instrument;
 
-#[cfg(feature = "rtm")]
-use crate::rtm_model::RtmModel;
-
-use crate::tflite_model::TFLiteModel;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Preprocessing {
-    Raw = 0x0,
-    UnsignedNorm = 0x1,
-    SignedNorm = 0x2,
-    ImageNet = 0x8,
-}
-
-pub static RGB_MEANS_IMAGENET: [f32; 4] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0, 128.0]; // last value is for Alpha channel when needed
-pub static RGB_STDS_IMAGENET: [f32; 4] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0, 64.0]; // last value is for Alpha channel when needed
-
-#[enum_dispatch(Model)]
-pub enum SupportedModel<'a> {
-    TfLiteModel(TFLiteModel<'a>),
-    #[cfg(feature = "rtm")]
-    RtmModel(RtmModel),
-}
-
-#[derive(Debug, Default, PartialEq, Clone)]
-pub struct Metadata {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub description: Option<String>,
-    pub author: Option<String>,
-    pub license: Option<String>,
-    pub config_yaml: Option<String>,
-}
-
-impl From<tflitec_sys::metadata::Metadata> for Metadata {
-    fn from(value: tflitec_sys::metadata::Metadata) -> Self {
-        Self {
-            name: value.name,
-            version: value.version,
-            description: value.description,
-            author: value.author,
-            license: value.license,
-            config_yaml: value.config_yaml,
-        }
-    }
-}
+// ── ModelError ───────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct ModelError {
@@ -79,8 +32,6 @@ pub struct ModelError {
 pub enum ModelErrorKind {
     Io,
     TFLite,
-    #[cfg(feature = "rtm")]
-    Rtm,
     Tensor,
     Image,
     Decoding,
@@ -108,30 +59,10 @@ impl From<std::io::Error> for ModelError {
     }
 }
 
-impl From<TfLiteError> for ModelError {
-    fn from(value: TfLiteError) -> Self {
+impl From<edgefirst_tflite::Error> for ModelError {
+    fn from(value: edgefirst_tflite::Error) -> Self {
         ModelError {
             kind: ModelErrorKind::TFLite,
-            source: Box::from(value),
-        }
-    }
-}
-
-#[cfg(feature = "rtm")]
-impl From<vaal::error::Error> for ModelError {
-    fn from(value: vaal::error::Error) -> Self {
-        ModelError {
-            kind: ModelErrorKind::Rtm,
-            source: Box::from(value),
-        }
-    }
-}
-
-#[cfg(feature = "rtm")]
-impl From<vaal::deepviewrt::error::Error> for ModelError {
-    fn from(value: vaal::deepviewrt::error::Error) -> Self {
-        ModelError {
-            kind: ModelErrorKind::Rtm,
             source: Box::from(value),
         }
     }
@@ -184,62 +115,39 @@ impl ModelError {
     }
 }
 
-#[enum_dispatch]
-pub trait Model {
-    fn model_name(&self) -> Result<String, ModelError>;
+// ── ModelContext ──────────────────────────────────────────────────────────────
 
-    fn load_frame_dmabuf_(
-        &mut self,
-        dmabuf: &DmaBuffer,
-        img_mgr: &mut ImageProcessor,
-        preprocessing: Preprocessing,
-    ) -> Result<(), ModelError>;
-
-    fn run_model(&mut self) -> Result<(), ModelError>;
-
-    fn input_count(&self) -> Result<usize, ModelError>;
-    fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError>;
-    fn input_type(&self, index: usize) -> Result<DataType, ModelError>;
-    fn load_input(
-        &mut self,
-        index: usize,
-        data: &[u8],
-        data_channels: usize,
-        preprocessing: Preprocessing,
-    ) -> Result<(), ModelError>;
-
-    fn output_count(&self) -> Result<usize, ModelError>;
-    fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError>;
-    fn output_type(&self, index: usize) -> Result<DataType, ModelError>;
-    fn output_data<T: Copy>(&self, index: usize, data: &mut [T]) -> Result<(), ModelError>;
-    fn output_quantization(&self, index: usize) -> Result<Option<(f32, i32)>, ModelError>;
-
-    fn labels(&self) -> Result<Vec<String>, ModelError>;
-
-    fn decode_outputs(
-        &self,
-        decoder: &edgefirst_hal::decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
-    ) -> Result<(), ModelError>;
-
-    fn decode_outputs_tracked(
-        &self,
-        decoder: &edgefirst_hal::decoder::Decoder,
-        output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
-        output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
-        _output_tracks: &mut Vec<edgefirst_tracker::TrackInfo>,
-        _timestamp: u64,
-    ) -> Result<(), ModelError>;
-
-    fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
+/// Static model metadata used for building info and segmentation messages.
+/// Populated once at startup from interpreter tensor introspection.
+#[derive(Debug, Clone)]
+pub struct ModelContext {
+    pub input_shapes: Vec<Vec<usize>>,
+    pub input_types: Vec<DataType>,
+    pub output_shapes: Vec<Vec<usize>>,
+    pub output_types: Vec<DataType>,
+    pub labels: Vec<String>,
+    pub name: String,
 }
+
+// ── Metadata ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct Metadata {
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub license: Option<String>,
+    pub config_yaml: Option<String>,
+}
+
+// ── dmabuf_to_tensor_image ───────────────────────────────────────────────────
 
 use nix::libc::dup;
 #[instrument(skip_all)]
-pub(crate) fn dmabuf_to_tensor_image(
+pub fn dmabuf_to_tensor_image(
     dma: &DmaBuffer,
-) -> Result<edgefirst_hal::image::TensorImage, ModelError> {
+) -> Result<TensorImage, ModelError> {
     let tensor = Tensor::from_fd(
         unsafe { OwnedFd::from_raw_fd(dup(dma.fd)) },
         &[
@@ -258,6 +166,73 @@ pub(crate) fn dmabuf_to_tensor_image(
     let img = TensorImage::from_tensor(tensor, fourcc)?;
     Ok(img)
 }
+
+// ── decode_outputs ───────────────────────────────────────────────────────────
+
+/// Decode edgefirst-tflite output tensors through the HAL decoder.
+///
+/// Classifies outputs as float or quantized, builds ndarray views using
+/// typed slices, and dispatches to `decoder.decode_float()` or
+/// `decoder.decode_quantized()`.
+#[instrument(skip_all)]
+pub fn decode_outputs(
+    interpreter: &edgefirst_tflite::Interpreter<'_>,
+    decoder: &edgefirst_hal::decoder::Decoder,
+    output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
+    output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
+) -> Result<(), ModelError> {
+    let outputs = interpreter.outputs().map_err(|e| {
+        ModelError::new(ModelErrorKind::TFLite, format!("Cannot get outputs: {e}"))
+    })?;
+
+    let mut float_views = Vec::new();
+    let mut quant_views = Vec::new();
+
+    for tensor in &outputs {
+        let shape = tensor.shape().map_err(|e| {
+            ModelError::new(ModelErrorKind::TFLite, format!("Cannot get shape: {e}"))
+        })?;
+        match tensor.tensor_type() {
+            edgefirst_tflite::TensorType::Float32 => {
+                let data = tensor.as_slice::<f32>().map_err(|e| {
+                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read f32: {e}"))
+                })?;
+                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                float_views.push(arr);
+            }
+            edgefirst_tflite::TensorType::UInt8 => {
+                let data = tensor.as_slice::<u8>().map_err(|e| {
+                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read u8: {e}"))
+                })?;
+                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
+                quant_views.push(arr);
+            }
+            edgefirst_tflite::TensorType::Int8 => {
+                let data = tensor.as_slice::<i8>().map_err(|e| {
+                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read i8: {e}"))
+                })?;
+                let arr = ndarray::ArrayView::from_shape(shape, data).unwrap();
+                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
+                quant_views.push(arr);
+            }
+            other => {
+                log::warn!("Ignoring output tensor with type {other:?}");
+            }
+        }
+    }
+
+    match (float_views.is_empty(), quant_views.is_empty()) {
+        (false, true) => decoder.decode_float(&float_views, output_boxes, output_masks)?,
+        (true, false) => decoder.decode_quantized(&quant_views, output_boxes, output_masks)?,
+        (true, true) => log::error!("No outputs for decoder"),
+        (false, false) => log::error!("Mixed float and quantized outputs"),
+    }
+    log::trace!("Decoded boxes: {:?}", output_boxes);
+    Ok(())
+}
+
+// ── guess_model_config ───────────────────────────────────────────────────────
 
 const MIN_NUM_BOXES: usize = 256;
 #[instrument(skip_all)]
