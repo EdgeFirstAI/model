@@ -9,10 +9,10 @@ that require attribution:
 
   * async-pidfd 0.1.5 (MIT OR Apache-2.0)
   * clap 4.5.58 (MIT OR Apache-2.0)
-  * edgefirst-hal 0.8.0 (Apache-2.0)
+  * edgefirst-hal 0.9.0 (Apache-2.0)
   * edgefirst-schemas 1.5.5 (Apache-2.0)
   * edgefirst-tflite 0.1.0 (Apache-2.0)
-  * edgefirst-tracker 0.8.0 (Apache-2.0)
+  * edgefirst-tracker 0.9.0 (Apache-2.0)
   * fast-math 0.1.1 (MIT OR Apache-2.0)
   * four-char-code 2.3.0 (MIT)
   * log 0.4.29 (MIT OR Apache-2.0)

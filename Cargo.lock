@@ -184,12 +184,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 
 [[package]]
-name = "arraydeque"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -807,24 +801,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
-name = "deepviewrt"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdafd7511a5de56df61169bc4dd30cb80be3b3c4c9073f40f92045d910ea8f31"
-dependencies = [
- "deepviewrt-sys",
-]
-
-[[package]]
-name = "deepviewrt-sys"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8c10196ef09be2b96a799194884373c5ecfe05ab8f840eeefc6b7015e81f02a"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "deflate64"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1003,7 +979,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edgefirst-decoder"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edaade411cae797d78df2be20dfaeadfe558b277746a83b4a0eded2088050584"
 dependencies = [
  "argminmax",
  "env_logger",
@@ -1043,7 +1021,9 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-hal"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7afc6e0fd1ce7018d191cb972c6dbad19f7067a7b8230bc7a83bdef235a809ff"
 dependencies = [
  "edgefirst-decoder",
  "edgefirst-image",
@@ -1052,7 +1032,9 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-image"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65fe73e2c90b45239467ff5170c4dec012f6b6ed6a4ebd0158453add2968568d"
 dependencies = [
  "ctor",
  "dma-heap",
@@ -1089,8 +1071,8 @@ dependencies = [
  "clap",
  "edgefirst-hal",
  "edgefirst-schemas",
+ "edgefirst-tflite",
  "edgefirst-tracker",
- "enum_dispatch",
  "fast-math",
  "four-char-code",
  "log",
@@ -1102,7 +1084,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "tflitec-sys",
  "tokio",
  "tracing",
  "tracing-journald",
@@ -1111,9 +1092,8 @@ dependencies = [
  "tracing-tracy",
  "tracy-client",
  "uuid",
- "vaal",
  "zenoh",
- "zip 5.1.1",
+ "zip",
 ]
 
 [[package]]
@@ -1132,7 +1112,9 @@ dependencies = [
 
 [[package]]
 name = "edgefirst-tensor"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fb385bb8605a9c3574222fd76181f02506b163650b26a6e8071fd256569e702"
 dependencies = [
  "ctor",
  "dma-heap",
@@ -1146,8 +1128,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "edgefirst-tflite"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43b36431aad287222a7a1b9180800a99ecf0dc9749e3def2003bbc90588bb59c"
+dependencies = [
+ "edgefirst-tflite-sys",
+ "flatbuffers",
+ "libloading",
+ "log",
+ "num-derive",
+ "num-traits",
+]
+
+[[package]]
+name = "edgefirst-tflite-sys"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6c23d57e3f4457f053f347629d850966c4085245ec2f4cb1bcb8ae467461a42"
+dependencies = [
+ "libloading",
+ "log",
+]
+
+[[package]]
 name = "edgefirst-tracker"
-version = "0.8.0"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00daab036c188bc673d5e3a1d7ee8bb5afe4e650b0c20a6aabdc3a461afe3969"
 dependencies = [
  "enum_dispatch",
  "lapjv",
@@ -1163,15 +1171,6 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
-
-[[package]]
-name = "encoding_rs"
-version = "0.8.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-dependencies = [
- "cfg-if",
-]
 
 [[package]]
 name = "enum_dispatch"
@@ -1241,7 +1240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1764,15 +1763,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashlink"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
-dependencies = [
- "hashbrown 0.15.5",
-]
-
-[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,26 +2258,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "liblzma"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6033b77c21d1f56deeae8014eb9fbe7bdf1765185a6c508b5ca82eeaed7f899"
-dependencies = [
- "liblzma-sys",
-]
-
-[[package]]
-name = "liblzma-sys"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f2db66f3268487b5033077f266da6777d057949b8f93c8ad82e441df25e6186"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2685,20 +2655,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "num"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
-dependencies = [
- "num-bigint",
- "num-complex 0.4.6",
- "num-integer",
- "num-iter",
- "num-rational",
- "num-traits",
 ]
 
 [[package]]
@@ -3205,7 +3161,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3244,9 +3200,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3563,7 +3519,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3630,7 +3586,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4157,21 +4113,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tflitec-sys"
-version = "1.0.0"
-dependencies = [
- "flatbuffers",
- "libloading",
- "log",
- "num",
- "num-derive",
- "num-traits",
- "yaml-rust2",
- "zip 4.6.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4679,23 +4621,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vaal"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/vaal-rs.git#cba7ec604e38997c43b0a87be9c34453a2c27f0d"
-dependencies = [
- "deepviewrt",
- "vaal-sys",
-]
-
-[[package]]
-name = "vaal-sys"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/vaal-rs.git#cba7ec604e38997c43b0a87be9c34453a2c27f0d"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "validated_struct"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4910,7 +4835,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5331,17 +5256,6 @@ name = "y4m"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
-
-[[package]]
-name = "yaml-rust2"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2462ea039c445496d8793d052e13787f2b90e750b833afee748e601c17621ed9"
-dependencies = [
- "arraydeque",
- "encoding_rs",
- "hashlink",
-]
 
 [[package]]
 name = "yoke"
@@ -5985,33 +5899,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "zip"
-version = "4.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
-dependencies = [
- "aes",
- "arbitrary",
- "bzip2",
- "constant_time_eq",
- "crc32fast",
- "deflate64",
- "flate2",
- "getrandom 0.3.4",
- "hmac",
- "indexmap 2.13.0",
- "liblzma",
- "memchr",
- "pbkdf2",
- "ppmd-rust",
- "sha1",
- "time",
- "zeroize",
- "zopfli",
- "zstd",
 ]
 
 [[package]]
