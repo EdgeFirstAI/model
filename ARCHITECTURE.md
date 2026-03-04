@@ -49,7 +49,7 @@ graph TB
 
     subgraph "Background Tasks (Tokio)"
         Heartbeat["Heartbeat Loop<br/>(model loading status)"]
-        MaskTask["Mask Processing Task<br/>(class slicing, opt-in)"]
+        MaskTask["Mask Processing Task<br/>(legacy publish, opt-in)"]
     end
 
     subgraph "Zenoh Topics (Published)"
@@ -120,7 +120,7 @@ src/
   buildmsgs.rs     Zenoh message construction (Detect, ModelInfo, Mask, ImageAnnotations)
   args.rs          CLI argument parsing (Clap)
   fps.rs           Rolling FPS average calculator
-  masks.rs         Async mask slicing and publishing (legacy mask topic)
+  masks.rs         Async mask publishing (legacy mask topic)
 ```
 
 ---
@@ -177,7 +177,7 @@ loop {
 - `update_dmabuf_with_pidfd()` -- Cross-process DMA fd transfer via PidFd
 - `heart_beat()` -- Background task publishing empty messages while model loads
 - `get_curr_time()` -- Monotonic clock timestamp
-- `guess_model_config()` -- Shape-based heuristic to produce a `ConfigOutputs` when no metadata is available
+- `guess_model_config()` -- Shape-based heuristic to produce a `ConfigOutputs` when no metadata is available (defined in `model.rs`)
 - `ModelTypeActual` -- Describes model capabilities (detection, segmentation, instance segmentation)
 
 **TrackerBox Bridge:**
@@ -307,7 +307,7 @@ pub enum Preprocessing {
 
 **Background Task:**
 
-- **`mask_thread()`** -- Receives masks via mpsc channel, optionally slices to specific classes (`--mask-classes`), publishes to the legacy mask topic. Only spawned when `mask_topic` is non-empty.
+- **`mask_thread()`** -- Receives masks via mpsc channel and publishes to the legacy mask topic. Only spawned when `mask_topic` is non-empty.
 
 **Non-Blocking Design:** Mask processing runs in parallel with the main inference loop. Bounded channels (size 50) provide backpressure. `drain_recv()` ensures the latest mask is processed if a backlog occurs.
 
@@ -315,7 +315,7 @@ pub enum Preprocessing {
 
 ### CLI Arguments (`args.rs`)
 
-**Purpose:** Clap-based argument parsing. Key arguments include model path, engine selection (NPU/CPU), score threshold, IOU threshold, tracking parameters, topic configuration, Zenoh connection options, and Tracy profiler toggle. All topic fields support environment variable configuration via `env` attributes for systemd EnvironmentFile integration. Legacy topics (`detect_topic`, `mask_topic`) default to empty (disabled).
+**Purpose:** Clap-based argument parsing. Key arguments include model path, engine selection (NPU/CPU), score threshold, IOU threshold, tracking parameters, class label filtering (`--classes`), topic configuration, Zenoh connection options, and Tracy profiler toggle. All topic fields support environment variable configuration via `env` attributes for systemd EnvironmentFile integration. Legacy topics (`detect_topic`, `mask_topic`) default to empty (disabled).
 
 ---
 
@@ -527,7 +527,7 @@ pub struct Mask {
 }
 ```
 
-**Class Slicing:** The `--mask-classes` argument filters masks to specific class indices, reducing bandwidth for applications that only need specific objects.
+**Class Filtering:** The `--classes` argument filters detection boxes and their associated instance masks by label name (e.g. `CLASSES="person car"`). Semantic segmentation masks are not affected by this filter.
 
 > **Note:** The legacy `Mask` topic is disabled by default. Enable with `MASK_TOPIC=rt/model/mask` or `--mask-topic rt/model/mask`. It only publishes for semantic segmentation models. Instance segmentation masks were never published on this topic. The unified `Model` message on `rt/model/output` publishes masks for both semantic and instance segmentation.
 
@@ -599,7 +599,7 @@ graph TD
 
 ### Shape-Based Guessing
 
-When no configuration is available, `guess_model_config()` in `lib.rs` analyzes output tensor shapes to produce a `ConfigOutputs`. It attempts to match patterns for:
+When no configuration is available, `guess_model_config()` in `model.rs` analyzes output tensor shapes to produce a `ConfigOutputs`. It attempts to match patterns for:
 
 - **YOLO detection:** Single 3D output `[1, NF, NB]` or `[1, NB, NF]`
 - **YOLO segmentation+detection:** 4D protos + 3D detection
@@ -753,7 +753,7 @@ main_loop (30 FPS, 33ms period)
 
 - [edgefirst-hal](https://crates.io/crates/edgefirst-hal) (0.6.2) -- Image processing, YOLO/ModelPack decoding, NMS
 - [edgefirst-tracker](https://crates.io/crates/edgefirst-tracker) (0.6.2) -- ByteTrack multi-object tracking, Kalman filter
-- [edgefirst-schemas](https://crates.io/crates/edgefirst-schemas) (1.5.3) -- CDR message schemas
+- [edgefirst-schemas](https://crates.io/crates/edgefirst-schemas) (1.5.5) -- CDR message schemas
 - [four-char-code](https://crates.io/crates/four-char-code) (2.3.0) -- FourCharCode pixel format type
 - [zenoh](https://zenoh.io/) (1.5.0) -- Pub/sub middleware
 - [tokio](https://tokio.rs/) -- Async runtime

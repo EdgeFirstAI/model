@@ -135,11 +135,11 @@ pub struct Args {
     #[arg(long, env = "CAMERA_INFO_TOPIC", default_value = "rt/camera/info")]
     pub camera_info_topic: String,
 
-    /// Class indices to include in mask output (space-separated; empty = all)
-    #[arg(long, env = "MASK_CLASSES", hide_short_help = true, value_parser = parse_classes, default_value = "")]
-    pub mask_classes: std::vec::Vec<usize>, /* we use std::vec::Vec to bypass clap automatic
-                                             * processing on Vec. This allows us to parse "" as
-                                             * Vec::new(). */
+    /// Filter output to only include these class labels (space-separated; empty = all)
+    #[arg(long, env = "CLASSES", hide_short_help = true, value_parser = parse_class_names, default_value = "")]
+    pub classes: std::vec::Vec<String>, /* we use std::vec::Vec to bypass clap automatic
+                                         * processing on Vec. This allows us to parse "" as
+                                         * Vec::new(). */
 
     /// Enable SSD model mode when a different model config is not found
     #[arg(long, env = "SSD_MODEL", hide_short_help = true, default_value = "false", value_parser = parse_bool)]
@@ -193,16 +193,11 @@ fn parse_optional_path(arg: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(arg))
 }
 
-fn parse_classes(arg: &str) -> Result<Vec<usize>, std::num::ParseIntError> {
+fn parse_class_names(arg: &str) -> Result<Vec<String>, String> {
     if arg.is_empty() {
         return Ok(Vec::new());
     }
-    let args = arg.split(" ");
-    let mut ret = Vec::new();
-    for a in args {
-        ret.push(a.parse()?);
-    }
-    Ok(ret)
+    Ok(arg.split_whitespace().map(String::from).collect())
 }
 
 impl From<Args> for Config {

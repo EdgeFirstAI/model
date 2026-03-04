@@ -133,6 +133,11 @@ DETECT_TOPIC=""
 # "rt/model/mask" to re-enable for backwards compatibility.
 MASK_TOPIC=""
 
+# Space-separated class label names to include in output (empty = all classes).
+# Only boxes matching these labels (and their associated instance masks) are
+# published. Example: CLASSES="person car truck"
+CLASSES=""
+
 # ---------------------------------------------------------------------------
 # Zenoh Networking
 # ---------------------------------------------------------------------------

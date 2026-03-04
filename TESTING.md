@@ -14,17 +14,7 @@ cargo test --lib
 
 Unit tests are co-located with their implementation files inside `#[cfg(test)] mod tests` blocks. The following modules currently have unit tests:
 
-- `masks.rs` -- mask slicing and filtering
-- `nms.rs` -- non-maximum suppression
-- `tracker.rs` -- ByteTrack multi-object tracking
-- `kalman.rs` -- Kalman filter for tracking
-
 **Test naming convention:** `test_<function>_<scenario>`
-
-Examples:
-- `test_decode_boxes_with_valid_input`
-- `test_nms_removes_overlapping_boxes`
-- `test_slice` (in `masks.rs`)
 
 All unit tests run on both **x86_64** and **aarch64** architectures without hardware dependencies. Hardware-dependent tests are annotated with `#[ignore]` and excluded from default runs.
 
@@ -168,7 +158,7 @@ cargo llvm-cov --fail-under-lines 70
 
 **Coverage targets:**
 - Minimum overall: **70%**
-- Core modules (`model.rs`, `nms.rs`, `tracker.rs`): **80%+**
+- Core modules (`model.rs`, `masks.rs`): **80%+**
 - Public APIs: **100%**
 - Hardware-specific paths: best effort (requires device)
 

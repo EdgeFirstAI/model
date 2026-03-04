@@ -135,7 +135,11 @@ pub fn build_image_annotations_msg_and_encode_(
                 .cloned()
                 .unwrap_or_else(|| b.label.to_string()),
             LabelSetting::LabelScore => {
-                format!("{} {:.2}", b.label, b.score)
+                let name = labels
+                    .get(b.label)
+                    .cloned()
+                    .unwrap_or_else(|| b.label.to_string());
+                format!("{name} {:.2}", b.score)
             }
             LabelSetting::Track => match tracks.get(i) {
                 Some(track) => track.uuid.to_string()[..8].to_owned(),

@@ -468,7 +468,7 @@ This section is customized for the **EdgeFirst Model Node** project.
 - **Key dependencies**:
   - `edgefirst-hal 0.6.2`: Hardware abstraction (decoder, image processing, tensor)
   - `edgefirst-tracker 0.6.2`: ByteTrack multi-object tracking
-  - `edgefirst-schemas 1.5.3`: Message schemas for EdgeFirst Perception
+  - `edgefirst-schemas 1.5.5`: Message schemas for EdgeFirst Perception
   - `zenoh 1.5.0`: Pub/sub communication layer
   - `tokio`: Async runtime for Zenoh and concurrent operations
   - `four-char-code 2.3.0`: FourCharCode type for pixel format identification
@@ -494,7 +494,7 @@ This section is customized for the **EdgeFirst Model Node** project.
   - `model.rs`: Model trait, enum_dispatch, model config guessing
   - `tflite_model.rs` / `rtm_model.rs`: Model loading and inference
   - `buildmsgs.rs`: Zenoh message construction (CDR serialization)
-  - `masks.rs`: Segmentation mask processing and class slicing
+  - `masks.rs`: Segmentation mask publishing (legacy mask topic)
   - `args.rs`: CLI argument parsing, `fps.rs`: FPS monitoring
   - External: `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
 - **Error handling**: Result types with ModelError for error propagation
@@ -572,7 +572,6 @@ Critical performance characteristics for edge AI inference:
 ### Testing Conventions
 
 - **Unit tests**: Co-located in `#[cfg(test)] mod tests` at end of implementation files
-  - Currently exist in: `masks.rs`
   - Target: All modules should have unit tests
 - **Integration tests**: To be created in `tests/` directory
   - Will include mock Zenoh nodes for end-to-end testing

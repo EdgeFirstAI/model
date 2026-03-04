@@ -446,9 +446,9 @@ edgefirst-model --help
 - `--track-update <FLOAT>` - Kalman filter update factor (default: `0.25`)
 - `--track-extra-lifespan <SECS>` - Lost track lifespan in seconds (default: `0.5`)
 
-**Segmentation Options:**
+**Filtering Options:**
 
-- `--mask-classes <CLASSES>` - Space-separated class indices to output (default: all)
+- `--classes <CLASSES>` - Space-separated class label names to include in output (default: all)
 
 **Topic Configuration:**
 
@@ -609,7 +609,7 @@ model/
 │   ├── tflite_model.rs  # TFLite model loading and inference via NPU
 │   ├── rtm_model.rs     # RTM/VAAL model support (feature-gated)
 │   ├── buildmsgs.rs     # Zenoh message construction (CDR serialization)
-│   ├── masks.rs         # Segmentation mask processing and class slicing
+│   ├── masks.rs         # Segmentation mask publishing (legacy mask topic)
 │   ├── args.rs          # CLI argument parsing (Clap)
 │   └── fps.rs           # FPS monitoring
 ├── tflitec-sys/         # TFLite C API FFI bindings (internal)
@@ -698,8 +698,8 @@ edgefirst-model --model model.tflite --track --track-update 0.1
 # Verify model supports segmentation
 # Model must output mask coefficients or full masks
 
-# Check mask classes filter
-edgefirst-model --model model.tflite --mask-classes ""  # All classes
+# Check class filter
+edgefirst-model --model model.tflite --classes ""  # All classes
 
 # Check unified output for mask data
 z_sub -k "rt/model/output"

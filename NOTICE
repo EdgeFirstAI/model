@@ -10,7 +10,7 @@ that require attribution:
   * async-pidfd 0.1.5 (MIT OR Apache-2.0)
   * clap 4.5.58 (MIT OR Apache-2.0)
   * edgefirst-hal 0.6.2 (Apache-2.0)
-  * edgefirst-schemas 1.5.3 (Apache-2.0)
+  * edgefirst-schemas 1.5.5 (Apache-2.0)
   * edgefirst-tracker 0.6.2 (Apache-2.0)
   * enum_dispatch 0.3.13 (MIT OR Apache-2.0)
   * fast-math 0.1.1 (MIT OR Apache-2.0)
@@ -33,6 +33,5 @@ that require attribution:
   * uuid 1.20.0 (Apache-2.0 OR MIT)
   * zenoh 1.7.2 (EPL-2.0 OR Apache-2.0)
   * zip 5.1.1 (MIT)
-  * zstd 0.13.3 (MIT)
 
 For complete license texts, see the individual project repositories.

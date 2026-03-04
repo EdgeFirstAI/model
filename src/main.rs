@@ -362,7 +362,7 @@ pub async fn main() -> ExitCode {
             .await
             .unwrap();
         let (mask_tx, mask_rx) = mpsc::channel(50);
-        tokio::spawn(mask_thread(mask_rx, args.mask_classes.clone(), publ_mask));
+        tokio::spawn(mask_thread(mask_rx, publ_mask));
         Some(mask_tx)
     } else {
         info!("Legacy mask topic disabled (empty MASK_TOPIC)");
@@ -396,6 +396,10 @@ pub async fn main() -> ExitCode {
         }
     };
     info!("got model_labels {model_labels:?}");
+
+    if !args.classes.is_empty() {
+        info!("Class filter active: {:?}", args.classes);
+    }
 
     let timeout = Duration::from_millis(100);
     let mut fps = edgefirst_model::fps::Fps::<90>::default();
@@ -464,6 +468,41 @@ pub async fn main() -> ExitCode {
         if let Err(e) = res {
             error!("Failed to decode model outputs: {e:?}");
             return ExitCode::FAILURE;
+        }
+
+        if !args.classes.is_empty() {
+            let keep: Vec<bool> = output_boxes
+                .iter()
+                .map(|b| {
+                    model_labels
+                        .get(b.label)
+                        .map(|name| args.classes.iter().any(|c| c == name))
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let mut i = 0;
+            output_boxes.retain(|_| {
+                let k = keep[i];
+                i += 1;
+                k
+            });
+
+            if has_instance_seg {
+                let mut i = 0;
+                output_masks.retain(|_| {
+                    let k = keep.get(i).copied().unwrap_or(false);
+                    i += 1;
+                    k
+                });
+            }
+
+            let mut i = 0;
+            output_tracks.retain(|_| {
+                let k = keep.get(i).copied().unwrap_or(false);
+                i += 1;
+                k
+            });
         }
 
         let output_duration = output_start.elapsed();
