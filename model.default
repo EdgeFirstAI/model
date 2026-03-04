@@ -28,13 +28,13 @@ MODEL=""
 EDGEFIRST_CONFIG=""
 
 # ---------------------------------------------------------------------------
-# Inference Engine
+# TFLite Delegate
 # ---------------------------------------------------------------------------
-# Hardware delegate used for model execution. Use "npu" for the NPU/VX
-# delegate on supported hardware (e.g., NXP i.MX8M Plus), or "cpu" for
-# CPU-only inference.
-# Accepted values: npu, cpu
-ENGINE="npu"
+# Path to TFLite delegate shared library. Leave empty for CPU-only inference.
+# Examples:
+#   i.MX 8M Plus NPU: DELEGATE="/usr/lib/libvx_delegate.so"
+#   i.MX 95 Neutron:   DELEGATE="/usr/lib/libneutron_delegate.so"
+DELEGATE=""
 
 # ---------------------------------------------------------------------------
 # Detection Parameters
