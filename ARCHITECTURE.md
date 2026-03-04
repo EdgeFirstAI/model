@@ -87,8 +87,8 @@ graph TB
 - **Parallel Mask Processing**: Segmentation mask handling runs on a separate Tokio task when the legacy mask topic is enabled
 - **External Tracker**: Multi-object tracking via `edgefirst-tracker` crate (ByteTrack with Kalman filter)
 - **External Decoder**: YOLO/ModelPack decoding and NMS via `edgefirst_hal::decoder` module
-- **Runtime Dynamic Loading**: Both G2D and TFLite loaded via `libloading` (dlopen) for platform portability
-- **Model Agnostic**: Supports TFLite (.tflite) and VAAL RTM (.rtm) models with auto-detection of output formats
+- **Runtime Dynamic Loading**: G2D loaded via `libloading` (dlopen), TFLite via `edgefirst-tflite`
+- **3-Tier Preprocessing**: Auto-selects CameraAdaptor+DMA-BUF, DMA-BUF only, or CPU fallback at startup
 
 ---
 
@@ -104,7 +104,7 @@ This crate (`edgefirst-model`) is the inference application. It depends on exter
 | YOLO/ModelPack decoding + NMS | `edgefirst_hal::decoder` (`Decoder`, `DetectBox`) |
 | Object tracking (ByteTrack + Kalman) | `edgefirst_tracker` (`ByteTrack`, `TrackInfo`) |
 | Message schemas (CDR) | `edgefirst-schemas` (`Detect`, `Box`, `Track`, etc.) |
-| TFLite C API bindings | `tflitec-sys` (workspace crate) |
+| TFLite inference | `edgefirst-tflite` (`Library`, `Model`, `Interpreter`, `Delegate`) |
 | Pixel format codes | `four-char-code` (`FourCharCode`) |
 | G2D FFI bindings | `g2d-sys` (transitive via edgefirst-hal) |
 
@@ -112,11 +112,9 @@ This crate (`edgefirst-model`) is the inference application. It depends on exter
 
 ```
 src/
-  main.rs          Application entry, Zenoh session, main inference loop
-  lib.rs           TrackerBox wrapper, camera frame helpers, model config guessing
-  model.rs         Model trait (enum_dispatch), SupportedModel, Preprocessing, error types
-  tflite_model.rs  TFLite runtime integration with NPU delegate
-  rtm_model.rs     VAAL RTM model support (feature-gated behind "rtm")
+  main.rs          Application entry, Zenoh session, 3-tier inference loop
+  lib.rs           TrackerBox wrapper, camera frame helpers, heartbeat
+  model.rs         ModelContext struct, decode_outputs, model config guessing, error types
   buildmsgs.rs     Zenoh message construction (Detect, ModelInfo, Mask, ImageAnnotations)
   args.rs          CLI argument parsing (Clap)
   fps.rs           Rolling FPS average calculator
@@ -141,17 +139,21 @@ src/
 
 1. **Initialization:** Parse CLI arguments, configure tracing layers, open Zenoh session
 2. **Heartbeat Phase:** Spawn heartbeat task, load model file, build decoder, identify model type
-3. **Main Inference Loop:**
+3. **Main Inference Loop (3-tier preprocessing):**
 
 ```rust
 loop {
     let Some(mut dma_buf) = wait_for_camera_frame(&sub_camera, timeout) else { continue; };
     let _fd = update_dmabuf_with_pidfd(&mut dma_buf)?;
 
-    model.load_frame_dmabuf_(&dma_buf, &mut img_proc, Preprocessing::Raw)?;
-    model.run_model()?;
+    // Tier 1: CameraAdaptor+DMA-BUF (mmap RGBA to input tensor)
+    // Tier 2: DMA-BUF only (CPU type-convert into tensor)
+    // Tier 3: CPU fallback (system memory)
+    img_proc.convert(&src_image, &dst_image)?;
+    // ... copy pixels into interpreter input tensor ...
 
-    model.decode_outputs(&decoder, &mut output_boxes, &mut output_masks)?;
+    interpreter.invoke()?;
+    decode_outputs(&interpreter, &decoder, &mut output_boxes, &mut output_masks)?;
 
     if args.track {
         let wrapped: Vec<_> = output_boxes.iter().map(TrackerBox).collect();
@@ -198,89 +200,53 @@ impl edgefirst_tracker::DetectionBox for TrackerBox<'_> {
 
 ---
 
-### Model Abstraction (`model.rs`)
+### Model Context (`model.rs`)
 
-**Design:** `enum_dispatch` pattern for runtime polymorphism without vtable overhead.
+**Design:** Simple data struct (`ModelContext`) holds model metadata for message building. No trait abstraction — `edgefirst-tflite` `Interpreter` is used directly in `main.rs`.
 
-**Core Trait:**
+**Core Struct:**
 
 ```rust
-#[enum_dispatch]
-pub trait Model {
-    fn model_name(&self) -> Result<String, ModelError>;
-    fn load_frame_dmabuf_(&mut self, dmabuf: &DmaBuffer, img_proc: &mut ImageProcessor,
-                          preprocessing: Preprocessing) -> Result<(), ModelError>;
-    fn run_model(&mut self) -> Result<(), ModelError>;
-
-    fn input_count(&self) -> Result<usize, ModelError>;
-    fn input_shape(&self, index: usize) -> Result<Vec<usize>, ModelError>;
-    fn input_type(&self, index: usize) -> Result<DataType, ModelError>;
-    fn load_input(&mut self, index: usize, data: &[u8], channels: usize,
-                  preprocessing: Preprocessing) -> Result<(), ModelError>;
-
-    fn output_count(&self) -> Result<usize, ModelError>;
-    fn output_shape(&self, index: usize) -> Result<Vec<usize>, ModelError>;
-    fn output_type(&self, index: usize) -> Result<DataType, ModelError>;
-    fn output_data<T: Copy>(&self, index: usize, data: &mut [T]) -> Result<(), ModelError>;
-    fn output_quantization(&self, index: usize) -> Result<Option<(f32, i32)>, ModelError>;
-
-    fn labels(&self) -> Result<Vec<String>, ModelError>;
-    fn decode_outputs(&self, decoder: &Decoder, output_boxes: &mut Vec<DetectBox>,
-                      output_masks: &mut Vec<Segmentation>) -> Result<(), ModelError>;
-    fn decode_outputs_tracked(&self, decoder: &Decoder, output_boxes: &mut Vec<DetectBox>,
-                              output_masks: &mut Vec<Segmentation>,
-                              output_tracks: &mut Vec<TrackInfo>,
-                              timestamp: u64) -> Result<(), ModelError>;
-    fn get_model_metadata(&self) -> Result<Metadata, ModelError>;
+pub struct ModelContext {
+    pub input_shapes: Vec<Vec<usize>>,
+    pub input_types: Vec<DataType>,
+    pub output_shapes: Vec<Vec<usize>>,
+    pub output_types: Vec<DataType>,
+    pub labels: Vec<String>,
+    pub name: String,
 }
 ```
 
-**Supported Implementations:**
+**Key Function:**
 
 ```rust
-#[enum_dispatch(Model)]
-pub enum SupportedModel<'a> {
-    TfLiteModel(TFLiteModel<'a>),
-    #[cfg(feature = "rtm")]
-    RtmModel(RtmModel),
-}
+pub fn decode_outputs(
+    interpreter: &Interpreter,
+    decoder: &Decoder,
+    output_boxes: &mut Vec<DetectBox>,
+    output_masks: &mut Vec<Segmentation>,
+) -> Result<(), ModelError>
 ```
+
+Reads output tensors from the interpreter and feeds them through the HAL decoder for NMS, box extraction, and mask decoding.
 
 **Key Types from External Crates:**
 
 - `DetectBox` (from `edgefirst_hal::decoder`) -- Bounding box with `bbox: BoundingBox { xmin, ymin, xmax, ymax }`, `score: f32`, `label: usize`
 - `Segmentation` (from `edgefirst_hal::decoder`) -- Decoded segmentation mask output
 - `Decoder` (from `edgefirst_hal::decoder`) -- Configured decoder instance built via `DecoderBuilder`
-- `ImageProcessor` (from `edgefirst_hal::image`) -- G2D-backed image conversion (replaces former local `ImageManager`)
+- `ImageProcessor` (from `edgefirst_hal::image`) -- G2D-backed image conversion
+- `Interpreter` (from `edgefirst-tflite`) -- TFLite interpreter with optional delegate
 
-**Preprocessing Modes:**
+**TFLite Integration:**
 
-```rust
-pub enum Preprocessing {
-    Raw,            // No normalization (uint8 -> uint8)
-    UnsignedNorm,   // [0, 255] -> [0.0, 1.0]
-    SignedNorm,     // [0, 255] -> [-1.0, 1.0]
-    ImageNet,       // ImageNet mean/std normalization
-}
-```
+The `edgefirst-tflite` crate provides:
+- `Library` — dynamically loads `libtensorflowlite_c.so`
+- `Model` — parses the FlatBuffer model
+- `Delegate` — loads delegate .so (e.g. `libvx_delegate.so` for NPU)
+- `Interpreter` — runs inference, provides typed tensor access
 
----
-
-### TFLite Model (`tflite_model.rs`)
-
-**Purpose:** TensorFlow Lite runtime integration with NPU delegate support.
-
-**Runtime Loading:** The `TFLiteLib` struct uses `libloading` to dynamically load `libtensorflowlite_c.so`:
-- **NPU Delegate:** `libvx_delegate.so` (VeriSilicon NPU acceleration)
-- **CPU Fallback:** Built-in XNNPACK delegate if NPU unavailable
-
-**Metadata Extraction:** TFLite models can embed `edgefirst.yaml` configuration in FlatBuffers metadata, including output decoder types, shapes, preprocessing, and label strings.
-
----
-
-### RTM Model (`rtm_model.rs`)
-
-**Purpose:** VAAL/DeepViewRT model support, feature-gated behind the `rtm` Cargo feature.
+**Metadata Extraction:** TFLite models can embed `edgefirst.yaml` configuration in zip metadata, including output decoder types, shapes, and label strings.
 
 ---
 
@@ -315,7 +281,7 @@ pub enum Preprocessing {
 
 ### CLI Arguments (`args.rs`)
 
-**Purpose:** Clap-based argument parsing. Key arguments include model path, engine selection (NPU/CPU), score threshold, IOU threshold, tracking parameters, class label filtering (`--classes`), topic configuration, Zenoh connection options, and Tracy profiler toggle. All topic fields support environment variable configuration via `env` attributes for systemd EnvironmentFile integration. Legacy topics (`detect_topic`, `mask_topic`) default to empty (disabled).
+**Purpose:** Clap-based argument parsing. Key arguments include model path, delegate path (empty = CPU), score threshold, IOU threshold, tracking parameters, class label filtering (`--classes`), topic configuration, Zenoh connection options, and Tracy profiler toggle. All topic fields support environment variable configuration via `env` attributes for systemd EnvironmentFile integration. Legacy topics (`detect_topic`, `mask_topic`) default to empty (disabled).
 
 ---
 
@@ -738,8 +704,8 @@ Adds memory profiling, CPU sampling, and context switch tracing.
 ```
 main_loop (30 FPS, 33ms period)
   wait_for_camera_frame (0.1-10ms)
-  load_frame_dmabuf_ (2-5ms, includes G2D)
-  run_model (10-50ms, depending on model)
+  img_proc.convert (2-5ms, G2D preprocessing)
+  interpreter.invoke (10-50ms, depending on model)
   decode_outputs (1-3ms, includes NMS)
   tracker_update (0.2-1ms)
   zenoh_publish (0.1-1ms)
@@ -751,13 +717,13 @@ main_loop (30 FPS, 33ms period)
 
 **Key Dependencies:**
 
-- [edgefirst-hal](https://crates.io/crates/edgefirst-hal) (0.6.2) -- Image processing, YOLO/ModelPack decoding, NMS
-- [edgefirst-tracker](https://crates.io/crates/edgefirst-tracker) (0.6.2) -- ByteTrack multi-object tracking, Kalman filter
+- [edgefirst-hal](https://crates.io/crates/edgefirst-hal) (0.8.0) -- Image processing, YOLO/ModelPack decoding, NMS
+- [edgefirst-tflite](https://crates.io/crates/edgefirst-tflite) -- TFLite inference with DMA-BUF zero-copy and CameraAdaptor
+- [edgefirst-tracker](https://crates.io/crates/edgefirst-tracker) (0.8.0) -- ByteTrack multi-object tracking, Kalman filter
 - [edgefirst-schemas](https://crates.io/crates/edgefirst-schemas) (1.5.5) -- CDR message schemas
 - [four-char-code](https://crates.io/crates/four-char-code) (2.3.0) -- FourCharCode pixel format type
-- [zenoh](https://zenoh.io/) (1.5.0) -- Pub/sub middleware
+- [zenoh](https://zenoh.io/) (1.7.2) -- Pub/sub middleware
 - [tokio](https://tokio.rs/) -- Async runtime
-- [tflitec-sys](tflitec-sys/) -- TensorFlow Lite C API FFI bindings (workspace crate)
 - [ndarray](https://docs.rs/ndarray/) -- N-dimensional array library
 
 **Hardware Documentation:**

@@ -462,18 +462,15 @@ This section is customized for the **EdgeFirst Model Node** project.
 ### Technology Stack
 
 - **Language**: Rust 1.90.0+ (edition 2024)
-- **Build system**: Cargo workspace with 2 crates:
-  - `edgefirst-model`: Main inference service binary
-  - `tflitec-sys`: TensorFlow Lite C bindings (internal)
+- **Build system**: Cargo (single crate)
 - **Key dependencies**:
-  - `edgefirst-hal 0.6.2`: Hardware abstraction (decoder, image processing, tensor)
-  - `edgefirst-tracker 0.6.2`: ByteTrack multi-object tracking
+  - `edgefirst-hal 0.8.0`: Hardware abstraction (decoder, image processing, tensor)
+  - `edgefirst-tflite`: TFLite inference with DMA-BUF zero-copy and CameraAdaptor
+  - `edgefirst-tracker 0.8.0`: ByteTrack multi-object tracking
   - `edgefirst-schemas 1.5.5`: Message schemas for EdgeFirst Perception
-  - `zenoh 1.5.0`: Pub/sub communication layer
+  - `zenoh 1.7.2`: Pub/sub communication layer
   - `tokio`: Async runtime for Zenoh and concurrent operations
   - `four-char-code 2.3.0`: FourCharCode type for pixel format identification
-  - `tflitec-sys`: TensorFlow Lite inference engine (internal crate)
-  - `vaal` (optional): RTM/Ara-2 runtime support (feature-gated)
   - `ndarray`: Numerical computing
   - `tracing`, `tracing-tracy`: Logging and profiling
 - **Target platforms**: Linux on x86_64 and aarch64 (primary: NXP i.MX8)
@@ -484,19 +481,18 @@ This section is customized for the **EdgeFirst Model Node** project.
 - **Pattern**: Event-driven async architecture with Zenoh pub/sub
 - **Component Type**: Microservice node in EdgeFirst Perception middleware
 - **Data flow**:
-  - Subscribe to camera frames via Zenoh (`{namespace}/camera/frame`)
-  - Perform inference using TFLite or RTM models
+  - Subscribe to camera frames via Zenoh (`{namespace}/camera/dma`)
+  - Perform inference using TFLite models via `edgefirst-tflite`
   - Publish results: detections, masks, model_info, visualization
   - Zero-copy DMA buffer passing via pidfd
 - **Module organization**:
-  - `main.rs`: Application entry, Zenoh session, main inference loop
+  - `main.rs`: Application entry, Zenoh session, 3-tier inference loop
   - `lib.rs`: Public library interface, TrackerBox wrapper, DmaBuf handling
-  - `model.rs`: Model trait, enum_dispatch, model config guessing
-  - `tflite_model.rs` / `rtm_model.rs`: Model loading and inference
+  - `model.rs`: ModelContext struct, decode_outputs, model config guessing
   - `buildmsgs.rs`: Zenoh message construction (CDR serialization)
   - `masks.rs`: Segmentation mask publishing (legacy mask topic)
   - `args.rs`: CLI argument parsing, `fps.rs`: FPS monitoring
-  - External: `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
+  - External: `edgefirst-tflite` (TFLite inference), `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
 - **Error handling**: Result types with ModelError for error propagation
 
 ### Build and Deployment
@@ -530,8 +526,8 @@ cargo doc --no-deps --open
 # Cross-compile for ARM64
 cargo build --target aarch64-unknown-linux-gnu --release
 
-# Build with RTM support (optional)
-cargo build --release --features rtm
+# Build without Tracy (optional)
+cargo build --release --no-default-features
 ```
 
 ### Performance Targets

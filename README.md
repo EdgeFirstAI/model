@@ -15,7 +15,7 @@ The EdgeFirst Model Node is a high-performance AI inference service designed for
 **Key Features:**
 
 - **ROS2 Compatibility** - Standard `edgefirst_msgs` and `sensor_msgs` interfaces for drop-in integration
-- **Hardware Acceleration** - NXP i.MX8 NPU inference with G2D preprocessing
+- **Hardware Acceleration** - NXP i.MX8 NPU inference via TFLite delegate with G2D preprocessing
 - **Zero-Copy DMA** - Direct memory access for ultra-low latency vision pipelines
 - **Object Detection** - YOLO detection models with auto-detection of model architecture
 - **Instance Segmentation** - Semantic and instance segmentation
@@ -101,7 +101,7 @@ graph LR
 - Linux kernel 5.10+ with V4L2 support
 - Rust 1.90.0 or later (for building from source)
 - OR: Pre-built binaries from [GitHub Releases](https://github.com/EdgeFirstAI/model/releases)
-- TensorFlow Lite model file (.tflite or .rtm)
+- TensorFlow Lite model file (.tflite)
 
 ### Installation
 
@@ -155,7 +155,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ```bash
 edgefirst-model \
   --model yolov8n.tflite \
-  --engine npu \
+  --delegate /usr/lib/libvx_delegate.so \
   --threshold 0.5
 ```
 
@@ -433,7 +433,7 @@ edgefirst-model --help
 **Essential Options:**
 
 - `--model <PATH>` - Path to TFLite model file (required)
-- `--engine <ENGINE>` - Inference engine: `npu`, `gpu`, `cpu` (default: `npu`)
+- `--delegate <PATH>` - Path to TFLite delegate .so (default: empty = CPU inference)
 - `--threshold <FLOAT>` - Detection score threshold (default: `0.45`)
 - `--iou <FLOAT>` - NMS IoU threshold (default: `0.45`)
 - `--max-boxes <N>` - Maximum detections per frame (default: `100`)
@@ -484,7 +484,7 @@ Configuration can also be set via environment variables. See `model.default` for
 
 ```bash
 export MODEL=/models/yolov8n.tflite
-export ENGINE=npu
+export DELEGATE=/usr/lib/libvx_delegate.so
 export THRESHOLD=0.5
 export TRACK=true
 export OUTPUT_TOPIC=rt/model/output
@@ -560,13 +560,12 @@ edgefirst-model --tracy --model model.tflite
 **Supported Formats:**
 
 - **TensorFlow Lite** (.tflite) - Primary format, full NPU support
-- **RTM** (.rtm) - Experimental, feature-gated (`--features rtm`)
 
-**Inference Engines:**
+**TFLite Delegates:**
 
-- **NPU** (default) - NXP i.MX8M Plus Neural Processing Unit (fastest)
-- **GPU** - GPU delegate (moderate performance)
-- **CPU** - Software fallback (slowest, but universal)
+- **NPU** - NXP i.MX8M Plus Neural Processing Unit via `libvx_delegate.so` (fastest)
+- **Neutron** - NXP i.MX95 NPU via `libneutron_delegate.so`
+- **CPU** (default) - Software fallback when no delegate is specified
 
 **Model Architecture Support:**
 
@@ -603,16 +602,13 @@ cargo doc --no-deps --open
 ```
 model/
 ├── src/
-│   ├── main.rs          # Application entry, Zenoh session, main inference loop
+│   ├── main.rs          # Application entry, Zenoh session, 3-tier inference loop
 │   ├── lib.rs           # Public library interface, TrackerBox wrapper, DmaBuf handling
-│   ├── model.rs         # Model trait, enum_dispatch, model config guessing
-│   ├── tflite_model.rs  # TFLite model loading and inference via NPU
-│   ├── rtm_model.rs     # RTM/VAAL model support (feature-gated)
+│   ├── model.rs         # ModelContext, decode_outputs, model config guessing
 │   ├── buildmsgs.rs     # Zenoh message construction (CDR serialization)
 │   ├── masks.rs         # Segmentation mask publishing (legacy mask topic)
 │   ├── args.rs          # CLI argument parsing (Clap)
 │   └── fps.rs           # FPS monitoring
-├── tflitec-sys/         # TFLite C API FFI bindings (internal)
 ├── benches/             # Divan benchmarks
 ├── Cargo.toml           # Project dependencies
 └── README.md            # This file
@@ -646,8 +642,8 @@ edgefirst-model --model /absolute/path/to/model.tflite
 # Check NPU delegate library
 ls -lh /usr/lib/libvx_delegate.so
 
-# Fallback to CPU
-edgefirst-model --model model.tflite --engine cpu
+# Fallback to CPU (omit --delegate)
+edgefirst-model --model model.tflite
 ```
 
 **Problem: "No camera frames received"**
@@ -675,8 +671,8 @@ edgefirst-model --model model.tflite --max-boxes 50
 # Disable tracking if not needed
 edgefirst-model --model model.tflite  # No --track flag
 
-# Use NPU engine
-edgefirst-model --model model.tflite --engine npu
+# Use NPU delegate
+edgefirst-model --model model.tflite --delegate /usr/lib/libvx_delegate.so
 ```
 
 **Problem: "Tracking IDs unstable"**
@@ -712,7 +708,7 @@ z_sub -k "rt/model/output"
 RUST_LOG=debug edgefirst-model --model model.tflite
 
 # Filter specific module
-RUST_LOG=edgefirst_model::tflite_model=trace edgefirst-model --model model.tflite
+RUST_LOG=edgefirst_model=trace edgefirst-model --model model.tflite
 
 # View systemd journal logs
 journalctl -u edgefirst-model -f
