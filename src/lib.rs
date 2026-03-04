@@ -6,10 +6,6 @@ pub mod buildmsgs;
 pub mod fps;
 pub mod masks;
 pub mod model;
-pub mod tflite_model;
-
-#[cfg(feature = "rtm")]
-pub mod rtm_model;
 
 /// Newtype wrapper to bridge `edgefirst_tracker::DetectionBox` for
 /// `edgefirst_hal::decoder::DetectBox`.
