@@ -464,9 +464,9 @@ This section is customized for the **EdgeFirst Model Node** project.
 - **Language**: Rust 1.90.0+ (edition 2024)
 - **Build system**: Cargo (single crate)
 - **Key dependencies**:
-  - `edgefirst-hal 0.8.0`: Hardware abstraction (decoder, image processing, tensor)
-  - `edgefirst-tflite`: TFLite inference with DMA-BUF zero-copy and CameraAdaptor
-  - `edgefirst-tracker 0.8.0`: ByteTrack multi-object tracking
+  - `edgefirst-hal 0.9.0`: Hardware abstraction (decoder, image processing, tensor)
+  - `edgefirst-tflite 0.1.0`: TFLite inference with DMA-BUF zero-copy and CameraAdaptor
+  - `edgefirst-tracker 0.9.0`: ByteTrack multi-object tracking
   - `edgefirst-schemas 1.5.5`: Message schemas for EdgeFirst Perception
   - `zenoh 1.7.2`: Pub/sub communication layer
   - `tokio`: Async runtime for Zenoh and concurrent operations

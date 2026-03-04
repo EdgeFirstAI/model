@@ -717,9 +717,9 @@ main_loop (30 FPS, 33ms period)
 
 **Key Dependencies:**
 
-- [edgefirst-hal](https://crates.io/crates/edgefirst-hal) (0.8.0) -- Image processing, YOLO/ModelPack decoding, NMS
-- [edgefirst-tflite](https://crates.io/crates/edgefirst-tflite) -- TFLite inference with DMA-BUF zero-copy and CameraAdaptor
-- [edgefirst-tracker](https://crates.io/crates/edgefirst-tracker) (0.8.0) -- ByteTrack multi-object tracking, Kalman filter
+- [edgefirst-hal](https://crates.io/crates/edgefirst-hal) (0.9.0) -- Image processing, YOLO/ModelPack decoding, NMS
+- [edgefirst-tflite](https://crates.io/crates/edgefirst-tflite) (0.1.0) -- TFLite inference with DMA-BUF zero-copy and CameraAdaptor
+- [edgefirst-tracker](https://crates.io/crates/edgefirst-tracker) (0.9.0) -- ByteTrack multi-object tracking, Kalman filter
 - [edgefirst-schemas](https://crates.io/crates/edgefirst-schemas) (1.5.5) -- CDR message schemas
 - [four-char-code](https://crates.io/crates/four-char-code) (2.3.0) -- FourCharCode pixel format type
 - [zenoh](https://zenoh.io/) (1.7.2) -- Pub/sub middleware
