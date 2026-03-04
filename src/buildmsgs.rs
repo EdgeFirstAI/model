@@ -18,10 +18,7 @@ use std::path::Path;
 use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
-use crate::{
-    args::LabelSetting,
-    model::ModelContext,
-};
+use crate::{args::LabelSetting, model::ModelContext};
 use edgefirst_hal::decoder::configs::DataType;
 
 const WHITE: FoxgloveColor = FoxgloveColor {
@@ -179,9 +176,7 @@ pub fn build_segmentation_msg(
         .and_then(|ctx| ctx.output_shapes.get(output_index).cloned())
         .unwrap_or_else(|| vec![0, 0, 0, 0]);
 
-    let mask = output_data
-        .map(|d| d.to_vec())
-        .unwrap_or_default();
+    let mask = output_data.map(|d| d.to_vec()).unwrap_or_default();
 
     Mask {
         height: output_shape.get(1).copied().unwrap_or(0) as u32,

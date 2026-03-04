@@ -3,7 +3,7 @@
 
 use clap::Parser;
 use edgefirst_hal::decoder::DecoderBuilder;
-use edgefirst_hal::image::{ImageProcessor, ImageProcessorTrait, Crop, Flip, Rotation, RGBA, RGB};
+use edgefirst_hal::image::{Crop, Flip, ImageProcessor, ImageProcessorTrait, RGB, RGBA, Rotation};
 use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
 use edgefirst_model::{
     args::Args,
@@ -13,7 +13,7 @@ use edgefirst_model::{
     },
     heart_beat,
     masks::mask_thread,
-    model::{ModelContext, Metadata, decode_outputs, dmabuf_to_tensor_image, guess_model_config},
+    model::{Metadata, ModelContext, decode_outputs, dmabuf_to_tensor_image, guess_model_config},
     update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
 use edgefirst_schemas::{
@@ -28,8 +28,8 @@ use std::{
     process::ExitCode,
     time::{Duration, Instant},
 };
-use tracing::info_span;
 use tokio::sync::mpsc;
+use tracing::info_span;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 use tracy_client::frame_mark;
@@ -241,7 +241,10 @@ pub async fn main() -> ExitCode {
         let shape = input.shape().unwrap();
         let tt = input.tensor_type();
         let qp = input.quantization_params();
-        info!("Input: {} (scale={}, zp={})", input, qp.scale, qp.zero_point);
+        info!(
+            "Input: {} (scale={}, zp={})",
+            input, qp.scale, qp.zero_point
+        );
         (shape[1], shape[2], tt, qp)
     };
 
@@ -259,7 +262,12 @@ pub async fn main() -> ExitCode {
 
         // Extract config YAML from model zip archive
         if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data())) {
-            for name in ["edgefirst.yaml", "edgefirst.yml", "config.yaml", "config.yml"] {
+            for name in [
+                "edgefirst.yaml",
+                "edgefirst.yml",
+                "config.yaml",
+                "config.yml",
+            ] {
                 if let Ok(mut f) = z.by_name(name)
                     && f.is_file()
                 {
@@ -296,16 +304,20 @@ pub async fn main() -> ExitCode {
         let inputs = interpreter.inputs().unwrap();
         let outputs = interpreter.outputs().unwrap();
 
-        let input_shapes: Vec<Vec<usize>> = inputs.iter()
+        let input_shapes: Vec<Vec<usize>> = inputs
+            .iter()
             .map(|t| t.shape().unwrap_or_default())
             .collect();
-        let input_types: Vec<edgefirst_hal::decoder::configs::DataType> = inputs.iter()
+        let input_types: Vec<edgefirst_hal::decoder::configs::DataType> = inputs
+            .iter()
             .map(|t| tflite_type_to_datatype(t.tensor_type()))
             .collect();
-        let output_shapes: Vec<Vec<usize>> = outputs.iter()
+        let output_shapes: Vec<Vec<usize>> = outputs
+            .iter()
             .map(|t| t.shape().unwrap_or_default())
             .collect();
-        let output_types: Vec<edgefirst_hal::decoder::configs::DataType> = outputs.iter()
+        let output_types: Vec<edgefirst_hal::decoder::configs::DataType> = outputs
+            .iter()
             .map(|t| tflite_type_to_datatype(t.tensor_type()))
             .collect();
 
@@ -345,7 +357,10 @@ pub async fn main() -> ExitCode {
                 decoder_builder = decoder_builder.with_config_json_str(config);
             }
             Some(v) => {
-                error!("Unsupported edgefirst config file extension {}", v.display());
+                error!(
+                    "Unsupported edgefirst config file extension {}",
+                    v.display()
+                );
                 return ExitCode::FAILURE;
             }
             None => {
@@ -360,10 +375,13 @@ pub async fn main() -> ExitCode {
 
         let output_quants: Vec<Option<(f32, i32)>> = {
             let outputs = interpreter.outputs().unwrap();
-            outputs.iter().map(|t| {
-                let qp = t.quantization_params();
-                Some((qp.scale, qp.zero_point))
-            }).collect()
+            outputs
+                .iter()
+                .map(|t| {
+                    let qp = t.quantization_params();
+                    Some((qp.scale, qp.zero_point))
+                })
+                .collect()
         };
 
         let config = guess_model_config(&model_ctx.output_shapes, &output_quants);
@@ -372,7 +390,10 @@ pub async fn main() -> ExitCode {
             info!("Guessed model config: {:?}", cfg);
             decoder_builder = decoder_builder.with_config(cfg);
         } else {
-            error!("Could not guess model config from output shapes: {:?}", model_ctx.output_shapes);
+            error!(
+                "Could not guess model config from output shapes: {:?}",
+                model_ctx.output_shapes
+            );
             return ExitCode::FAILURE;
         }
     }
@@ -513,7 +534,9 @@ pub async fn main() -> ExitCode {
     // ── Set up DMA-BUF binding (persistent for application lifetime) ─────
     let dmabuf_handle = if use_dmabuf {
         let delegate_ref = interpreter.delegate(0).expect("delegate not found");
-        let dmabuf = delegate_ref.dmabuf().expect("DMA-BUF probed but not available");
+        let dmabuf = delegate_ref
+            .dmabuf()
+            .expect("DMA-BUF probed but not available");
         let buf_size = if use_camera_adaptor {
             in_h * in_w * 4 // RGBA
         } else {
@@ -757,9 +780,7 @@ pub async fn main() -> ExitCode {
         }
 
         let _pub_span = info_span!("zenoh_publish").entered();
-        if has_seg
-            && let Some(mask_tx) = mask_tx.as_ref()
-        {
+        if has_seg && let Some(mask_tx) = mask_tx.as_ref() {
             let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
             match mask_tx.send(masks).await {
                 Ok(_) => {}
@@ -769,9 +790,7 @@ pub async fn main() -> ExitCode {
             }
         }
 
-        if has_box
-            && let Some(publ_detect) = publ_detect.as_ref()
-        {
+        if has_box && let Some(publ_detect) = publ_detect.as_ref() {
             let (msg, enc) = build_detect_msg_and_encode_(
                 &output_boxes,
                 &output_tracks,

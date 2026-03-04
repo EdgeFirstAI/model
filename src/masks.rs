@@ -10,10 +10,7 @@ use zenoh::{
     pubsub::Publisher,
 };
 
-pub async fn mask_thread(
-    mut rx: Receiver<Mask>,
-    publ_mask: Publisher<'_>,
-) {
+pub async fn mask_thread(mut rx: Receiver<Mask>, publ_mask: Publisher<'_>) {
     loop {
         let msg = match drain_recv(&mut rx).await {
             Some(v) => v,
