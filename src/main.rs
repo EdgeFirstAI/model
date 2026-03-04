@@ -178,14 +178,14 @@ pub async fn main() -> ExitCode {
             Ok(d) => {
                 info!("Delegate loaded: {}", args.delegate);
 
-                if d.has_camera_adaptor() {
-                    if let Some(adaptor) = d.camera_adaptor() {
-                        if let Err(e) = adaptor.set_format(0, "rgba") {
-                            warn!("CameraAdaptor set_format failed: {e:?}");
-                        } else {
-                            use_camera_adaptor = true;
-                            info!("CameraAdaptor: enabled (RGBA -> RGB on NPU)");
-                        }
+                if d.has_camera_adaptor()
+                    && let Some(adaptor) = d.camera_adaptor()
+                {
+                    if let Err(e) = adaptor.set_format(0, "rgba") {
+                        warn!("CameraAdaptor set_format failed: {e:?}");
+                    } else {
+                        use_camera_adaptor = true;
+                        info!("CameraAdaptor: enabled (RGBA -> RGB on NPU)");
                     }
                 }
 
@@ -259,15 +259,15 @@ pub async fn main() -> ExitCode {
         // Extract config YAML from model zip archive
         if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data())) {
             for name in ["edgefirst.yaml", "edgefirst.yml", "config.yaml", "config.yml"] {
-                if let Ok(mut f) = z.by_name(name) {
-                    if f.is_file() {
-                        let mut yaml = String::new();
-                        if let Err(e) = std::io::Read::read_to_string(&mut f, &mut yaml) {
-                            error!("Error reading {name}: {e:?}");
-                        }
-                        meta.config_yaml = Some(yaml);
-                        break;
+                if let Ok(mut f) = z.by_name(name)
+                    && f.is_file()
+                {
+                    let mut yaml = String::new();
+                    if let Err(e) = std::io::Read::read_to_string(&mut f, &mut yaml) {
+                        error!("Error reading {name}: {e:?}");
                     }
+                    meta.config_yaml = Some(yaml);
+                    break;
                 }
             }
         }
@@ -276,16 +276,15 @@ pub async fn main() -> ExitCode {
 
     let model_labels = {
         let mut labels = Vec::new();
-        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data())) {
-            if let Ok(mut f) = z.by_name("labels.txt") {
-                if f.is_file() {
-                    let mut txt = String::new();
-                    if let Err(e) = std::io::Read::read_to_string(&mut f, &mut txt) {
-                        error!("Error reading labels.txt: {e:?}");
-                    }
-                    labels = txt.lines().map(|l| l.to_string()).collect();
-                }
+        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data()))
+            && let Ok(mut f) = z.by_name("labels.txt")
+            && f.is_file()
+        {
+            let mut txt = String::new();
+            if let Err(e) = std::io::Read::read_to_string(&mut f, &mut txt) {
+                error!("Error reading labels.txt: {e:?}");
             }
+            labels = txt.lines().map(|l| l.to_string()).collect();
         }
         labels
     };
@@ -587,11 +586,10 @@ pub async fn main() -> ExitCode {
             };
             let pixels = map.as_slice();
 
-            if use_camera_adaptor && dmabuf_handle.is_some() {
+            if use_camera_adaptor && let Some(handle) = dmabuf_handle {
                 // Tier 1: CameraAdaptor + DMA-BUF — write RGBA to DMA-BUF
                 let delegate_ref = interpreter.delegate(0).unwrap();
                 let dmabuf = delegate_ref.dmabuf().unwrap();
-                let handle = dmabuf_handle.unwrap();
 
                 let fd = dmabuf.fd(handle).unwrap();
                 let buf_size = pixels.len();
@@ -743,39 +741,39 @@ pub async fn main() -> ExitCode {
             first_run = false;
         }
 
-        if has_seg {
-            if let Some(mask_tx) = mask_tx.as_ref() {
-                let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
-                match mask_tx.send(masks).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("Cannot send to mask publishing thread {e:?}");
-                    }
+        if has_seg
+            && let Some(mask_tx) = mask_tx.as_ref()
+        {
+            let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
+            match mask_tx.send(masks).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Cannot send to mask publishing thread {e:?}");
                 }
             }
         }
 
-        if has_box {
-            if let Some(publ_detect) = publ_detect.as_ref() {
-                let (msg, enc) = build_detect_msg_and_encode_(
-                    &output_boxes,
-                    &output_tracks,
-                    &model_labels,
-                    dma_buf.header.clone(),
-                    time_from_ns(input_duration),
-                    time_from_ns(model_duration),
-                    time_from_ns(output_duration.as_nanos()),
-                );
+        if has_box
+            && let Some(publ_detect) = publ_detect.as_ref()
+        {
+            let (msg, enc) = build_detect_msg_and_encode_(
+                &output_boxes,
+                &output_tracks,
+                &model_labels,
+                dma_buf.header.clone(),
+                time_from_ns(input_duration),
+                time_from_ns(model_duration),
+                time_from_ns(output_duration.as_nanos()),
+            );
 
-                match publ_detect.put(msg).encoding(enc).await {
-                    Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
-                    Err(e) => {
-                        error!(
-                            "Error sending message on {}: {:?}",
-                            publ_detect.key_expr(),
-                            e
-                        )
-                    }
+            match publ_detect.put(msg).encoding(enc).await {
+                Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
+                Err(e) => {
+                    error!(
+                        "Error sending message on {}: {:?}",
+                        publ_detect.key_expr(),
+                        e
+                    )
                 }
             }
         }
