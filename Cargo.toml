@@ -17,6 +17,7 @@ debug = false
 inherits = "release"
 strip = false
 debug = true
+lto = false
 
 [features]
 default = ["tracy"]
