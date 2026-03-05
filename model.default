@@ -28,13 +28,13 @@ MODEL=""
 EDGEFIRST_CONFIG=""
 
 # ---------------------------------------------------------------------------
-# Inference Engine
+# TFLite Delegate
 # ---------------------------------------------------------------------------
-# Hardware delegate used for model execution. Use "npu" for the NPU/VX
-# delegate on supported hardware (e.g., NXP i.MX8M Plus), or "cpu" for
-# CPU-only inference.
-# Accepted values: npu, cpu
-ENGINE="npu"
+# Path to TFLite delegate shared library. Leave empty for CPU-only inference.
+# Examples:
+#   i.MX 8M Plus NPU: DELEGATE="/usr/lib/libvx_delegate.so"
+#   i.MX 95 Neutron:   DELEGATE="/usr/lib/libneutron_delegate.so"
+DELEGATE=""
 
 # ---------------------------------------------------------------------------
 # Detection Parameters
@@ -65,14 +65,6 @@ LABEL_OFFSET="0"
 #   label-score - Show label and score together
 #   track       - Show tracking ID (requires TRACK=true)
 LABELS="label"
-
-# ---------------------------------------------------------------------------
-# Decoder Model
-# ---------------------------------------------------------------------------
-# Optional path to a decoder model that always runs on CPU. Used by models
-# that require a separate decoding stage (e.g., certain segmentation
-# architectures). Leave empty if not needed.
-DECODER_MODEL=""
 
 # ---------------------------------------------------------------------------
 # SSD Model Mode
@@ -113,20 +105,38 @@ TRACK_UPDATE="0.25"
 VISUALIZATION="false"
 
 # ---------------------------------------------------------------------------
-# Mask Compression
+# Topics
 # ---------------------------------------------------------------------------
-# Enable publishing zstd-compressed segmentation masks on the compressed
-# mask topic (rt/model/mask_compressed).
-MASK_COMPRESSION="false"
+# Zenoh key expressions for subscribing and publishing messages. All topics
+# can be overridden via CLI flags or environment variables.
 
-# Zstd compression level for mask data. Valid range: -7 to 22. A value of 0
-# behaves the same as 3. Lower values are faster but produce larger output.
-MASK_COMPRESSION_LEVEL="1"
+# Camera DMA buffer subscription topic.
+CAMERA_TOPIC="rt/camera/dma"
 
-# Class indices to include in the segmentation mask output. Space-separated
-# list of integer indices. Leave empty to include all classes. Classes with
-# an index higher than the model supports are silently ignored.
-MASK_CLASSES=""
+# Camera info subscription topic (needed when VISUALIZATION is enabled).
+CAMERA_INFO_TOPIC="rt/camera/info"
+
+# Unified model output topic (boxes, masks, timing in a single message).
+OUTPUT_TOPIC="rt/model/output"
+
+# Model metadata topic (model name, labels, input/output shapes).
+INFO_TOPIC="rt/model/info"
+
+# Foxglove visualization topic (when VISUALIZATION is enabled).
+VISUAL_TOPIC="rt/model/visualization"
+
+# Legacy detection topic. Empty string disables publishing. Set to
+# "rt/model/boxes2d" to re-enable for backwards compatibility.
+DETECT_TOPIC=""
+
+# Legacy mask topic. Empty string disables publishing. Set to
+# "rt/model/mask" to re-enable for backwards compatibility.
+MASK_TOPIC=""
+
+# Space-separated class label names to include in output (empty = all classes).
+# Only boxes matching these labels (and their associated instance masks) are
+# published. Example: CLASSES="person car truck"
+CLASSES=""
 
 # ---------------------------------------------------------------------------
 # Zenoh Networking

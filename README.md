@@ -15,10 +15,10 @@ The EdgeFirst Model Node is a high-performance AI inference service designed for
 **Key Features:**
 
 - **ROS2 Compatibility** - Standard `edgefirst_msgs` and `sensor_msgs` interfaces for drop-in integration
-- **Hardware Acceleration** - NXP i.MX8 NPU inference with G2D preprocessing
+- **Hardware Acceleration** - NXP i.MX8 NPU inference via TFLite delegate with G2D preprocessing
 - **Zero-Copy DMA** - Direct memory access for ultra-low latency vision pipelines
 - **Object Detection** - YOLO detection models with auto-detection of model architecture
-- **Instance Segmentation** - Semantic and instance segmentation with mask compression
+- **Instance Segmentation** - Semantic and instance segmentation
 - **ByteTrack Tracking** - Multi-object tracking with Kalman filtering
 - **Multi-Format Output** - Bounding boxes, masks, tracking IDs, and Foxglove visualization
 - **Production Ready** - Tracy profiling, journald logging, comprehensive error handling
@@ -101,7 +101,7 @@ graph LR
 - Linux kernel 5.10+ with V4L2 support
 - Rust 1.90.0 or later (for building from source)
 - OR: Pre-built binaries from [GitHub Releases](https://github.com/EdgeFirstAI/model/releases)
-- TensorFlow Lite model file (.tflite or .rtm)
+- TensorFlow Lite model file (.tflite)
 
 ### Installation
 
@@ -155,7 +155,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ```bash
 edgefirst-model \
   --model yolov8n.tflite \
-  --engine npu \
+  --delegate /usr/lib/libvx_delegate.so \
   --threshold 0.5
 ```
 
@@ -169,23 +169,22 @@ edgefirst-model \
   --track-iou 0.25
 ```
 
-**Instance Segmentation with Mask Compression:**
-
-```bash
-edgefirst-model \
-  --model yolov8n-seg.tflite \
-  --mask-compression \
-  --mask-compression-level 3
-```
-
 **Custom Topics and Visualization:**
 
 ```bash
 edgefirst-model \
   --model model.tflite \
   --camera-topic rt/front_camera/dma \
-  --detect-topic rt/front_model/boxes2d \
   --visualization
+```
+
+**Re-enable Legacy Topics:**
+
+```bash
+edgefirst-model \
+  --model model.tflite \
+  --detect-topic rt/model/boxes2d \
+  --mask-topic rt/model/mask
 ```
 
 ---
@@ -200,11 +199,11 @@ The model node publishes standard ROS2 message types using CDR serialization, en
 
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
-| `rt/model/boxes2d` | `edgefirst_msgs/Detect` | Detection bounding boxes with scores and labels |
+| `rt/model/output` | `edgefirst_msgs/Model` | **Unified model output** with boxes, masks, and timing |
 | `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model metadata, timing, and performance metrics |
-| `rt/model/mask` | `edgefirst_msgs/Mask` | Segmentation masks (raw) |
-| `rt/model/mask_compressed` | `edgefirst_msgs/Mask` | Zstd-compressed segmentation masks |
 | `rt/model/visualization` | `foxglove_msgs/ImageAnnotations` | Foxglove-compatible visualization overlays |
+| *(disabled)* | `edgefirst_msgs/Detect` | Legacy detection boxes (set `DETECT_TOPIC=rt/model/boxes2d` to enable) |
+| *(disabled)* | `edgefirst_msgs/Mask` | Legacy segmentation masks (set `MASK_TOPIC=rt/model/mask` to enable) |
 
 **Subscribed Topics:**
 
@@ -258,7 +257,7 @@ graph LR
     end
 
     subgraph "Output"
-        Pub["Zenoh Publisher<br/>rt/model/boxes2d"]
+        Pub["Zenoh Publisher<br/>rt/model/output"]
     end
 
     DMA --> Convert
@@ -393,32 +392,33 @@ The model node supports both semantic segmentation and instance segmentation:
 **Instance Segmentation:**
 
 - Object detection + per-instance masks
-- Output: Bounding box + mask for each object
-- Example: YOLOv8-seg, Mask R-CNN
+- Output: Bounding box + mask for each detected object
+- Example: YOLOv8-seg
 
-**Mask Compression:**
+### Unified Model Output (`rt/model/output`)
 
-For efficient transmission and storage, masks can be compressed with zstd:
+The `rt/model/output` topic publishes an `edgefirst_msgs/Model` message that combines detection boxes, segmentation masks, and detailed timing information in a single message. It is published on every frame for **all model types** (detection, semantic segmentation, and instance segmentation).
 
-```bash
-edgefirst-model \
-  --model yolov8n-seg.tflite \
-  --mask-compression \
-  --mask-compression-level 3 \
-  --mask-classes "0 1 2"  # Only output classes 0, 1, 2
-```
+**How it handles each model type:**
 
-**Compression Performance:**
+| Model Type | `boxes` field | `masks` field |
+|------------|---------------|---------------|
+| Detection only (e.g. YOLOv8n) | Detected boxes with scores, labels, tracks | Empty |
+| Semantic segmentation (e.g. DeepLab) | Empty | Single `Mask` with `boxed: false` |
+| Instance segmentation (e.g. YOLOv8n-seg) | Detected boxes | One `Mask` per box with `boxed: true` |
 
-| Resolution | Raw Size | Compressed | Ratio |
-|-----------|----------|------------|-------|
-| 640×640 | 400 KB | 8-20 KB | 20-50x |
-| 1920×1080 | 2 MB | 40-100 KB | 20-50x |
+For instance segmentation, each entry in the `masks` array corresponds to the box at the same index in the `boxes` array, with `boxed: true` indicating the mask is cropped to the bounding box region.
 
-**Mask Topics:**
+The `Model` message also includes per-stage timing fields (`input_time`, `model_time`, `output_time`, `decode_time`) using `Duration` instead of the `Time` type used by the older `Detect` message, providing clearer semantics for duration measurements.
 
-- `rt/model/mask` - Uncompressed masks (raw pixel data)
-- `rt/model/mask_compressed` - Zstd-compressed masks (efficient transport)
+### Legacy Topics (Opt-In)
+
+Prior to the unified output, detection results and segmentation masks were published on separate topics. These legacy topics are now **disabled by default** and must be explicitly enabled via environment variable or CLI flag:
+
+- **`rt/model/boxes2d`** (`edgefirst_msgs/Detect`) — Enable with `DETECT_TOPIC=rt/model/boxes2d` or `--detect-topic rt/model/boxes2d`. Contains bounding boxes with scores, labels, and tracks, plus timing fields using `Time`. Does not include any mask data.
+- **`rt/model/mask`** (`edgefirst_msgs/Mask`) — Enable with `MASK_TOPIC=rt/model/mask` or `--mask-topic rt/model/mask`. Publishes a single full-frame mask for semantic segmentation models only.
+
+New subscribers should prefer `rt/model/output` which provides a complete view of all model outputs in a single message.
 
 ---
 
@@ -433,7 +433,7 @@ edgefirst-model --help
 **Essential Options:**
 
 - `--model <PATH>` - Path to TFLite model file (required)
-- `--engine <ENGINE>` - Inference engine: `npu`, `gpu`, `cpu` (default: `npu`)
+- `--delegate <PATH>` - Path to TFLite delegate .so (default: empty = CPU inference)
 - `--threshold <FLOAT>` - Detection score threshold (default: `0.45`)
 - `--iou <FLOAT>` - NMS IoU threshold (default: `0.45`)
 - `--max-boxes <N>` - Maximum detections per frame (default: `100`)
@@ -446,19 +446,17 @@ edgefirst-model --help
 - `--track-update <FLOAT>` - Kalman filter update factor (default: `0.25`)
 - `--track-extra-lifespan <SECS>` - Lost track lifespan in seconds (default: `0.5`)
 
-**Segmentation Options:**
+**Filtering Options:**
 
-- `--mask-compression` - Enable zstd mask compression
-- `--mask-compression-level <LEVEL>` - Compression level -7 to 22 (default: `1`)
-- `--mask-classes <CLASSES>` - Space-separated class indices to output (default: all)
+- `--classes <CLASSES>` - Space-separated class label names to include in output (default: all)
 
 **Topic Configuration:**
 
 - `--camera-topic <TOPIC>` - Camera DMA topic (default: `rt/camera/dma`)
-- `--detect-topic <TOPIC>` - Detection results topic (default: `rt/model/boxes2d`)
+- `--output-topic <TOPIC>` - Unified model output topic (default: `rt/model/output`)
 - `--info-topic <TOPIC>` - Model info topic (default: `rt/model/info`)
-- `--mask-topic <TOPIC>` - Mask topic (default: `rt/model/mask`)
-- `--mask-compressed-topic <TOPIC>` - Compressed mask topic (default: `rt/model/mask_compressed`)
+- `--detect-topic <TOPIC>` - Legacy detection topic (default: empty/disabled)
+- `--mask-topic <TOPIC>` - Legacy mask topic (default: empty/disabled)
 
 **Visualization:**
 
@@ -473,7 +471,6 @@ edgefirst-model --help
 - `--connect <ENDPOINT>` - Connect to Zenoh router
 - `--listen <ENDPOINT>` - Listen for Zenoh connections
 - `--no-multicast-scouting` - Disable multicast discovery
-- `--multicast-interface <IFACE>` - Network interface for multicast scouting
 
 **Debugging:**
 
@@ -483,13 +480,15 @@ edgefirst-model --help
 
 ### Environment Variables
 
-All command-line flags can be set via environment variables with `EDGEFIRST_MODEL_` prefix:
+Configuration can also be set via environment variables. See `model.default` for the full list of supported variables.
 
 ```bash
-export EDGEFIRST_MODEL_MODEL=/models/yolov8n.tflite
-export EDGEFIRST_MODEL_ENGINE=npu
-export EDGEFIRST_MODEL_THRESHOLD=0.5
-export EDGEFIRST_MODEL_TRACK=true
+export MODEL=/models/yolov8n.tflite
+export DELEGATE=/usr/lib/libvx_delegate.so
+export THRESHOLD=0.5
+export TRACK=true
+export OUTPUT_TOPIC=rt/model/output
+export DETECT_TOPIC=rt/model/boxes2d  # Re-enable legacy detect topic
 
 edgefirst-model  # Uses environment configuration
 ```
@@ -561,13 +560,12 @@ edgefirst-model --tracy --model model.tflite
 **Supported Formats:**
 
 - **TensorFlow Lite** (.tflite) - Primary format, full NPU support
-- **RTM** (.rtm) - Experimental, feature-gated (`--features rtm`)
 
-**Inference Engines:**
+**TFLite Delegates:**
 
-- **NPU** (default) - NXP i.MX8M Plus Neural Processing Unit (fastest)
-- **GPU** - GPU delegate (moderate performance)
-- **CPU** - Software fallback (slowest, but universal)
+- **NPU** - NXP i.MX8M Plus Neural Processing Unit via `libvx_delegate.so` (fastest)
+- **Neutron** - NXP i.MX95 NPU via `libneutron_delegate.so`
+- **CPU** (default) - Software fallback when no delegate is specified
 
 **Model Architecture Support:**
 
@@ -604,16 +602,13 @@ cargo doc --no-deps --open
 ```
 model/
 ├── src/
-│   ├── main.rs          # Application entry, Zenoh session, main inference loop
+│   ├── main.rs          # Application entry, Zenoh session, 3-tier inference loop
 │   ├── lib.rs           # Public library interface, TrackerBox wrapper, DmaBuf handling
-│   ├── model.rs         # Model trait, enum_dispatch, model config guessing
-│   ├── tflite_model.rs  # TFLite model loading and inference via NPU
-│   ├── rtm_model.rs     # RTM/VAAL model support (feature-gated)
+│   ├── model.rs         # ModelContext, decode_outputs, model config guessing
 │   ├── buildmsgs.rs     # Zenoh message construction (CDR serialization)
-│   ├── masks.rs         # Segmentation mask processing and compression
+│   ├── masks.rs         # Segmentation mask publishing (legacy mask topic)
 │   ├── args.rs          # CLI argument parsing (Clap)
 │   └── fps.rs           # FPS monitoring
-├── tflitec-sys/         # TFLite C API FFI bindings (internal)
 ├── benches/             # Divan benchmarks
 ├── Cargo.toml           # Project dependencies
 └── README.md            # This file
@@ -647,8 +642,8 @@ edgefirst-model --model /absolute/path/to/model.tflite
 # Check NPU delegate library
 ls -lh /usr/lib/libvx_delegate.so
 
-# Fallback to CPU
-edgefirst-model --model model.tflite --engine cpu
+# Fallback to CPU (omit --delegate)
+edgefirst-model --model model.tflite
 ```
 
 **Problem: "No camera frames received"**
@@ -676,8 +671,8 @@ edgefirst-model --model model.tflite --max-boxes 50
 # Disable tracking if not needed
 edgefirst-model --model model.tflite  # No --track flag
 
-# Use NPU engine
-edgefirst-model --model model.tflite --engine npu
+# Use NPU delegate
+edgefirst-model --model model.tflite --delegate /usr/lib/libvx_delegate.so
 ```
 
 **Problem: "Tracking IDs unstable"**
@@ -699,11 +694,11 @@ edgefirst-model --model model.tflite --track --track-update 0.1
 # Verify model supports segmentation
 # Model must output mask coefficients or full masks
 
-# Check mask classes filter
-edgefirst-model --model model.tflite --mask-classes ""  # All classes
+# Check class filter
+edgefirst-model --model model.tflite --classes ""  # All classes
 
-# Disable compression for debugging
-edgefirst-model --model model.tflite  # No --mask-compression
+# Check unified output for mask data
+z_sub -k "rt/model/output"
 ```
 
 ### Logging
@@ -713,7 +708,7 @@ edgefirst-model --model model.tflite  # No --mask-compression
 RUST_LOG=debug edgefirst-model --model model.tflite
 
 # Filter specific module
-RUST_LOG=edgefirst_model::tflite_model=trace edgefirst-model --model model.tflite
+RUST_LOG=edgefirst_model=trace edgefirst-model --model model.tflite
 
 # View systemd journal logs
 journalctl -u edgefirst-model -f
