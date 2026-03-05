@@ -1075,6 +1075,7 @@ dependencies = [
  "edgefirst-tracker",
  "fast-math",
  "four-char-code",
+ "libc",
  "log",
  "ndarray 0.16.1",
  "ndarray-stats",

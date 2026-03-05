@@ -114,9 +114,68 @@ Hardware-dependent unit tests (marked `#[ignore]`) can be run on the device with
 cargo test -- --ignored --test-threads=1
 ```
 
+### Automated Integration Tests
+
+Integration tests in `tests/integration_test.rs` exercise the full inference pipeline on real hardware. Both tests are marked `#[ignore]` and require:
+
+- A running camera node (provides DMA buffers over Zenoh)
+- A TFLite model file (set via `MODEL` environment variable)
+- Optionally a VX delegate (set via `DELEGATE` environment variable)
+
+| Test | Description |
+|------|-------------|
+| `test_model_inference` | Starts the model service, subscribes to `rt/model/output`, collects messages for 10s, validates `Model` messages have non-zero timing fields and rate >= 10 Hz |
+| `test_graceful_shutdown` | Starts the model service, sends SIGTERM, verifies clean exit within 5s |
+
+**Run manually on device:**
+
+```bash
+# Build the integration tests
+cargo test --test integration_test --no-run
+
+# Run with required environment variables
+MODEL=/path/to/yolov8n_640x640.tflite \
+DELEGATE=/usr/lib/libvx_delegate.so \
+  cargo test --test integration_test -- --include-ignored --test-threads=1
+```
+
 ---
 
-## 4. Model Loading Verification
+## 4. CI Architecture (Three-Phase)
+
+The CI pipeline uses a three-phase architecture to collect coverage from on-target hardware tests:
+
+```
+Phase 1: BUILD (GitHub ARM Runner)
+├── Run unit tests with coverage
+├── Build instrumented binaries (cargo llvm-cov + profiling profile)
+├── Build instrumented integration test binaries
+└── Upload artifacts: coverage.lcov, instrumented binaries, llvm-cov objects
+
+Phase 2: RUN (imx8mpevk Self-Hosted Runner)
+├── Download instrumented binaries
+├── Download model file from repo.edgefirst.ai
+├── Run integration tests with LLVM_PROFILE_FILE set
+├── Collect profraw files from service + test processes
+└── Upload artifacts: profraw files, test output
+
+Phase 3: PROCESS (GitHub ARM Runner)
+├── Download Phase 1 instrumented objects
+├── Download Phase 2 profraw files
+├── Merge profraw → profdata with llvm-profdata
+├── Generate LCOV with llvm-cov export
+└── Upload coverage-hardware.lcov for SonarCloud
+```
+
+Phase 2 is triggered on `main` push or when a PR has the `test-hardware` label. The `imx8mpevk` runner is used because it has guaranteed tflite-vx-delegate/tim-vx patches for DMA-BUF and CameraAdaptor support.
+
+### Graceful Shutdown
+
+The model service installs SIGTERM/SIGINT signal handlers that set a `SHUTDOWN` flag, causing the main inference loop to exit cleanly. This is critical because LLVM coverage instrumentation uses `atexit()` handlers to flush `.profraw` files — without graceful shutdown, no coverage data is generated.
+
+---
+
+## 5. Model Loading Verification
 
 The model node auto-detects model configuration through the following resolution order:
 
@@ -128,7 +187,7 @@ Once loaded, model metadata is published on the info topic (`rt/model/info` by d
 
 ---
 
-## 5. Benchmarks
+## 6. Benchmarks
 
 Benchmarks use the **divan** framework. Run all benchmarks with:
 
@@ -140,7 +199,7 @@ Benchmark test data is stored in `benches/benchmark_data/` and includes sample m
 
 ---
 
-## 6. Coverage
+## 7. Coverage
 
 Generate an HTML coverage report:
 
@@ -170,7 +229,7 @@ cargo install cargo-llvm-cov cargo-nextest
 
 ---
 
-## 7. Profiling During Testing
+## 8. Profiling During Testing
 
 The model node integrates with **Tracy** for real-time performance profiling.
 
@@ -195,7 +254,7 @@ Connect the Tracy profiler GUI to visualize frame timing, inference latency, zon
 
 ---
 
-## 8. Zenoh Testing Tips
+## 9. Zenoh Testing Tips
 
 Use Zenoh CLI tools to monitor and verify pub/sub communication during testing.
 
@@ -244,6 +303,7 @@ These flags are useful for testing across network boundaries or when multicast i
 | ---------------------------- | ---------------------------------------------------------- |
 | Run unit tests               | `cargo test --lib`                                         |
 | Run ignored (hardware) tests | `cargo test -- --ignored --test-threads=1`                 |
+| Run integration tests        | `MODEL=model.tflite cargo test --test integration_test -- --include-ignored --test-threads=1` |
 | Run benchmarks               | `cargo bench`                                              |
 | Coverage report (HTML)       | `cargo llvm-cov --html`                                    |
 | Coverage threshold check     | `cargo llvm-cov --fail-under-lines 70`                     |

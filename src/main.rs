@@ -26,6 +26,7 @@ use edgefirst_tflite::{Delegate, Interpreter, Library, TensorType};
 use log::{error, info, trace, warn};
 use std::{
     process::ExitCode,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
@@ -34,6 +35,28 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{Layer, Registry, layer::SubscriberExt};
 use tracy_client::frame_mark;
 use zenoh::bytes::{Encoding, ZBytes};
+
+/// Global shutdown flag for graceful termination.
+/// This is critical for coverage instrumentation - LLVM uses atexit() handlers
+/// to flush profraw files, so the process must exit cleanly (not via SIGKILL).
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_signal(_: libc::c_int) {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
 
 fn tflite_type_to_datatype(tt: TensorType) -> edgefirst_hal::decoder::configs::DataType {
     use edgefirst_hal::decoder::configs::DataType;
@@ -55,6 +78,8 @@ fn tflite_type_to_datatype(tt: TensorType) -> edgefirst_hal::decoder::configs::D
 
 #[tokio::main]
 pub async fn main() -> ExitCode {
+    install_signal_handlers();
+
     let args = Args::parse();
 
     args.tracy.then(tracy_client::Client::start);
@@ -564,7 +589,7 @@ pub async fn main() -> ExitCode {
     let mut output_boxes = Vec::with_capacity(50);
     let mut output_masks = Vec::with_capacity(50);
     let mut output_tracks = Vec::with_capacity(50);
-    loop {
+    while !SHUTDOWN.load(Ordering::SeqCst) {
         let Some(mut dma_buf) = ({
             let _span = info_span!("wait_for_camera_frame").entered();
             wait_for_camera_frame(&sub_camera, timeout)
@@ -881,4 +906,7 @@ pub async fn main() -> ExitCode {
 
         args.tracy.then(frame_mark);
     }
+
+    info!("Shutting down gracefully");
+    ExitCode::SUCCESS
 }
