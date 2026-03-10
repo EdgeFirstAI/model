@@ -118,9 +118,11 @@ pub struct Args {
     #[arg(long, env = "TRACK_EXTRA_LIFESPAN", default_value = "0.5")]
     pub track_extra_lifespan: f32,
 
-    /// High score threshold for ByteTrack algorithm
-    #[arg(long, env = "TRACK_HIGH_CONF", default_value = "0.7")]
-    pub track_high_conf: f32,
+    /// Score threshold for the decoder when tracking is enabled. Lower than
+    /// --threshold to allow tracker-assisted recovery of low-confidence
+    /// detections. Only used when --track is true.
+    #[arg(long, env = "TRACK_SCORE", default_value = "0.1")]
+    pub track_score: f32,
 
     /// Tracking IOU threshold for box association (higher = stricter)
     #[arg(long, env = "TRACK_IOU", default_value = "0.25")]

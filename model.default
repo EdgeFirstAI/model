@@ -39,8 +39,9 @@ DELEGATE=""
 # ---------------------------------------------------------------------------
 # Detection Parameters
 # ---------------------------------------------------------------------------
-# Minimum confidence score for a detection to be accepted. Detections below
-# this threshold are discarded. Range: 0.0 to 1.0.
+# Minimum confidence score for a detection to be accepted. When TRACK is
+# enabled, this also serves as the threshold for creating new ByteTrack
+# tracklets (the decoder uses TRACK_SCORE instead). Range: 0.0 to 1.0.
 THRESHOLD="0.45"
 
 # IOU (Intersection over Union) threshold for non-maximum suppression.
@@ -85,9 +86,10 @@ TRACK="false"
 # detection) before the track is removed.
 TRACK_EXTRA_LIFESPAN="0.5"
 
-# High confidence threshold for the ByteTrack algorithm. Detections above
-# this score are considered high-confidence and matched first.
-TRACK_HIGH_CONF="0.7"
+# Score threshold for the decoder when tracking is enabled. A lower value
+# than THRESHOLD lets the tracker see more candidate detections for
+# tracker-assisted recovery. Only effective when TRACK=true.
+TRACK_SCORE="0.1"
 
 # IOU threshold for associating detection boxes with existing tracks.
 # Higher values require tighter overlap for a match. Range: 0.0 to 1.0.
