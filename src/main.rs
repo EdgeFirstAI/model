@@ -3,7 +3,9 @@
 
 use clap::Parser;
 use edgefirst_hal::decoder::DecoderBuilder;
-use edgefirst_hal::image::{Crop, Flip, ImageProcessor, ImageProcessorTrait, RGB, RGBA, Rotation};
+use edgefirst_hal::image::{
+    Crop, Flip, ImageProcessor, ImageProcessorTrait, PLANAR_RGB, PLANAR_RGB_INT8, RGB, Rotation,
+};
 use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
 use edgefirst_model::{
     args::Args,
@@ -13,8 +15,8 @@ use edgefirst_model::{
     },
     heart_beat,
     masks::mask_thread,
-    model::{Metadata, ModelContext, decode_outputs, dmabuf_to_tensor_image, guess_model_config},
-    update_dmabuf_with_pidfd, wait_for_camera_frame,
+    model::{ModelContext, decode_outputs, dmabuf_to_tensor_image, guess_model_config},
+    runtime, update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
 use edgefirst_schemas::{
     edgefirst_msgs::{Model as ModelMsg, ModelInfo},
@@ -22,12 +24,11 @@ use edgefirst_schemas::{
     sensor_msgs::CameraInfo,
     serde_cdr,
 };
-use edgefirst_tflite::{Delegate, Interpreter, Library, TensorType};
 use log::{error, info, trace, warn};
 use std::{
     process::ExitCode,
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::mpsc;
 use tracing::info_span;
@@ -58,24 +59,6 @@ fn install_signal_handlers() {
     }
 }
 
-fn tflite_type_to_datatype(tt: TensorType) -> edgefirst_hal::decoder::configs::DataType {
-    use edgefirst_hal::decoder::configs::DataType;
-    match tt {
-        TensorType::Float32 => DataType::Float32,
-        TensorType::Float16 => DataType::Float16,
-        TensorType::Float64 => DataType::Float64,
-        TensorType::Int8 => DataType::Int8,
-        TensorType::UInt8 => DataType::UInt8,
-        TensorType::Int16 => DataType::Int16,
-        TensorType::UInt16 => DataType::UInt16,
-        TensorType::Int32 => DataType::Int32,
-        TensorType::UInt32 => DataType::UInt32,
-        TensorType::Int64 => DataType::Int64,
-        TensorType::UInt64 => DataType::UInt64,
-        _ => DataType::Raw,
-    }
-}
-
 #[tokio::main]
 pub async fn main() -> ExitCode {
     install_signal_handlers();
@@ -84,28 +67,24 @@ pub async fn main() -> ExitCode {
 
     args.tracy.then(tracy_client::Client::start);
 
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy()
+    };
 
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
-        .with_filter(env_filter);
+        .with_filter(env_filter());
 
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(env_filter)),
-        Err(_) => None,
-    };
+    let journald = tracing_journald::layer()
+        .ok()
+        .map(|j| j.with_filter(env_filter()));
 
-    let env_filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(LevelFilter::INFO.into())
-        .from_env_lossy();
-    let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(env_filter)),
-        false => None,
+    let tracy = if args.tracy {
+        Some(tracing_tracy::TracyLayer::default().with_filter(env_filter()))
+    } else {
+        None
     };
 
     let subscriber = Registry::default()
@@ -170,190 +149,38 @@ pub async fn main() -> ExitCode {
         (stream_width, stream_height),
     ));
 
-    let model_data = match std::fs::read(&args.model) {
-        Ok(v) => v,
+    // ── Create runtime ──────────────────────────────────────────────────
+    let mut runtime = match runtime::create_runtime(&args.model, &args.delegate) {
+        Ok(r) => r,
         Err(e) => {
-            error!("Could not read model file {:?}: {:?}", args.model, e);
+            error!("Could not create runtime: {e:?}");
             return ExitCode::FAILURE;
         }
     };
+    let info = runtime.metadata().clone();
 
-    // ── Load TFLite library ──────────────────────────────────────────────
-    let lib = match Library::new() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not load TensorFlow Lite library: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let in_shape = runtime.input_shape(0);
+    let in_h = in_shape.get(1).copied().unwrap_or(0);
+    let in_w = in_shape.get(2).copied().unwrap_or(0);
 
-    let tflite_model = match edgefirst_tflite::Model::from_bytes(&lib, model_data) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not load TFLite model: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // ── Load delegate and probe features ─────────────────────────────────
-    let mut use_camera_adaptor = false;
-    let use_dmabuf;
-
-    let delegate = if !args.delegate.is_empty() {
-        match Delegate::load(&args.delegate) {
-            Ok(d) => {
-                info!("Delegate loaded: {}", args.delegate);
-
-                if d.has_camera_adaptor()
-                    && let Some(adaptor) = d.camera_adaptor()
-                {
-                    if let Err(e) = adaptor.set_format(0, "rgba") {
-                        warn!("CameraAdaptor set_format failed: {e:?}");
-                    } else {
-                        use_camera_adaptor = true;
-                        info!("CameraAdaptor: enabled (RGBA -> RGB on NPU)");
-                    }
-                }
-
-                use_dmabuf = d.has_dmabuf();
-                if use_dmabuf {
-                    info!("DMA-BUF: available");
-                }
-
-                Some(d)
-            }
-            Err(e) => {
-                error!("Could not load delegate {}: {e:?}", args.delegate);
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        info!("No delegate specified, using CPU inference");
-        use_dmabuf = false;
-        None
-    };
-
-    // ── Build interpreter ────────────────────────────────────────────────
-    let mut builder = match Interpreter::builder(&lib) {
-        Ok(b) => b,
-        Err(e) => {
-            error!("Could not create interpreter builder: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-    if let Some(d) = delegate {
-        builder = builder.delegate(d);
-    }
-    let mut interpreter = match builder.build(&tflite_model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not build interpreter: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-    info!("Loaded model");
-
-    // ── Inspect input tensor ─────────────────────────────────────────────
-    let (in_h, in_w, input_type, _input_quant) = {
-        let inputs = match interpreter.inputs() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get input tensors: {e:?}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let input = &inputs[0];
-        let shape = input.shape().unwrap();
-        let tt = input.tensor_type();
-        let qp = input.quantization_params();
-        info!(
-            "Input: {} (scale={}, zp={})",
-            input, qp.scale, qp.zero_point
-        );
-        (shape[1], shape[2], tt, qp)
-    };
-
-    // ── Extract metadata and labels ──────────────────────────────────────
-    let metadata = {
-        let m = edgefirst_tflite::metadata::Metadata::from_model_bytes(tflite_model.data());
-        let mut meta = Metadata {
-            name: m.name,
-            version: m.version,
-            description: m.description,
-            author: m.author,
-            license: m.license,
-            config_yaml: None,
-        };
-
-        // Extract config YAML from model zip archive
-        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data())) {
-            for name in [
-                "edgefirst.yaml",
-                "edgefirst.yml",
-                "config.yaml",
-                "config.yml",
-            ] {
-                if let Ok(mut f) = z.by_name(name)
-                    && f.is_file()
-                {
-                    let mut yaml = String::new();
-                    if let Err(e) = std::io::Read::read_to_string(&mut f, &mut yaml) {
-                        error!("Error reading {name}: {e:?}");
-                    }
-                    meta.config_yaml = Some(yaml);
-                    break;
-                }
-            }
-        }
-        meta
-    };
-
-    let model_labels = {
-        let mut labels = Vec::new();
-        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(tflite_model.data()))
-            && let Ok(mut f) = z.by_name("labels.txt")
-            && f.is_file()
-        {
-            let mut txt = String::new();
-            if let Err(e) = std::io::Read::read_to_string(&mut f, &mut txt) {
-                error!("Error reading labels.txt: {e:?}");
-            }
-            labels = txt.lines().map(|l| l.to_string()).collect();
-        }
-        labels
-    };
-    info!("Labels: {model_labels:?}");
+    info!("Labels: {:?}", info.labels);
 
     // ── Build ModelContext ────────────────────────────────────────────────
-    let model_ctx = {
-        let inputs = interpreter.inputs().unwrap();
-        let outputs = interpreter.outputs().unwrap();
-
-        let input_shapes: Vec<Vec<usize>> = inputs
-            .iter()
-            .map(|t| t.shape().unwrap_or_default())
-            .collect();
-        let input_types: Vec<edgefirst_hal::decoder::configs::DataType> = inputs
-            .iter()
-            .map(|t| tflite_type_to_datatype(t.tensor_type()))
-            .collect();
-        let output_shapes: Vec<Vec<usize>> = outputs
-            .iter()
-            .map(|t| t.shape().unwrap_or_default())
-            .collect();
-        let output_types: Vec<edgefirst_hal::decoder::configs::DataType> = outputs
-            .iter()
-            .map(|t| tflite_type_to_datatype(t.tensor_type()))
-            .collect();
-
-        ModelContext {
-            input_shapes,
-            input_types,
-            output_shapes,
-            output_types,
-            labels: model_labels.clone(),
-            name: metadata.name.clone().unwrap_or_default(),
-        }
+    let model_ctx = ModelContext {
+        input_shapes: (0..runtime.input_count())
+            .map(|i| runtime.input_shape(i).to_vec())
+            .collect(),
+        input_types: (0..runtime.input_count())
+            .map(|i| runtime.input_dtype(i))
+            .collect(),
+        output_shapes: (0..runtime.output_count())
+            .map(|i| runtime.output_shape(i).to_vec())
+            .collect(),
+        output_types: (0..runtime.output_count())
+            .map(|i| runtime.output_dtype(i))
+            .collect(),
+        labels: info.labels.clone(),
+        name: info.name.clone().unwrap_or_default(),
     };
 
     let mut tracker = edgefirst_tracker::bytetrack::ByteTrack::new();
@@ -393,21 +220,30 @@ pub async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-    } else if let Some(yaml) = &metadata.config_yaml {
+    } else if let Some(yaml) = &info.config_yaml {
         decoder_builder = decoder_builder.with_config_yaml_str(yaml.clone());
     } else {
         warn!("No edgefirst config provided, guessing config based on model shape");
 
-        let output_quants: Vec<Option<(f32, i32)>> = {
-            let outputs = interpreter.outputs().unwrap();
-            outputs
-                .iter()
-                .map(|t| {
-                    let qp = t.quantization_params();
-                    Some((qp.scale, qp.zero_point))
+        // For quantized YOLO models (e.g. ARA-2 DVM), box coordinate outputs
+        // are dequantized to pixel-space values.  The HAL decoder expects
+        // normalised [0,1] coordinates, so fold the 1/input_dim division
+        // into the quantization scale for outputs that look like box coords
+        // (shape contains a dimension == 4).
+        let input_dim = in_w.max(in_h) as f32;
+        let output_quants: Vec<Option<(f32, i32)>> = (0..runtime.output_count())
+            .map(|i| {
+                runtime.output_quantization(i).map(|q| {
+                    let is_box_output = model_ctx.output_shapes[i].contains(&4);
+                    let scale = if is_box_output && input_dim > 1.0 {
+                        q.scale / input_dim
+                    } else {
+                        q.scale
+                    };
+                    (scale, q.zero_point)
                 })
-                .collect()
-        };
+            })
+            .collect();
 
         let config = guess_model_config(&model_ctx.output_shapes, &output_quants);
         info!("Model has shape: {:?}", model_ctx.output_shapes);
@@ -432,29 +268,20 @@ pub async fn main() -> ExitCode {
     };
 
     let model_type_ = decoder.model_type();
-    let (has_box, has_seg, has_instance_seg) = match model_type_ {
-        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDet { .. } => (true, true, false),
-        edgefirst_hal::decoder::configs::ModelType::ModelPackSegDetSplit { .. } => {
-            (true, true, false)
-        }
-        edgefirst_hal::decoder::configs::ModelType::ModelPackDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::ModelPackDetSplit { .. } => {
-            (true, false, false)
-        }
-        edgefirst_hal::decoder::configs::ModelType::ModelPackSeg { .. } => (false, true, false),
-        edgefirst_hal::decoder::configs::ModelType::YoloDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::YoloSegDet { .. } => (true, false, true),
-        edgefirst_hal::decoder::configs::ModelType::YoloSplitDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::YoloSplitSegDet { .. } => (true, false, true),
-        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndDet { .. } => (true, false, false),
-        edgefirst_hal::decoder::configs::ModelType::YoloEndToEndSegDet { .. } => {
-            (true, false, true)
-        }
-        edgefirst_hal::decoder::configs::ModelType::YoloSplitEndToEndDet { .. } => {
-            (true, false, false)
-        }
-        edgefirst_hal::decoder::configs::ModelType::YoloSplitEndToEndSegDet { .. } => {
-            (true, false, true)
+    let (has_box, has_seg, has_instance_seg) = {
+        use edgefirst_hal::decoder::configs::ModelType::*;
+        match model_type_ {
+            ModelPackSegDet { .. } | ModelPackSegDetSplit { .. } => (true, true, false),
+            ModelPackDet { .. } | ModelPackDetSplit { .. } => (true, false, false),
+            ModelPackSeg { .. } => (false, true, false),
+            YoloDet { .. }
+            | YoloSplitDet { .. }
+            | YoloEndToEndDet { .. }
+            | YoloSplitEndToEndDet { .. } => (true, false, false),
+            YoloSegDet { .. }
+            | YoloSplitSegDet { .. }
+            | YoloEndToEndSegDet { .. }
+            | YoloSplitEndToEndSegDet { .. } => (true, false, true),
         }
     };
 
@@ -483,14 +310,15 @@ pub async fn main() -> ExitCode {
         .await
         .unwrap();
 
-    let publ_visual = match args.visualization {
-        true => Some(
+    let publ_visual = if args.visualization {
+        Some(
             session
                 .declare_publisher(args.visual_topic.clone())
                 .await
                 .unwrap(),
-        ),
-        false => None,
+        )
+    } else {
+        None
     };
 
     let mask_tx = if !args.mask_topic.is_empty() {
@@ -518,13 +346,14 @@ pub async fn main() -> ExitCode {
 
     let sub_camera = heartbeat.await.unwrap();
 
-    let model_name = match args.model.as_path().file_name() {
-        Some(v) => String::from(v.to_string_lossy()),
-        None => {
+    let model_name = args
+        .model
+        .file_name()
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
             warn!("Cannot determine model file basename");
             String::from("unknown_model_file")
-        }
-    };
+        });
     info!("got model_name {model_name}");
 
     if !args.classes.is_empty() {
@@ -546,45 +375,19 @@ pub async fn main() -> ExitCode {
         }
     };
 
-    let dst_format = if use_camera_adaptor { RGBA } else { RGB };
-    let mut dst_image = match img_proc.create_image(in_w, in_h, dst_format) {
+    let input_fourcc = runtime.input_fourcc(0);
+    // G2D outputs interleaved RGB. For planar input models (ARA-2),
+    // deinterleaving happens in the copy-to-input-tensor step below.
+    let is_planar = matches!(input_fourcc, f if f == PLANAR_RGB || f == PLANAR_RGB_INT8);
+    let dst_fourcc = if is_planar { RGB } else { input_fourcc };
+    let mut dst_image = match img_proc.create_image(in_w, in_h, dst_fourcc) {
         Ok(v) => v,
         Err(e) => {
             error!("Could not create destination image: {e:?}");
             return ExitCode::FAILURE;
         }
     };
-    info!("Destination image: {}x{} {:?}", in_w, in_h, dst_format);
-
-    // ── Set up DMA-BUF binding (persistent for application lifetime) ─────
-    let dmabuf_handle = if use_dmabuf {
-        let delegate_ref = interpreter.delegate(0).expect("delegate not found");
-        let dmabuf = delegate_ref
-            .dmabuf()
-            .expect("DMA-BUF probed but not available");
-        let buf_size = if use_camera_adaptor {
-            in_h * in_w * 4 // RGBA
-        } else {
-            let inputs = interpreter.inputs().unwrap();
-            inputs[0].byte_size()
-        };
-        match dmabuf.request(0, edgefirst_tflite::dmabuf::Ownership::Delegate, buf_size) {
-            Ok((handle, _desc)) => {
-                if let Err(e) = dmabuf.bind_to_tensor(handle, 0) {
-                    error!("Could not bind DMA-BUF to input tensor: {e:?}");
-                    return ExitCode::FAILURE;
-                }
-                info!("DMA-BUF bound to input tensor (size={buf_size})");
-                Some(handle)
-            }
-            Err(e) => {
-                warn!("DMA-BUF request failed, falling back to CPU: {e:?}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    info!("Destination image: {}x{} {:?}", in_w, in_h, dst_fourcc);
 
     let mut output_boxes = Vec::with_capacity(50);
     let mut output_masks = Vec::with_capacity(50);
@@ -598,7 +401,6 @@ pub async fn main() -> ExitCode {
         };
         trace!("Received camera frame");
 
-        let input_start = Instant::now();
         // the _fd needs to remain valid while `dma_buf` is used
         let _fd = match update_dmabuf_with_pidfd(&mut dma_buf) {
             Ok(fd) => fd,
@@ -630,122 +432,78 @@ pub async fn main() -> ExitCode {
             }
         }
 
-        // Write preprocessed pixels to input tensor
+        // Write preprocessed pixels to runtime's input tensor
         {
             let _span = info_span!("load_input").entered();
-            let map = match dst_image.tensor().map() {
+            let src_map = match dst_image.tensor().map() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Could not map destination image: {e:?}");
                     continue;
                 }
             };
-            let pixels = map.as_slice();
-
-            if use_camera_adaptor && let Some(handle) = dmabuf_handle {
-                // Tier 1: CameraAdaptor + DMA-BUF — write RGBA to DMA-BUF
-                let delegate_ref = interpreter.delegate(0).unwrap();
-                let dmabuf = delegate_ref.dmabuf().unwrap();
-
-                let fd = dmabuf.fd(handle).unwrap();
-                let buf_size = pixels.len();
-                let ptr = unsafe {
-                    nix::libc::mmap(
-                        std::ptr::null_mut(),
-                        buf_size,
-                        nix::libc::PROT_READ | nix::libc::PROT_WRITE,
-                        nix::libc::MAP_SHARED,
-                        fd,
-                        0,
-                    )
+            let pixels = src_map.as_slice();
+            let input = runtime.input_tensor(0);
+            let mut dst_map = match input.map() {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Could not map input tensor: {e:?}");
+                    continue;
+                }
+            };
+            let dst = dst_map.as_mut_slice();
+            if is_planar {
+                // Deinterleave RGB → planar CHW and convert uint8 → int8
+                // via XOR 0x80 when input_fourcc is PLANAR_RGB_INT8
+                let plane_size = in_w * in_h;
+                let xor_mask = if input_fourcc == PLANAR_RGB_INT8 {
+                    0x80u8
+                } else {
+                    0x00u8
                 };
-                if ptr == nix::libc::MAP_FAILED {
-                    error!("Failed to mmap DMA-BUF");
-                    continue;
-                }
-                unsafe {
-                    std::ptr::copy_nonoverlapping(pixels.as_ptr(), ptr.cast::<u8>(), buf_size);
-                    nix::libc::munmap(ptr, buf_size);
-                }
-                if let Err(e) = dmabuf.sync_for_device(handle) {
-                    error!("DMA-BUF sync_for_device failed: {e:?}");
-                    continue;
+                for i in 0..plane_size {
+                    dst[i] = pixels[i * 3] ^ xor_mask;
+                    dst[plane_size + i] = pixels[i * 3 + 1] ^ xor_mask;
+                    dst[2 * plane_size + i] = pixels[i * 3 + 2] ^ xor_mask;
                 }
             } else {
-                // Tier 2/3: CPU type-convert into input tensor
-                let mut inputs = match interpreter.inputs_mut() {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("Could not get mutable inputs: {e:?}");
-                        continue;
-                    }
-                };
-                let input = &mut inputs[0];
-                let result = match input_type {
-                    TensorType::Float32 => {
-                        let float_data: Vec<f32> =
-                            pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
-                        input.copy_from_slice(&float_data)
-                    }
-                    TensorType::UInt8 => input.copy_from_slice(pixels),
-                    TensorType::Int8 => {
-                        #[allow(clippy::cast_possible_wrap)]
-                        let i8_data: Vec<i8> =
-                            pixels.iter().map(|&v| v.wrapping_sub(128) as i8).collect();
-                        input.copy_from_slice(&i8_data)
-                    }
-                    _ => {
-                        error!("Unsupported input type: {input_type:?}");
-                        return ExitCode::FAILURE;
-                    }
-                };
-                if let Err(e) = result {
-                    error!("Could not write to input tensor: {e:?}");
-                    continue;
-                }
-
-                // Tier 2: sync DMA-BUF if available
-                if let Some(handle) = dmabuf_handle {
-                    let delegate_ref = interpreter.delegate(0).unwrap();
-                    let dmabuf = delegate_ref.dmabuf().unwrap();
-                    if let Err(e) = dmabuf.sync_for_device(handle) {
-                        error!("DMA-BUF sync_for_device failed: {e:?}");
-                        continue;
-                    }
-                }
+                dst[..pixels.len()].copy_from_slice(pixels);
             }
         }
 
-        let input_duration = input_start.elapsed().as_nanos();
-        trace!("Load input: {:.3} ms", input_duration as f32 / 1_000_000.0);
-
-        let model_start = Instant::now();
-        {
+        let timing = {
             let _span = info_span!("invoke").entered();
-            if let Err(e) = interpreter.invoke() {
-                error!("Failed to run model: {e:?}");
-                return ExitCode::FAILURE;
+            match runtime.invoke() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Failed to run model: {e:?}");
+                    return ExitCode::FAILURE;
+                }
             }
-        }
-        let model_duration = model_start.elapsed().as_nanos();
-        trace!("Ran model: {:.3} ms", model_duration as f32 / 1_000_000.0);
+        };
+        let input_duration = timing.input_time.as_nanos();
+        let model_duration = timing.model_time.as_nanos();
 
-        // Sync DMA-BUF output back to CPU
-        if let Some(handle) = dmabuf_handle {
-            let delegate_ref = interpreter.delegate(0).unwrap();
-            let dmabuf = delegate_ref.dmabuf().unwrap();
-            if let Err(e) = dmabuf.sync_for_cpu(handle) {
-                error!("DMA-BUF sync_for_cpu failed: {e:?}");
-            }
-        }
-
-        let output_start = Instant::now();
+        let output_start = std::time::Instant::now();
+        output_boxes.clear();
+        output_masks.clear();
+        output_tracks.clear();
         let res = {
             let _span = info_span!("decode_outputs").entered();
-            decode_outputs(&interpreter, &decoder, &mut output_boxes, &mut output_masks)
+            decode_outputs(
+                runtime.as_ref(),
+                &decoder,
+                &mut output_boxes,
+                &mut output_masks,
+            )
         };
 
-        if res.is_ok() && args.track {
+        if let Err(e) = res {
+            error!("Failed to decode model outputs: {e:?}");
+            continue;
+        }
+
+        if args.track {
             let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
@@ -753,20 +511,14 @@ pub async fn main() -> ExitCode {
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
             let wrapped: Vec<_> = output_boxes.iter().map(TrackerBox).collect();
             let tracks = tracker.update(&wrapped, timestamp);
-            output_tracks.clear();
             output_tracks.extend(tracks.into_iter().flatten());
-        }
-
-        if let Err(e) = res {
-            error!("Failed to decode model outputs: {e:?}");
-            return ExitCode::FAILURE;
         }
 
         if !args.classes.is_empty() {
             let keep: Vec<bool> = output_boxes
                 .iter()
                 .map(|b| {
-                    model_labels
+                    info.labels
                         .get(b.label)
                         .map(|name| args.classes.iter().any(|c| c == name))
                         .unwrap_or(false)
@@ -807,11 +559,8 @@ pub async fn main() -> ExitCode {
         let _pub_span = info_span!("zenoh_publish").entered();
         if has_seg && let Some(mask_tx) = mask_tx.as_ref() {
             let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
-            match mask_tx.send(masks).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Cannot send to mask publishing thread {e:?}");
-                }
+            if let Err(e) = mask_tx.send(masks).await {
+                error!("Cannot send to mask publishing thread {e:?}");
             }
         }
 
@@ -819,7 +568,7 @@ pub async fn main() -> ExitCode {
             let (msg, enc) = build_detect_msg_and_encode_(
                 &output_boxes,
                 &output_tracks,
-                &model_labels,
+                &info.labels,
                 dma_buf.header.clone(),
                 time_from_ns(input_duration),
                 time_from_ns(model_duration),
@@ -842,7 +591,7 @@ pub async fn main() -> ExitCode {
             let (msg, enc) = build_image_annotations_msg_and_encode_(
                 &output_boxes,
                 &output_tracks,
-                &model_labels,
+                &info.labels,
                 dma_buf.header.stamp.clone(),
                 (stream_width, stream_height),
                 &model_name,
@@ -861,30 +610,28 @@ pub async fn main() -> ExitCode {
             }
         }
 
-        {
-            let model_output = build_model_output_msg(
-                &output_boxes,
-                &output_tracks,
-                &model_labels,
-                &output_masks,
-                dma_buf.header.clone(),
-                input_duration,
-                model_duration,
-                output_duration.as_nanos(),
-                has_instance_seg,
-            );
-            let msg = ZBytes::from(serde_cdr::serialize(&model_output).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema(ModelMsg::SCHEMA_NAME);
+        let model_output = build_model_output_msg(
+            &output_boxes,
+            &output_tracks,
+            &info.labels,
+            &output_masks,
+            dma_buf.header.clone(),
+            input_duration,
+            model_duration,
+            output_duration.as_nanos(),
+            has_instance_seg,
+        );
+        let msg = ZBytes::from(serde_cdr::serialize(&model_output).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema(ModelMsg::SCHEMA_NAME);
 
-            match publ_output.put(msg).encoding(enc).await {
-                Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
-                Err(e) => {
-                    error!(
-                        "Error sending message on {}: {:?}",
-                        publ_output.key_expr(),
-                        e
-                    )
-                }
+        match publ_output.put(msg).encoding(enc).await {
+            Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
+            Err(e) => {
+                error!(
+                    "Error sending message on {}: {:?}",
+                    publ_output.key_expr(),
+                    e
+                )
             }
         }
 
@@ -892,15 +639,12 @@ pub async fn main() -> ExitCode {
         let msg = ZBytes::from(serde_cdr::serialize(&model_info_msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema(ModelInfo::SCHEMA_NAME);
 
-        match publ_model_info.put(msg).encoding(enc).await {
-            Ok(_) => (),
-            Err(e) => {
-                error!(
-                    "Error sending message on {}: {:?}",
-                    publ_model_info.key_expr(),
-                    e
-                )
-            }
+        if let Err(e) = publ_model_info.put(msg).encoding(enc).await {
+            error!(
+                "Error sending message on {}: {:?}",
+                publ_model_info.key_expr(),
+                e
+            );
         }
         fps.update();
 

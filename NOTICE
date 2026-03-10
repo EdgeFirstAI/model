@@ -7,6 +7,7 @@ This product includes software developed at Au-Zone Technologies
 This software contains components from the following first-level dependencies
 that require attribution:
 
+  * ara2 0.1.2 (Apache-2.0)
   * async-pidfd 0.1.5 (MIT OR Apache-2.0)
   * clap 4.5.60 (MIT OR Apache-2.0)
   * edgefirst-hal 0.9.0 (Apache-2.0)

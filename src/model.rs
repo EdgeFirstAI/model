@@ -15,7 +15,7 @@ use edgefirst_hal::decoder::{
     },
 };
 use edgefirst_hal::image::TensorImage;
-use edgefirst_hal::tensor::{DmaTensor, Tensor, TensorTrait};
+use edgefirst_hal::tensor::{DmaTensor, Tensor, TensorMapTrait, TensorTrait};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use four_char_code::FourCharCode;
 use tracing::instrument;
@@ -129,18 +129,6 @@ pub struct ModelContext {
     pub name: String,
 }
 
-// ── Metadata ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Default, PartialEq, Clone)]
-pub struct Metadata {
-    pub name: Option<String>,
-    pub version: Option<String>,
-    pub description: Option<String>,
-    pub author: Option<String>,
-    pub license: Option<String>,
-    pub config_yaml: Option<String>,
-}
-
 // ── dmabuf_to_tensor_image ───────────────────────────────────────────────────
 
 #[instrument(skip_all)]
@@ -181,65 +169,92 @@ pub fn dmabuf_to_tensor_image(dma: &DmaBuffer) -> Result<TensorImage, ModelError
 
 // ── decode_outputs ───────────────────────────────────────────────────────────
 
-/// Decode edgefirst-tflite output tensors through the HAL decoder.
+/// Decode model output tensors through the HAL decoder.
 ///
 /// Classifies outputs as float or quantized, builds ndarray views using
 /// typed slices, and dispatches to `decoder.decode_float()` or
 /// `decoder.decode_quantized()`.
 #[instrument(skip_all)]
 pub fn decode_outputs(
-    interpreter: &edgefirst_tflite::Interpreter<'_>,
+    runtime: &dyn crate::runtime::Runtime,
     decoder: &edgefirst_hal::decoder::Decoder,
     output_boxes: &mut Vec<edgefirst_hal::decoder::DetectBox>,
     output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
 ) -> Result<(), ModelError> {
-    let outputs = interpreter
-        .outputs()
-        .map_err(|e| ModelError::new(ModelErrorKind::TFLite, format!("Cannot get outputs: {e}")))?;
+    let n = runtime.output_count();
+
+    // Map all output tensors upfront so TensorMaps live long enough
+    let maps: Vec<_> = (0..n)
+        .map(|i| runtime.output_tensor(i).map())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ModelError::new(ModelErrorKind::Tensor, format!("Cannot map outputs: {e}")))?;
 
     let mut float_views = Vec::new();
     let mut quant_views = Vec::new();
 
-    for tensor in &outputs {
-        let shape = tensor.shape().map_err(|e| {
-            ModelError::new(ModelErrorKind::TFLite, format!("Cannot get shape: {e}"))
-        })?;
-        match tensor.tensor_type() {
-            edgefirst_tflite::TensorType::Float32 => {
-                let data = tensor.as_slice::<f32>().map_err(|e| {
-                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read f32: {e}"))
-                })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
-                    ModelError::new(
-                        ModelErrorKind::TFLite,
-                        format!("f32 shape/data mismatch: {e}"),
+    for (i, map) in maps.iter().enumerate() {
+        let dtype = runtime.output_dtype(i);
+        let shape = runtime.output_shape(i);
+        let bytes = map.as_slice();
+
+        match dtype {
+            DataType::Float32 => {
+                // SAFETY: TFLite/Ara2 output tensors are properly aligned for f32
+                let data: &[f32] = unsafe {
+                    std::slice::from_raw_parts(
+                        bytes.as_ptr().cast::<f32>(),
+                        bytes.len() / std::mem::size_of::<f32>(),
                     )
-                })?;
+                };
+                let arr =
+                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
+                        ModelError::new(
+                            ModelErrorKind::Tensor,
+                            format!("f32 shape/data mismatch: {e}"),
+                        )
+                    })?;
                 float_views.push(arr);
             }
-            edgefirst_tflite::TensorType::UInt8 => {
-                let data = tensor.as_slice::<u8>().map_err(|e| {
-                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read u8: {e}"))
-                })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
-                    ModelError::new(
-                        ModelErrorKind::TFLite,
-                        format!("u8 shape/data mismatch: {e}"),
-                    )
-                })?;
+            DataType::UInt8 => {
+                let arr =
+                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), bytes).map_err(|e| {
+                        ModelError::new(
+                            ModelErrorKind::Tensor,
+                            format!("u8 shape/data mismatch: {e}"),
+                        )
+                    })?;
                 let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
                 quant_views.push(arr);
             }
-            edgefirst_tflite::TensorType::Int8 => {
-                let data = tensor.as_slice::<i8>().map_err(|e| {
-                    ModelError::new(ModelErrorKind::TFLite, format!("Cannot read i8: {e}"))
-                })?;
-                let arr = ndarray::ArrayView::from_shape(shape, data).map_err(|e| {
-                    ModelError::new(
-                        ModelErrorKind::TFLite,
-                        format!("i8 shape/data mismatch: {e}"),
+            DataType::Int8 => {
+                // SAFETY: i8 has same size and alignment as u8
+                let data: &[i8] =
+                    unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
+                let arr =
+                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
+                        ModelError::new(
+                            ModelErrorKind::Tensor,
+                            format!("i8 shape/data mismatch: {e}"),
+                        )
+                    })?;
+                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
+                quant_views.push(arr);
+            }
+            DataType::Int16 => {
+                // SAFETY: tensor data from ARA-2 is properly aligned for i16
+                let data: &[i16] = unsafe {
+                    std::slice::from_raw_parts(
+                        bytes.as_ptr().cast::<i16>(),
+                        bytes.len() / std::mem::size_of::<i16>(),
                     )
-                })?;
+                };
+                let arr =
+                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
+                        ModelError::new(
+                            ModelErrorKind::Tensor,
+                            format!("i16 shape/data mismatch: {e}"),
+                        )
+                    })?;
                 let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
                 quant_views.push(arr);
             }
@@ -252,8 +267,18 @@ pub fn decode_outputs(
     match (float_views.is_empty(), quant_views.is_empty()) {
         (false, true) => decoder.decode_float(&float_views, output_boxes, output_masks)?,
         (true, false) => decoder.decode_quantized(&quant_views, output_boxes, output_masks)?,
-        (true, true) => log::error!("No outputs for decoder"),
-        (false, false) => log::error!("Mixed float and quantized outputs"),
+        (true, true) => {
+            return Err(ModelError::new(
+                ModelErrorKind::Decoding,
+                "No decodable outputs (all tensors have unsupported types)".into(),
+            ));
+        }
+        (false, false) => {
+            return Err(ModelError::new(
+                ModelErrorKind::Decoding,
+                "Mixed float and quantized output tensors".into(),
+            ));
+        }
     }
     log::trace!("Decoded boxes: {:?}", output_boxes);
     Ok(())
@@ -408,8 +433,7 @@ fn guess_yolo_detection(
     shape: [&[usize]; 1],
     quant: [&Option<(f32, i32)>; 1],
 ) -> Option<ConfigOutputs> {
-    // Modelpack segmentation has one output with NC (num classes) , and
-    // the width and height are greater than 160
+    // YOLO detection has one 3D output: 1/NF/NB or 1/NB/NF
     let [shape] = shape;
     let quantization = quant[0].map(|x| x.into());
     if shape.len() != 3 {
