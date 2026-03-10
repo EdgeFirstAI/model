@@ -56,7 +56,6 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-build-rust${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-build-rust${{ env.RUST_VERSION }}-
 
       - name: Build release binary
         run: cargo build --release

@@ -5,6 +5,68 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.8.0] - 2026-03-10
+
+### Added
+
+- **Tracker-assisted instance segmentation recovery**: when tracking is enabled,
+  the decoder runs at a lower score threshold (`--track-score`, default 0.1) to
+  produce more candidate detections. ByteTrack promotes low-confidence detections
+  that match existing tracks, enabling recovery of temporarily occluded objects
+  while preserving mask-box alignment.
+- New `--track-score` / `TRACK_SCORE` parameter for decoder threshold when
+  tracking is enabled.
+- ARA-2 NPU runtime backend via `Runtime` trait abstraction, supporting
+  `.dvm` model files over `/var/run/ara2.sock`.
+- Unified model output topic (`rt/model/output`) combining boxes, masks, tracks,
+  and timing in a single CDR message.
+- General `--classes` / `CLASSES` label filter replacing the old `MASK_CLASSES`,
+  filtering both detection boxes and instance segmentation masks.
+- Tracy tracing spans for main loop pipeline stages (preprocess, invoke, decode,
+  tracker_update, zenoh_publish).
+- On-target integration tests with LLVM coverage instrumentation.
+- Three-phase CI architecture: unit tests on GitHub runners, hardware integration
+  tests on i.MX8M Plus EVK, coverage aggregation and SonarCloud reporting.
+
+### Changed
+
+- **Breaking**: replaced `--track-high-conf` / `TRACK_HIGH_CONF` with
+  `--track-score` / `TRACK_SCORE`. The existing `--threshold` now serves as
+  ByteTrack's new-track-creation threshold when tracking is enabled.
+- **Breaking**: replaced `--engine` / `ENGINE` with `--delegate` / `DELEGATE`
+  for TFLite delegate library path.
+- **Breaking**: replaced `MASK_CLASSES` with `CLASSES` for label filtering.
+- **Breaking**: legacy detection and mask topics are now disabled by default
+  (empty `DETECT_TOPIC` / `MASK_TOPIC`). Set to `rt/model/boxes2d` /
+  `rt/model/mask` to re-enable.
+- Rewrote inference pipeline using `edgefirst-tflite` with 3-tier preprocessing
+  (G2D DMA → planar deinterleave → input tensor copy).
+- Replaced `SupportedModel` with `ModelContext` for decoder configuration,
+  supporting auto-detection of model config from output tensor shapes.
+- Folded box coordinate normalization into quantization scale for ARA-2 DVM
+  models.
+- Updated edgefirst-hal 0.9.0 → 0.9.1 (backend selection and mask decoding
+  fixes).
+- Updated edgefirst-tracker 0.9.0 → 0.9.1.
+- Pinned Rust toolchain to 1.94.0 in all CI workflows with version-aware
+  cache keys to prevent proc-macro ABI mismatches.
+
+### Fixed
+
+- Post-tracker filtering now correctly aligns boxes, masks, and track IDs using
+  a shared `keep` mask before publishing. Previously, `.flatten()` on tracker
+  results silently dropped untracked entries, causing index misalignment.
+- G2D acceleration restored by forcing DMA tensor allocation for camera frames.
+- Clippy warnings in main.rs resolved.
+
+### Removed
+
+- `tflite_model.rs` and `rtm_model.rs` (replaced by unified `model.rs` with
+  `ModelContext` and `decode_outputs`).
+- `--track-high-conf` / `TRACK_HIGH_CONF` parameter (replaced by two-threshold
+  approach using `--track-score` and `--threshold`).
+- `MASK_CLASSES` parameter (replaced by `CLASSES`).
+
 ## [2.7.0] - 2026-02-26
 
 ### Changed

@@ -1,9 +1,0 @@
-[build]
-rustflags = ["-Ctarget-cpu=native"]
-
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-rustflags = ["-Ctarget-cpu=cortex-a53"]
-
-[net]
-git-fetch-with-cli = true
