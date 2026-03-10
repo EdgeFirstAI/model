@@ -1,0 +1,30 @@
+# cargo-nextest configuration
+#
+# This configuration enables JUnit XML output for test result publishing
+
+[profile.default]
+# JUnit XML output for GitHub Actions test result publishing
+junit.path = "test-results.xml"
+junit.store-success-output = true
+junit.store-failure-output = true
+
+# Test execution settings
+retries = 0  # Don't retry failed tests by default
+fail-fast = false  # Run all tests even if some fail
+
+# Run tests serially - model requires exclusive hardware access
+test-threads = 1
+
+# Timeout settings (model loading is slower than IMU)
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# Profiling profile for coverage instrumentation
+[profile.profiling]
+# JUnit XML output path for profiling runs
+junit.path = "target/nextest/profiling/junit.xml"
+junit.store-success-output = true
+junit.store-failure-output = true
+retries = 0
+fail-fast = false
+test-threads = 1
+slow-timeout = { period = "120s", terminate-after = 2 }

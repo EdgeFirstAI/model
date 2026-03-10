@@ -462,18 +462,15 @@ This section is customized for the **EdgeFirst Model Node** project.
 ### Technology Stack
 
 - **Language**: Rust 1.90.0+ (edition 2024)
-- **Build system**: Cargo workspace with 2 crates:
-  - `edgefirst-model`: Main inference service binary
-  - `tflitec-sys`: TensorFlow Lite C bindings (internal)
+- **Build system**: Cargo (single crate)
 - **Key dependencies**:
-  - `edgefirst-hal 0.6.2`: Hardware abstraction (decoder, image processing, tensor)
-  - `edgefirst-tracker 0.6.2`: ByteTrack multi-object tracking
-  - `edgefirst-schemas 1.5.3`: Message schemas for EdgeFirst Perception
-  - `zenoh 1.5.0`: Pub/sub communication layer
+  - `edgefirst-hal 0.9.0`: Hardware abstraction (decoder, image processing, tensor)
+  - `edgefirst-tflite 0.1.0`: TFLite inference with DMA-BUF zero-copy and CameraAdaptor
+  - `edgefirst-tracker 0.9.0`: ByteTrack multi-object tracking
+  - `edgefirst-schemas 1.5.5`: Message schemas for EdgeFirst Perception
+  - `zenoh 1.7.2`: Pub/sub communication layer
   - `tokio`: Async runtime for Zenoh and concurrent operations
   - `four-char-code 2.3.0`: FourCharCode type for pixel format identification
-  - `tflitec-sys`: TensorFlow Lite inference engine (internal crate)
-  - `vaal` (optional): RTM/Ara-2 runtime support (feature-gated)
   - `ndarray`: Numerical computing
   - `tracing`, `tracing-tracy`: Logging and profiling
 - **Target platforms**: Linux on x86_64 and aarch64 (primary: NXP i.MX8)
@@ -484,19 +481,18 @@ This section is customized for the **EdgeFirst Model Node** project.
 - **Pattern**: Event-driven async architecture with Zenoh pub/sub
 - **Component Type**: Microservice node in EdgeFirst Perception middleware
 - **Data flow**:
-  - Subscribe to camera frames via Zenoh (`{namespace}/camera/frame`)
-  - Perform inference using TFLite or RTM models
+  - Subscribe to camera frames via Zenoh (`{namespace}/camera/dma`)
+  - Perform inference using TFLite models via `edgefirst-tflite`
   - Publish results: detections, masks, model_info, visualization
   - Zero-copy DMA buffer passing via pidfd
 - **Module organization**:
-  - `main.rs`: Application entry, Zenoh session, main inference loop
+  - `main.rs`: Application entry, Zenoh session, 3-tier inference loop
   - `lib.rs`: Public library interface, TrackerBox wrapper, DmaBuf handling
-  - `model.rs`: Model trait, enum_dispatch, model config guessing
-  - `tflite_model.rs` / `rtm_model.rs`: Model loading and inference
+  - `model.rs`: ModelContext struct, decode_outputs, model config guessing
   - `buildmsgs.rs`: Zenoh message construction (CDR serialization)
-  - `masks.rs`: Segmentation mask processing and compression
+  - `masks.rs`: Segmentation mask publishing (legacy mask topic)
   - `args.rs`: CLI argument parsing, `fps.rs`: FPS monitoring
-  - External: `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
+  - External: `edgefirst-tflite` (TFLite inference), `edgefirst-hal` (decoder, image, tensor), `edgefirst-tracker` (ByteTrack)
 - **Error handling**: Result types with ModelError for error propagation
 
 ### Build and Deployment
@@ -530,8 +526,8 @@ cargo doc --no-deps --open
 # Cross-compile for ARM64
 cargo build --target aarch64-unknown-linux-gnu --release
 
-# Build with RTM support (optional)
-cargo build --release --features rtm
+# Build without Tracy (optional)
+cargo build --release --no-default-features
 ```
 
 ### Performance Targets
@@ -572,7 +568,6 @@ Critical performance characteristics for edge AI inference:
 ### Testing Conventions
 
 - **Unit tests**: Co-located in `#[cfg(test)] mod tests` at end of implementation files
-  - Currently exist in: `masks.rs`
   - Target: All modules should have unit tests
 - **Integration tests**: To be created in `tests/` directory
   - Will include mock Zenoh nodes for end-to-end testing
@@ -605,12 +600,13 @@ cargo llvm-cov --html --open
 - **Topic structure**: `{namespace}/component/topic`
   - Namespace typically: `edgefirst` or user-defined
 - **Subscriptions**:
-  - Camera frames: `{namespace}/camera/frame` (with DMA buffer FD via pidfd)
+  - Camera frames: `{namespace}/camera/dma` (with DMA buffer FD via pidfd)
 - **Publications**:
-  - Detections: `{namespace}/model/detect` (CDR serialized, edgefirst-schemas)
-  - Segmentation masks: `{namespace}/model/mask` (zstd compressed)
-  - Model metadata: `{namespace}/model/model_info`
-  - Visualization: `{namespace}/model/visualization` (annotated images)
+  - Unified model output: `{namespace}/model/output` (boxes, masks, timing — primary topic)
+  - Model metadata: `{namespace}/model/info`
+  - Visualization: `{namespace}/model/visualization` (annotated images, opt-in)
+  - Legacy detections: `{namespace}/model/boxes2d` (opt-in, disabled by default)
+  - Legacy masks: `{namespace}/model/mask` (opt-in, disabled by default)
 - **Message format**: CDR serialization via `edgefirst-schemas` crate
 - **DMA buffer passing**: Use `pidfd_getfd` to pass file descriptors between processes
 
