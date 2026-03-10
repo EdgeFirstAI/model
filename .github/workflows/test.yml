@@ -81,7 +81,6 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-cargo-clippy-rust${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-rust${{ env.RUST_VERSION }}-
 
       - name: Run Clippy (main crate)
         run: cargo clippy -p edgefirst-model --no-deps --all-targets -- -D warnings
@@ -150,7 +149,6 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-test-rust${{ env.RUST_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-test-rust${{ env.RUST_VERSION }}-
 
       - name: Run unit tests with coverage
         run: |
