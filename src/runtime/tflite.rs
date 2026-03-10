@@ -65,7 +65,7 @@ pub struct TfLiteRuntime {
     input_tensor: Tensor<u8>,
     input_fourcc_val: FourCharCode,
 
-    // Output tensors (populated after each invoke)
+    // Pre-allocated output tensors (reused across frames, no per-frame alloc)
     output_tensors: Vec<Tensor<u8>>,
 
     // Model metadata
@@ -296,6 +296,35 @@ impl TfLiteRuntime {
 
         info!("Model metadata: {info:?}");
 
+        // Pre-allocate output tensors with correct shapes.
+        // These are reused every frame — only the data is copied, not the
+        // allocation. For non-u8 types (e.g. float32) the byte_size differs
+        // from the shape volume, so we use a flat [byte_size] shape.
+        let mut output_tensors = Vec::with_capacity(output_shapes.len());
+        for (i, shape) in output_shapes.iter().enumerate() {
+            let volume: usize = shape.iter().product();
+            let bytes_per_element = match output_types[i] {
+                TensorType::Float32 => 4,
+                TensorType::Float16 => 2,
+                TensorType::Float64 => 8,
+                TensorType::Int16 | TensorType::UInt16 => 2,
+                TensorType::Int32 | TensorType::UInt32 => 4,
+                TensorType::Int64 | TensorType::UInt64 => 8,
+                _ => 1,
+            };
+            let byte_size = volume * bytes_per_element;
+            let tensor_shape = if bytes_per_element == 1 {
+                shape.clone()
+            } else {
+                vec![byte_size]
+            };
+            output_tensors.push(Tensor::<u8>::new(
+                &tensor_shape,
+                Some(TensorMemory::Mem),
+                None,
+            )?);
+        }
+
         Ok(TfLiteRuntime {
             interpreter,
             input_shapes,
@@ -307,47 +336,22 @@ impl TfLiteRuntime {
             dmabuf_handle,
             input_tensor,
             input_fourcc_val,
-            output_tensors: Vec::new(),
+            output_tensors,
             info,
         })
     }
 
-    /// Cache interpreter output tensors into owned HAL `Tensor<u8>` values.
+    /// Copy interpreter output data into pre-allocated HAL tensors.
     ///
     /// TFLite output tensor borrows are temporary, so we copy the raw bytes
-    /// into `MemTensor<u8>` instances after each invoke.
+    /// into the pre-allocated `output_tensors`. No allocations occur here.
     fn cache_output_tensors(&mut self) -> Result<(), ModelError> {
         let outputs = self.interpreter.outputs()?;
-        self.output_tensors.clear();
-        self.output_tensors.reserve(outputs.len());
 
-        for tensor in &outputs {
+        for (i, tensor) in outputs.iter().enumerate() {
             let data: &[u8] = tensor.as_slice::<u8>()?;
-            let shape = tensor.shape().unwrap_or_default();
-
-            // Use the byte_size as a flat shape for creating the MemTensor,
-            // since the HAL tensor API requires shape to match element count.
-            let hal_tensor = Tensor::<u8>::new(&[data.len()], Some(TensorMemory::Mem), None)?;
-            {
-                let mut map = hal_tensor.map()?;
-                map.as_mut_slice().copy_from_slice(data);
-            }
-
-            // Reshape to the original output shape
-            // byte_size == volume for u8 tensors, so the total count matches
-            let volume: usize = shape.iter().product();
-            if volume == data.len() {
-                // Safe to use the shape directly — create with correct shape
-                let correct_tensor = Tensor::<u8>::new(&shape, Some(TensorMemory::Mem), None)?;
-                {
-                    let mut map = correct_tensor.map()?;
-                    map.as_mut_slice().copy_from_slice(data);
-                }
-                self.output_tensors.push(correct_tensor);
-            } else {
-                // Fallback: keep the flat tensor
-                self.output_tensors.push(hal_tensor);
-            }
+            let mut map = self.output_tensors[i].map()?;
+            map.as_mut_slice().copy_from_slice(data);
         }
 
         Ok(())
@@ -368,27 +372,30 @@ impl Runtime for TfLiteRuntime {
                 error!("DMA-BUF sync_for_device failed: {e:?}");
             }
         } else {
-            // CPU mode: copy from input_tensor to interpreter with type conversion.
-            // The main loop writes u8 RGB pixels to input_tensor; we convert to the
-            // interpreter's expected type here.
+            // CPU mode: write directly into the interpreter's typed input slice.
+            // No intermediate buffer — as_mut_slice gives us a mutable view of
+            // the interpreter's own memory.
             let map = self.input_tensor.map()?;
             let pixels = map.as_slice();
             let mut inputs = self.interpreter.inputs_mut()?;
             let input = &mut inputs[0];
             match self.input_types[0] {
                 TensorType::Float32 => {
-                    let f32_data: Vec<f32> = pixels.iter().map(|&v| f32::from(v) / 255.0).collect();
-                    input.copy_from_slice(&f32_data).map_err(|e| {
-                        ModelError::new(ModelErrorKind::TFLite, format!("copy f32 input: {e:?}"))
+                    let dst = input.as_mut_slice::<f32>().map_err(|e| {
+                        ModelError::new(ModelErrorKind::TFLite, format!("map f32 input: {e:?}"))
                     })?;
+                    for (d, &src) in dst.iter_mut().zip(pixels.iter()) {
+                        *d = f32::from(src) / 255.0;
+                    }
                 }
                 TensorType::Int8 => {
-                    #[expect(clippy::cast_possible_wrap, reason = "intentional u8→i8 quantization")]
-                    let i8_data: Vec<i8> =
-                        pixels.iter().map(|&v| v.wrapping_sub(128) as i8).collect();
-                    input.copy_from_slice(&i8_data).map_err(|e| {
-                        ModelError::new(ModelErrorKind::TFLite, format!("copy i8 input: {e:?}"))
+                    let dst = input.as_mut_slice::<i8>().map_err(|e| {
+                        ModelError::new(ModelErrorKind::TFLite, format!("map i8 input: {e:?}"))
                     })?;
+                    #[expect(clippy::cast_possible_wrap, reason = "intentional u8→i8 quantization")]
+                    for (d, &src) in dst.iter_mut().zip(pixels.iter()) {
+                        *d = src.wrapping_sub(128) as i8;
+                    }
                 }
                 _ => {
                     input.copy_from_slice(pixels).map_err(|e| {

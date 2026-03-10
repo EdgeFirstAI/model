@@ -136,8 +136,11 @@ impl Ara2Runtime {
 
             info!(
                 "Input {i}: shape={shape:?} bpp={} signed={} qn={} mean={} (scale={})",
-                input_info.bpp, input_info.quant.is_signed, input_info.quant.qn,
-                input_info.quant.mean, quant.scale,
+                input_info.bpp,
+                input_info.quant.is_signed,
+                input_info.quant.qn,
+                input_info.quant.mean,
+                quant.scale,
             );
         }
 

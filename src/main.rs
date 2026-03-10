@@ -418,6 +418,8 @@ pub async fn main() -> ExitCode {
             }
         };
 
+        let preprocess_start = std::time::Instant::now();
+
         {
             let _span = info_span!("preprocess").entered();
             if let Err(e) = img_proc.convert(
@@ -481,10 +483,13 @@ pub async fn main() -> ExitCode {
                 }
             }
         };
-        let input_duration = timing.input_time.as_nanos();
+        // Fold preprocessing time into input_time (no separate preprocess field)
+        let preprocess_time = preprocess_start.elapsed();
+        let input_duration = (preprocess_time + timing.input_time).as_nanos();
         let model_duration = timing.model_time.as_nanos();
+        let output_duration = timing.output_time.as_nanos();
 
-        let output_start = std::time::Instant::now();
+        let decode_start = std::time::Instant::now();
         output_boxes.clear();
         output_masks.clear();
         output_tracks.clear();
@@ -549,7 +554,7 @@ pub async fn main() -> ExitCode {
             });
         }
 
-        let output_duration = output_start.elapsed();
+        let decode_duration = decode_start.elapsed();
 
         if first_run {
             info!("First run complete. Found {} boxes", output_boxes.len());
@@ -572,7 +577,7 @@ pub async fn main() -> ExitCode {
                 dma_buf.header.clone(),
                 time_from_ns(input_duration),
                 time_from_ns(model_duration),
-                time_from_ns(output_duration.as_nanos()),
+                time_from_ns(decode_duration.as_nanos()),
             );
 
             match publ_detect.put(msg).encoding(enc).await {
@@ -618,7 +623,8 @@ pub async fn main() -> ExitCode {
             dma_buf.header.clone(),
             input_duration,
             model_duration,
-            output_duration.as_nanos(),
+            output_duration,
+            decode_duration.as_nanos(),
             has_instance_seg,
         );
         let msg = ZBytes::from(serde_cdr::serialize(&model_output).unwrap());
