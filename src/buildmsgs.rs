@@ -301,6 +301,7 @@ pub fn build_model_output_msg(
     header: Header,
     input_duration: u128,
     model_duration: u128,
+    output_duration: u128,
     decode_duration: u128,
     has_instance_seg: bool,
 ) -> ModelMsg {
@@ -345,7 +346,7 @@ pub fn build_model_output_msg(
         header,
         input_time: duration_from_ns(input_duration),
         model_time: duration_from_ns(model_duration),
-        output_time: Duration { sec: 0, nanosec: 0 },
+        output_time: duration_from_ns(output_duration),
         decode_time: duration_from_ns(decode_duration),
         boxes: msg_boxes,
         masks,

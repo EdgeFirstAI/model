@@ -6,6 +6,7 @@ pub mod buildmsgs;
 pub mod fps;
 pub mod masks;
 pub mod model;
+pub mod runtime;
 
 /// Newtype wrapper to bridge `edgefirst_tracker::DetectionBox` for
 /// `edgefirst_hal::decoder::DetectBox`.
