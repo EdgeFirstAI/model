@@ -185,13 +185,25 @@ pub async fn main() -> ExitCode {
 
     let mut tracker = edgefirst_tracker::bytetrack::ByteTrack::new();
     tracker.track_extra_lifespan = (args.track_extra_lifespan * 1_000_000_000.0) as u64;
-    tracker.track_high_conf = args.track_high_conf;
+    tracker.track_high_conf = args.threshold;
     tracker.track_iou = args.track_iou;
     tracker.track_update = args.track_update;
 
+    if args.track && args.track_score >= args.threshold {
+        warn!(
+            "--track-score ({}) >= --threshold ({}); tracker will see no extra candidates",
+            args.track_score, args.threshold
+        );
+    }
+
     // ── Build decoder ────────────────────────────────────────────────────
+    let decoder_score = if args.track {
+        args.track_score
+    } else {
+        args.threshold
+    };
     let mut decoder_builder = DecoderBuilder::new()
-        .with_score_threshold(args.threshold)
+        .with_score_threshold(decoder_score)
         .with_iou_threshold(args.iou);
     if let Some(path) = args.edgefirst_config() {
         let config = match std::fs::read_to_string(path) {
@@ -515,8 +527,29 @@ pub async fn main() -> ExitCode {
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
             let wrapped: Vec<_> = output_boxes.iter().map(TrackerBox).collect();
-            let tracks = tracker.update(&wrapped, timestamp);
-            output_tracks.extend(tracks.into_iter().flatten());
+            let track_results = tracker.update(&wrapped, timestamp);
+
+            // Keep only detections that received a track assignment
+            let keep: Vec<bool> = track_results.iter().map(|t| t.is_some()).collect();
+
+            let mut j = 0;
+            output_boxes.retain(|_| {
+                let k = keep[j];
+                j += 1;
+                k
+            });
+
+            if has_instance_seg {
+                let mut j = 0;
+                output_masks.retain(|_| {
+                    let k = keep.get(j).copied().unwrap_or(false);
+                    j += 1;
+                    k
+                });
+            }
+
+            // All remaining detections have Some(TrackInfo), so flatten is safe
+            output_tracks.extend(track_results.into_iter().flatten());
         }
 
         if !args.classes.is_empty() {
