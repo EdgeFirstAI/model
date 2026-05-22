@@ -51,6 +51,19 @@ Thumbs.db
 audit.json
 sonar-issues.json
 
+# SBOM artifact produced by .github/scripts/generate_sbom.sh
+sbom.json
+
+# Local Python virtualenv (e.g. scancode-toolkit + cyclonedx-bom for
+# running the SBOM workflow locally).
+venv/
+
+# Model blobs are not tracked in the repo (see commit be312de removing
+# benchmark data).
+*.tflite
+*.dvm
+*.mcap
+
 .vscode/
 .debug/
 

@@ -19,7 +19,7 @@ use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
 
 use crate::{args::LabelSetting, model::ModelContext};
-use edgefirst_hal::decoder::configs::DataType;
+use edgefirst_hal::tensor::DType;
 
 const WHITE: FoxgloveColor = FoxgloveColor {
     r: 1.0,
@@ -353,21 +353,20 @@ pub fn build_model_output_msg(
     }
 }
 
-fn tensor_type_to_model_info_datatype(t: DataType) -> u8 {
+fn tensor_type_to_model_info_datatype(t: DType) -> u8 {
     match t {
-        DataType::Raw => model_info::RAW,
-        DataType::Int8 => model_info::INT8,
-        DataType::UInt8 => model_info::UINT8,
-        DataType::Int16 => model_info::INT16,
-        DataType::UInt16 => model_info::UINT16,
-        DataType::Float16 => model_info::FLOAT16,
-        DataType::Int32 => model_info::INT32,
-        DataType::UInt32 => model_info::UINT32,
-        DataType::Float32 => model_info::FLOAT32,
-        DataType::Int64 => model_info::INT64,
-        DataType::UInt64 => model_info::UINT64,
-        DataType::Float64 => model_info::FLOAT64,
-        DataType::String => model_info::STRING,
+        DType::I8 => model_info::INT8,
+        DType::U8 => model_info::UINT8,
+        DType::I16 => model_info::INT16,
+        DType::U16 => model_info::UINT16,
+        DType::F16 => model_info::FLOAT16,
+        DType::I32 => model_info::INT32,
+        DType::U32 => model_info::UINT32,
+        DType::F32 => model_info::FLOAT32,
+        DType::I64 => model_info::INT64,
+        DType::U64 => model_info::UINT64,
+        DType::F64 => model_info::FLOAT64,
+        _ => model_info::RAW,
     }
 }
 
@@ -380,7 +379,7 @@ fn get_input_info(model_ctx: Option<&ModelContext>) -> (Vec<u32>, u8) {
             input_shape = shape.iter().map(|f| *f as u32).collect();
         }
         if let Some(dt) = ctx.input_types.first() {
-            input_type = tensor_type_to_model_info_datatype(dt.clone());
+            input_type = tensor_type_to_model_info_datatype(*dt);
         }
     }
     (input_shape, input_type)
@@ -401,7 +400,7 @@ pub fn build_model_info_msg(
             output_shape = shape.iter().map(|f| *f as u32).collect();
         }
         if let Some(dt) = ctx.output_types.first() {
-            output_type = tensor_type_to_model_info_datatype(dt.clone());
+            output_type = tensor_type_to_model_info_datatype(*dt);
         }
         labels = ctx.labels.clone();
     }

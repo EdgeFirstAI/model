@@ -1,23 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use std::{
-    error::Error,
-    fmt,
-    os::fd::{FromRawFd, OwnedFd},
-};
+use std::{error::Error, fmt, os::fd::BorrowedFd};
 
 use edgefirst_hal::decoder::{
     ConfigOutput, ConfigOutputs,
     configs::{
-        Boxes, DataType, DecoderType, Detection, DimName, Mask, MaskCoefficients, Protos, Scores,
+        Boxes, DecoderType, Detection, DimName, Mask, MaskCoefficients, Protos, Scores,
         Segmentation,
     },
 };
-use edgefirst_hal::image::TensorImage;
-use edgefirst_hal::tensor::{DmaTensor, Tensor, TensorMapTrait, TensorTrait};
+use edgefirst_hal::image::ImageProcessor;
+use edgefirst_hal::tensor::{DType, PixelFormat, PlaneDescriptor, TensorDyn};
 use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
-use four_char_code::FourCharCode;
 use tracing::instrument;
 
 // ── ModelError ───────────────────────────────────────────────────────────────
@@ -122,58 +117,91 @@ impl ModelError {
 #[derive(Debug, Clone)]
 pub struct ModelContext {
     pub input_shapes: Vec<Vec<usize>>,
-    pub input_types: Vec<DataType>,
+    pub input_types: Vec<DType>,
     pub output_shapes: Vec<Vec<usize>>,
-    pub output_types: Vec<DataType>,
+    pub output_types: Vec<DType>,
     pub labels: Vec<String>,
     pub name: String,
 }
 
-// ── dmabuf_to_tensor_image ───────────────────────────────────────────────────
+// ── dmabuf_to_tensor_dyn ─────────────────────────────────────────────────────
 
+/// Map a V4L2/DRM fourcc code to a HAL [`PixelFormat`].
+///
+/// `DmaBuffer::fourcc` follows the V4L2 convention where the four ASCII
+/// characters are packed little-endian (first char in the lowest byte).
+fn fourcc_to_pixel_format(fourcc: u32) -> Result<PixelFormat, ModelError> {
+    let bytes = fourcc.to_le_bytes();
+    let fmt = match &bytes {
+        b"YUYV" | b"YUY2" => PixelFormat::Yuyv,
+        b"NV12" => PixelFormat::Nv12,
+        b"NV16" => PixelFormat::Nv16,
+        b"RGB3" => PixelFormat::Rgb,
+        b"RGBA" | b"AB24" => PixelFormat::Rgba,
+        b"BGRA" | b"AR24" => PixelFormat::Bgra,
+        b"GREY" => PixelFormat::Grey,
+        _ => {
+            return Err(ModelError::new(
+                ModelErrorKind::Image,
+                format!(
+                    "Unsupported camera fourcc {:?}",
+                    String::from_utf8_lossy(&bytes)
+                ),
+            ));
+        }
+    };
+    Ok(fmt)
+}
+
+/// Wrap a camera DMA buffer as a HAL [`TensorDyn`] for the `ImageProcessor`.
+///
+/// The camera frame's DMA-BUF fd is imported zero-copy; the `ImageProcessor`
+/// reads it directly via the G2D / OpenGL backend. `PlaneDescriptor::new`
+/// duplicates the fd, so the camera process keeps ownership of the original.
 #[instrument(skip_all)]
-pub fn dmabuf_to_tensor_image(dma: &DmaBuffer) -> Result<TensorImage, ModelError> {
-    // Force DMA tensor type — the camera fd is always a DMA-BUF but
-    // Tensor::from_fd auto-detection may misclassify it as SHM based on
-    // anon_inode minor numbers, which prevents G2D hardware acceleration.
-    let raw_fd = unsafe { nix::libc::dup(dma.fd) };
-    if raw_fd < 0 {
+pub fn dmabuf_to_tensor_dyn(
+    processor: &ImageProcessor,
+    dma: &DmaBuffer,
+) -> Result<TensorDyn, ModelError> {
+    let format = fourcc_to_pixel_format(dma.fourcc)?;
+    // Validate the fd before the unsafe borrow — `BorrowedFd::borrow_raw` is
+    // UB on a negative/closed descriptor. `update_dmabuf_with_pidfd` sets a
+    // non-negative fd on success, but be defensive.
+    if dma.fd < 0 {
         return Err(ModelError::new(
             ModelErrorKind::Io,
-            format!(
-                "Failed to dup DMA-BUF fd: {}",
-                std::io::Error::last_os_error()
-            ),
+            format!("DmaBuffer carried an invalid fd {}", dma.fd),
         ));
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let dma_tensor = DmaTensor::<u8>::from_fd(
-        fd,
-        &[
-            dma.height as usize,
+    // SAFETY: `dma.fd` is a live DMA-BUF fd obtained for this process via
+    // pidfd_getfd (validated non-negative above); PlaneDescriptor::new dup()s
+    // it before borrowing ends.
+    let plane = PlaneDescriptor::new(unsafe { BorrowedFd::borrow_raw(dma.fd) })
+        .map_err(|e| ModelError::new(ModelErrorKind::Tensor, format!("PlaneDescriptor: {e}")))?;
+    processor
+        .import_image(
+            plane,
+            None,
             dma.width as usize,
-            (dma.length / dma.width / dma.height) as usize,
-        ],
-        None,
-    )?;
-    let tensor = Tensor::Dma(dma_tensor);
-
-    // DmaBuffer.fourcc uses V4L2/DRM convention where characters are packed
-    // little-endian (first char in lowest byte), while FourCharCode uses
-    // big-endian (first char in highest byte). Swap bytes to convert.
-    let fourcc = FourCharCode::new(dma.fourcc.swap_bytes())
-        .map_err(|e| ModelError::new(ModelErrorKind::Image, format!("Invalid FourCC code: {e}")))?;
-    let img = TensorImage::from_tensor(tensor, fourcc)?;
-    Ok(img)
+            dma.height as usize,
+            format,
+            DType::U8,
+        )
+        .map_err(|e| {
+            ModelError::new(
+                ModelErrorKind::Image,
+                format!("Failed to import camera image: {e}"),
+            )
+        })
 }
 
 // ── decode_outputs ───────────────────────────────────────────────────────────
 
 /// Decode model output tensors through the HAL decoder.
 ///
-/// Classifies outputs as float or quantized, builds ndarray views using
-/// typed slices, and dispatches to `decoder.decode_float()` or
-/// `decoder.decode_quantized()`.
+/// The HAL `Decoder::decode()` consumes the runtime's typed output
+/// [`TensorDyn`]s directly and dispatches the float / quantized path
+/// internally based on each tensor's element type.
 #[instrument(skip_all)]
 pub fn decode_outputs(
     runtime: &dyn crate::runtime::Runtime,
@@ -182,104 +210,8 @@ pub fn decode_outputs(
     output_masks: &mut Vec<edgefirst_hal::decoder::Segmentation>,
 ) -> Result<(), ModelError> {
     let n = runtime.output_count();
-
-    // Map all output tensors upfront so TensorMaps live long enough
-    let maps: Vec<_> = (0..n)
-        .map(|i| runtime.output_tensor(i).map())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ModelError::new(ModelErrorKind::Tensor, format!("Cannot map outputs: {e}")))?;
-
-    let mut float_views = Vec::new();
-    let mut quant_views = Vec::new();
-
-    for (i, map) in maps.iter().enumerate() {
-        let dtype = runtime.output_dtype(i);
-        let shape = runtime.output_shape(i);
-        let bytes = map.as_slice();
-
-        match dtype {
-            DataType::Float32 => {
-                // SAFETY: TFLite/Ara2 output tensors are properly aligned for f32
-                let data: &[f32] = unsafe {
-                    std::slice::from_raw_parts(
-                        bytes.as_ptr().cast::<f32>(),
-                        bytes.len() / std::mem::size_of::<f32>(),
-                    )
-                };
-                let arr =
-                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
-                        ModelError::new(
-                            ModelErrorKind::Tensor,
-                            format!("f32 shape/data mismatch: {e}"),
-                        )
-                    })?;
-                float_views.push(arr);
-            }
-            DataType::UInt8 => {
-                let arr =
-                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), bytes).map_err(|e| {
-                        ModelError::new(
-                            ModelErrorKind::Tensor,
-                            format!("u8 shape/data mismatch: {e}"),
-                        )
-                    })?;
-                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
-                quant_views.push(arr);
-            }
-            DataType::Int8 => {
-                // SAFETY: i8 has same size and alignment as u8
-                let data: &[i8] =
-                    unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i8>(), bytes.len()) };
-                let arr =
-                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
-                        ModelError::new(
-                            ModelErrorKind::Tensor,
-                            format!("i8 shape/data mismatch: {e}"),
-                        )
-                    })?;
-                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
-                quant_views.push(arr);
-            }
-            DataType::Int16 => {
-                // SAFETY: tensor data from ARA-2 is properly aligned for i16
-                let data: &[i16] = unsafe {
-                    std::slice::from_raw_parts(
-                        bytes.as_ptr().cast::<i16>(),
-                        bytes.len() / std::mem::size_of::<i16>(),
-                    )
-                };
-                let arr =
-                    ndarray::ArrayView::from_shape(ndarray::IxDyn(shape), data).map_err(|e| {
-                        ModelError::new(
-                            ModelErrorKind::Tensor,
-                            format!("i16 shape/data mismatch: {e}"),
-                        )
-                    })?;
-                let arr: edgefirst_hal::decoder::ArrayViewDQuantized = arr.into();
-                quant_views.push(arr);
-            }
-            other => {
-                log::warn!("Ignoring output tensor with type {other:?}");
-            }
-        }
-    }
-
-    match (float_views.is_empty(), quant_views.is_empty()) {
-        (false, true) => decoder.decode_float(&float_views, output_boxes, output_masks)?,
-        (true, false) => decoder.decode_quantized(&quant_views, output_boxes, output_masks)?,
-        (true, true) => {
-            return Err(ModelError::new(
-                ModelErrorKind::Decoding,
-                "No decodable outputs (all tensors have unsupported types)".into(),
-            ));
-        }
-        (false, false) => {
-            return Err(ModelError::new(
-                ModelErrorKind::Decoding,
-                "Mixed float and quantized output tensors".into(),
-            ));
-        }
-    }
+    let tensors: Vec<&TensorDyn> = (0..n).map(|i| runtime.output_tensor(i)).collect();
+    decoder.decode(&tensors, output_boxes, output_masks)?;
     log::trace!("Decoded boxes: {:?}", output_boxes);
     Ok(())
 }
@@ -1219,6 +1151,74 @@ mod tests {
     fn guess_empty_shapes() {
         let config = guess_model_config(&[], &[]);
         assert!(config.is_none(), "Empty shapes should return None");
+    }
+
+    /// V4L2/DRM fourcc helper: pack 4 ASCII chars little-endian (first char
+    /// in the lowest byte) into a u32, matching the on-wire `DmaBuffer.fourcc`.
+    fn fourcc(s: &[u8; 4]) -> u32 {
+        u32::from_le_bytes(*s)
+    }
+
+    #[test]
+    fn fourcc_yuyv_aliases() {
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"YUYV")).unwrap(),
+            PixelFormat::Yuyv
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"YUY2")).unwrap(),
+            PixelFormat::Yuyv
+        );
+    }
+
+    #[test]
+    fn fourcc_nv12_and_nv16() {
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"NV12")).unwrap(),
+            PixelFormat::Nv12
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"NV16")).unwrap(),
+            PixelFormat::Nv16
+        );
+    }
+
+    #[test]
+    fn fourcc_rgb_and_grey() {
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"RGB3")).unwrap(),
+            PixelFormat::Rgb
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"GREY")).unwrap(),
+            PixelFormat::Grey
+        );
+    }
+
+    #[test]
+    fn fourcc_rgba_bgra_aliases() {
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"RGBA")).unwrap(),
+            PixelFormat::Rgba
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"AB24")).unwrap(),
+            PixelFormat::Rgba
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"BGRA")).unwrap(),
+            PixelFormat::Bgra
+        );
+        assert_eq!(
+            fourcc_to_pixel_format(fourcc(b"AR24")).unwrap(),
+            PixelFormat::Bgra
+        );
+    }
+
+    #[test]
+    fn fourcc_unsupported_errors() {
+        let err = fourcc_to_pixel_format(fourcc(b"ZZZZ")).unwrap_err();
+        assert!(format!("{err}").contains("Unsupported camera fourcc"));
     }
 
     #[test]

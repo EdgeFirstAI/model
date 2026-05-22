@@ -4,21 +4,20 @@
 pub mod args;
 pub mod buildmsgs;
 pub mod fps;
+pub mod letterbox;
 pub mod masks;
 pub mod model;
 pub mod runtime;
 
 /// Newtype wrapper to bridge `edgefirst_tracker::DetectionBox` for
 /// `edgefirst_hal::decoder::DetectBox`.
-pub struct TrackerBox<'a>(pub &'a edgefirst_hal::decoder::DetectBox);
+///
+/// Owns the box by value: `ByteTrack` retains the most recent box per
+/// tracklet, so a borrowed wrapper would dangle across frames.
+#[derive(Clone, Copy, Debug)]
+pub struct TrackerBox(pub edgefirst_hal::decoder::DetectBox);
 
-impl std::fmt::Debug for TrackerBox<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl edgefirst_tracker::DetectionBox for TrackerBox<'_> {
+impl edgefirst_tracker::DetectionBox for TrackerBox {
     fn bbox(&self) -> [f32; 4] {
         [
             self.0.bbox.xmin,
