@@ -523,8 +523,18 @@ cargo bench
 # Generate documentation
 cargo doc --no-deps --open
 
-# Cross-compile for ARM64
-cargo build --target aarch64-unknown-linux-gnu --release
+# Cross-compile for ARM64 (NXP i.MX8 targets)
+#
+# ALWAYS use `cargo zigbuild` for cross-compilation — it bundles a hermetic
+# linker and sysroot, so no system aarch64 cross-toolchain (e.g.
+# aarch64-linux-gnu-gcc) or .cargo/config.toml linker stanza is needed.
+# A plain `cargo build --target ...` requires a separately configured
+# cross-linker and will fail to link without one — do NOT use it.
+#
+# One-time setup:
+#   rustup target add aarch64-unknown-linux-gnu
+#   cargo install cargo-zigbuild     # also needs `zig` (pip install ziglang)
+cargo zigbuild --target aarch64-unknown-linux-gnu --release
 
 # Build without Tracy (optional)
 cargo build --release --no-default-features

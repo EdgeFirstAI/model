@@ -4,9 +4,9 @@
 use clap::Parser;
 use edgefirst_hal::decoder::DecoderBuilder;
 use edgefirst_hal::image::{
-    Crop, Flip, ImageProcessor, ImageProcessorTrait, PLANAR_RGB, PLANAR_RGB_INT8, RGB, Rotation,
+    ComputeBackend, Flip, ImageProcessor, ImageProcessorConfig, ImageProcessorTrait, Rotation,
 };
-use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_hal::tensor::{DType, PixelFormat, TensorDyn, TensorMapTrait, TensorTrait};
 use edgefirst_model::{
     args::Args,
     buildmsgs::{
@@ -14,8 +14,9 @@ use edgefirst_model::{
         build_model_info_msg, build_model_output_msg, build_segmentation_msg_, time_from_ns,
     },
     heart_beat,
+    letterbox::LetterboxTransform,
     masks::mask_thread,
-    model::{ModelContext, decode_outputs, dmabuf_to_tensor_image, guess_model_config},
+    model::{ModelContext, decode_outputs, dmabuf_to_tensor_dyn, guess_model_config},
     runtime, update_dmabuf_with_pidfd, wait_for_camera_frame,
 };
 use edgefirst_schemas::{
@@ -57,6 +58,60 @@ fn install_signal_handlers() {
             handle_signal as *const () as libc::sighandler_t,
         );
     }
+}
+
+/// Copy a preprocessed image into the runtime's CPU staging input tensor.
+///
+/// For planar-input models (ARA-2) the interleaved RGB is deinterleaved into
+/// `CHW` planes, applying the `u8 → i8` quantization XOR when the model input
+/// is signed. For packed-input models the pixels are copied verbatim. Only
+/// used when the runtime does not support DMA-BUF zero-copy input.
+fn populate_input_tensor(
+    runtime: &mut dyn runtime::Runtime,
+    staging: &TensorDyn,
+    in_w: usize,
+    in_h: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let src = staging.as_u8().ok_or("staging tensor is not u8-typed")?;
+    let src_map = src.map()?;
+    let pixels = src_map.as_slice();
+
+    let input_dtype = runtime.input_dtype(0);
+    let is_planar = matches!(
+        runtime.input_pixel_format(0),
+        PixelFormat::PlanarRgb | PixelFormat::PlanarRgba
+    );
+
+    let input = runtime.input_tensor(0);
+    let mut dst_map = input.map()?;
+    let dst = dst_map.as_mut_slice();
+
+    if is_planar {
+        // Deinterleave RGB → planar CHW; XOR 0x80 converts u8 → i8 for
+        // signed-quantized ARA-2 inputs.
+        let plane_size = in_w * in_h;
+        let xor_mask = if input_dtype == DType::I8 {
+            0x80u8
+        } else {
+            0x00u8
+        };
+        for i in 0..plane_size {
+            dst[i] = pixels[i * 3] ^ xor_mask;
+            dst[plane_size + i] = pixels[i * 3 + 1] ^ xor_mask;
+            dst[2 * plane_size + i] = pixels[i * 3 + 2] ^ xor_mask;
+        }
+    } else if pixels.len() != dst.len() {
+        return Err(format!(
+            "input tensor size mismatch: staging={} bytes, input_tensor={} bytes \
+             — check input_pixel_format vs staging buffer geometry",
+            pixels.len(),
+            dst.len()
+        )
+        .into());
+    } else {
+        dst.copy_from_slice(pixels);
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -183,11 +238,12 @@ pub async fn main() -> ExitCode {
         name: info.name.clone().unwrap_or_default(),
     };
 
-    let mut tracker = edgefirst_tracker::bytetrack::ByteTrack::new();
-    tracker.track_extra_lifespan = (args.track_extra_lifespan * 1_000_000_000.0) as u64;
-    tracker.track_high_conf = args.threshold;
-    tracker.track_iou = args.track_iou;
-    tracker.track_update = args.track_update;
+    let mut tracker = edgefirst_tracker::ByteTrackBuilder::new()
+        .track_extra_lifespan((args.track_extra_lifespan * 1_000_000_000.0) as u64)
+        .track_high_conf(args.threshold)
+        .track_iou(args.track_iou)
+        .track_update(args.track_update)
+        .build::<edgefirst_model::TrackerBox>();
 
     if args.track && args.track_score >= args.threshold {
         warn!(
@@ -204,7 +260,8 @@ pub async fn main() -> ExitCode {
     };
     let mut decoder_builder = DecoderBuilder::new()
         .with_score_threshold(decoder_score)
-        .with_iou_threshold(args.iou);
+        .with_iou_threshold(args.iou)
+        .with_input_dims(in_w, in_h);
     if let Some(path) = args.edgefirst_config() {
         let config = match std::fs::read_to_string(path) {
             Ok(v) => v,
@@ -232,28 +289,26 @@ pub async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
-    } else if let Some(yaml) = &info.config_yaml {
-        decoder_builder = decoder_builder.with_config_yaml_str(yaml.clone());
+    } else if let Some(cfg) = &info.config {
+        decoder_builder = match cfg {
+            edgefirst_model::runtime::EmbeddedConfig::Yaml(s) => {
+                decoder_builder.with_config_yaml_str(s.clone())
+            }
+            edgefirst_model::runtime::EmbeddedConfig::Json(s) => {
+                decoder_builder.with_config_json_str(s.clone())
+            }
+        };
     } else {
         warn!("No edgefirst config provided, guessing config based on model shape");
 
-        // For quantized YOLO models (e.g. ARA-2 DVM), box coordinate outputs
-        // are dequantized to pixel-space values.  The HAL decoder expects
-        // normalised [0,1] coordinates, so fold the 1/input_dim division
-        // into the quantization scale for outputs that look like box coords
-        // (shape contains a dimension == 4).
-        let input_dim = in_w.max(in_h) as f32;
+        // The decoder was given the model input dimensions via
+        // `with_input_dims`, so it normalises pixel-space box coordinates
+        // itself — no manual `1/input_dim` scale fold is needed here.
         let output_quants: Vec<Option<(f32, i32)>> = (0..runtime.output_count())
             .map(|i| {
-                runtime.output_quantization(i).map(|q| {
-                    let is_box_output = model_ctx.output_shapes[i].contains(&4);
-                    let scale = if is_box_output && input_dim > 1.0 {
-                        q.scale / input_dim
-                    } else {
-                        q.scale
-                    };
-                    (scale, q.zero_point)
-                })
+                runtime
+                    .output_quantization(i)
+                    .map(|q| (q.scale, q.zero_point))
             })
             .collect();
 
@@ -291,9 +346,11 @@ pub async fn main() -> ExitCode {
             | YoloEndToEndDet { .. }
             | YoloSplitEndToEndDet { .. } => (true, false, false),
             YoloSegDet { .. }
+            | YoloSegDet2Way { .. }
             | YoloSplitSegDet { .. }
             | YoloEndToEndSegDet { .. }
             | YoloSplitEndToEndSegDet { .. } => (true, false, true),
+            PerScale => (true, false, false),
         }
     };
 
@@ -376,9 +433,19 @@ pub async fn main() -> ExitCode {
     let mut fps = edgefirst_model::fps::Fps::<90>::default();
 
     // ── ImageProcessor and destination image ─────────────────────────────
-    let mut img_proc = match tokio::task::spawn_blocking(ImageProcessor::new)
-        .await
-        .unwrap()
+    // Force the G2D backend. The HAL's threaded OpenGL backend drives its
+    // GL worker with `tokio::mpsc::blocking_send`, which panics when called
+    // from this service's tokio runtime. G2D is a synchronous i.MX 2D
+    // accelerator (with a CPU fallback) and has no async coupling, so it is
+    // safe to drive directly from the single-threaded inference loop.
+    let mut img_proc = match tokio::task::spawn_blocking(|| {
+        ImageProcessor::with_config(ImageProcessorConfig {
+            backend: ComputeBackend::G2d,
+            ..Default::default()
+        })
+    })
+    .await
+    .unwrap()
     {
         Ok(v) => v,
         Err(e) => {
@@ -387,19 +454,43 @@ pub async fn main() -> ExitCode {
         }
     };
 
-    let input_fourcc = runtime.input_fourcc(0);
-    // G2D outputs interleaved RGB. For planar input models (ARA-2),
-    // deinterleaving happens in the copy-to-input-tensor step below.
-    let is_planar = matches!(input_fourcc, f if f == PLANAR_RGB || f == PLANAR_RGB_INT8);
-    let dst_fourcc = if is_planar { RGB } else { input_fourcc };
-    let mut dst_image = match img_proc.create_image(in_w, in_h, dst_fourcc) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not create destination image: {e:?}");
-            return ExitCode::FAILURE;
-        }
-    };
-    info!("Destination image: {}x{} {:?}", in_w, in_h, dst_fourcc);
+    let input_fmt = runtime.input_pixel_format(0);
+    let is_planar = matches!(input_fmt, PixelFormat::PlanarRgb | PixelFormat::PlanarRgba);
+
+    // Probe for a DMA-BUF zero-copy input. When available, the HAL writes
+    // preprocessed pixels straight into the delegate's input buffer; otherwise
+    // a CPU staging buffer is allocated and the input tensor is populated
+    // explicitly each frame.
+    let (mut preprocess_dst, dma_zero_copy): (TensorDyn, bool) =
+        match runtime.import_input_image(&img_proc, in_w, in_h) {
+            Some(Ok(t)) => {
+                info!("DMA-BUF zero-copy input enabled");
+                (t, true)
+            }
+            Some(Err(e)) => {
+                error!("DMA-BUF input import failed: {e:?}");
+                return ExitCode::FAILURE;
+            }
+            None => {
+                // G2D / OpenGL emit packed pixels; planar-input models get an
+                // interleaved RGB staging buffer and are deinterleaved later.
+                let staging_fmt = if is_planar {
+                    PixelFormat::Rgb
+                } else {
+                    input_fmt
+                };
+                match img_proc.create_image(in_w, in_h, staging_fmt, DType::U8, None) {
+                    Ok(v) => {
+                        info!("CPU staging input: {in_w}x{in_h} {staging_fmt:?}");
+                        (v, false)
+                    }
+                    Err(e) => {
+                        error!("Could not create staging image: {e:?}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+        };
 
     let mut output_boxes = Vec::with_capacity(50);
     let mut output_masks = Vec::with_capacity(50);
@@ -422,7 +513,7 @@ pub async fn main() -> ExitCode {
             }
         };
 
-        let src_image = match dmabuf_to_tensor_image(&dma_buf) {
+        let src_image = match dmabuf_to_tensor_dyn(&img_proc, &dma_buf) {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not create source image: {e:?}");
@@ -430,59 +521,44 @@ pub async fn main() -> ExitCode {
             }
         };
 
+        // Aspect-preserving fit of the camera frame into the model input.
+        let letterbox = LetterboxTransform::compute(
+            dma_buf.width as usize,
+            dma_buf.height as usize,
+            in_w,
+            in_h,
+        );
+
         let preprocess_start = std::time::Instant::now();
 
         {
             let _span = info_span!("preprocess").entered();
             if let Err(e) = img_proc.convert(
                 &src_image,
-                &mut dst_image,
+                &mut preprocess_dst,
                 Rotation::None,
                 Flip::None,
-                Crop::no_crop(),
+                letterbox.crop(),
             ) {
                 error!("Image conversion failed: {e:?}");
                 continue;
             }
         }
 
-        // Write preprocessed pixels to runtime's input tensor
-        {
+        // CPU staging path: copy / deinterleave the preprocessed image into
+        // the runtime input tensor. The DMA-BUF path is already populated by
+        // the convert above.
+        if !dma_zero_copy {
             let _span = info_span!("load_input").entered();
-            let src_map = match dst_image.tensor().map() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not map destination image: {e:?}");
-                    continue;
-                }
-            };
-            let pixels = src_map.as_slice();
-            let input = runtime.input_tensor(0);
-            let mut dst_map = match input.map() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not map input tensor: {e:?}");
-                    continue;
-                }
-            };
-            let dst = dst_map.as_mut_slice();
-            if is_planar {
-                // Deinterleave RGB → planar CHW and convert uint8 → int8
-                // via XOR 0x80 when input_fourcc is PLANAR_RGB_INT8
-                let plane_size = in_w * in_h;
-                let xor_mask = if input_fourcc == PLANAR_RGB_INT8 {
-                    0x80u8
-                } else {
-                    0x00u8
-                };
-                for i in 0..plane_size {
-                    dst[i] = pixels[i * 3] ^ xor_mask;
-                    dst[plane_size + i] = pixels[i * 3 + 1] ^ xor_mask;
-                    dst[2 * plane_size + i] = pixels[i * 3 + 2] ^ xor_mask;
-                }
-            } else {
-                dst[..pixels.len()].copy_from_slice(pixels);
+            if let Err(e) = populate_input_tensor(runtime.as_mut(), &preprocess_dst, in_w, in_h) {
+                error!("Could not populate input tensor: {e:?}");
+                continue;
             }
+        }
+
+        if let Err(e) = runtime.sync_input_for_device() {
+            error!("Failed to sync input for device: {e:?}");
+            continue;
         }
 
         let timing = {
@@ -495,11 +571,22 @@ pub async fn main() -> ExitCode {
                 }
             }
         };
-        // Fold preprocessing time into input_time (no separate preprocess field)
+
+        let sync_outputs_start = std::time::Instant::now();
+        if let Err(e) = runtime.sync_outputs_for_cpu() {
+            error!("Failed to sync outputs for cpu: {e:?}");
+            continue;
+        }
+        let sync_outputs_time = sync_outputs_start.elapsed();
+        // Fold preprocessing time into input_time (no separate preprocess
+        // field). The post-invoke sync_outputs_for_cpu now carries the
+        // DMA-BUF cache flush and (on copy fallbacks) the output staging
+        // work — add it to output_duration so the published telemetry
+        // covers everything between invoke and decode.
         let preprocess_time = preprocess_start.elapsed();
         let input_duration = (preprocess_time + timing.input_time).as_nanos();
         let model_duration = timing.model_time.as_nanos();
-        let output_duration = timing.output_time.as_nanos();
+        let output_duration = (timing.output_time + sync_outputs_time).as_nanos();
 
         let decode_start = std::time::Instant::now();
         output_boxes.clear();
@@ -520,13 +607,29 @@ pub async fn main() -> ExitCode {
             continue;
         }
 
+        // Map decoded coordinates from the letterboxed model canvas back to
+        // the camera frame. Boxes and instance-mask regions are unlettered;
+        // a full-canvas semantic mask is cropped to the content region.
+        for b in output_boxes.iter_mut() {
+            letterbox.unletter_box(&mut b.bbox);
+        }
+        if has_instance_seg {
+            for m in output_masks.iter_mut() {
+                letterbox.unletter_instance_mask(m);
+            }
+        } else if has_seg {
+            for m in output_masks.iter_mut() {
+                letterbox.crop_semantic_mask(m);
+            }
+        }
+
         if args.track {
             let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
             let timestamp = dma_buf.header.stamp.nanosec as u64
                 + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
-            let wrapped: Vec<_> = output_boxes.iter().map(TrackerBox).collect();
+            let wrapped: Vec<_> = output_boxes.iter().map(|b| TrackerBox(*b)).collect();
             let track_results = tracker.update(&wrapped, timestamp);
 
             // Keep only detections that received a track assignment

@@ -19,8 +19,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use edgefirst_hal::decoder::DecoderBuilder;
-use edgefirst_hal::image::{PLANAR_RGB, PLANAR_RGB_INT8};
-use edgefirst_hal::tensor::{TensorMapTrait, TensorTrait};
+use edgefirst_hal::tensor::{DType, PixelFormat, TensorMapTrait, TensorTrait};
 use edgefirst_model::{
     model::{ModelContext, decode_outputs, guess_model_config},
     runtime,
@@ -62,7 +61,10 @@ struct Args {
     #[arg(long, default_value = "output.png")]
     output: PathBuf,
 
-    /// Delegate / socket path (empty = default)
+    /// For `.tflite` models: delegate selector (empty = `auto`, or `none`/
+    /// `cpu`/`xnnpack`/an explicit `.so`). For `.dvm` models: the ARA-2
+    /// proxy socket path (empty = default socket). Empty works for both;
+    /// on-target `.tflite` CPU diagnostics may want `--delegate none`.
     #[arg(long, default_value = "")]
     delegate: String,
 
@@ -147,23 +149,24 @@ fn main() -> ExitCode {
     // ── 3. Build decoder (same as main.rs) ──────────────────────────────
     let mut decoder_builder = DecoderBuilder::new()
         .with_score_threshold(args.threshold)
-        .with_iou_threshold(args.iou);
+        .with_iou_threshold(args.iou)
+        .with_input_dims(in_w, in_h);
 
-    if let Some(yaml) = &info.config_yaml {
-        decoder_builder = decoder_builder.with_config_yaml_str(yaml.clone());
+    if let Some(cfg) = &info.config {
+        decoder_builder = match cfg {
+            edgefirst_model::runtime::EmbeddedConfig::Yaml(s) => {
+                decoder_builder.with_config_yaml_str(s.clone())
+            }
+            edgefirst_model::runtime::EmbeddedConfig::Json(s) => {
+                decoder_builder.with_config_json_str(s.clone())
+            }
+        };
     } else {
-        let input_dim = in_w.max(in_h) as f32;
         let output_quants: Vec<Option<(f32, i32)>> = (0..runtime.output_count())
             .map(|i| {
-                runtime.output_quantization(i).map(|q| {
-                    let is_box_output = model_ctx.output_shapes[i].contains(&4);
-                    let scale = if is_box_output && input_dim > 1.0 {
-                        q.scale / input_dim
-                    } else {
-                        q.scale
-                    };
-                    (scale, q.zero_point)
-                })
+                runtime
+                    .output_quantization(i)
+                    .map(|q| (q.scale, q.zero_point))
             })
             .collect();
 
@@ -195,6 +198,7 @@ fn main() -> ExitCode {
         matches!(
             model_type,
             YoloSegDet { .. }
+                | YoloSegDet2Way { .. }
                 | YoloSplitSegDet { .. }
                 | YoloEndToEndSegDet { .. }
                 | YoloSplitEndToEndSegDet { .. }
@@ -221,9 +225,12 @@ fn main() -> ExitCode {
     );
     let rgb = resized.to_rgb8();
 
-    // ── 5. Copy to input tensor (same logic as main.rs) ─────────────────
-    let input_fourcc = runtime.input_fourcc(0);
-    let is_planar = matches!(input_fourcc, f if f == PLANAR_RGB || f == PLANAR_RGB_INT8);
+    // ── 5. Copy to input tensor (CPU staging path) ──────────────────────
+    let is_planar = matches!(
+        runtime.input_pixel_format(0),
+        PixelFormat::PlanarRgb | PixelFormat::PlanarRgba
+    );
+    let input_is_signed = runtime.input_dtype(0) == DType::I8;
 
     {
         let pixels = rgb.as_raw();
@@ -237,19 +244,26 @@ fn main() -> ExitCode {
         };
         let dst = dst_map.as_mut_slice();
         if is_planar {
+            // Deinterleave RGB → planar CHW; XOR 0x80 converts u8 → i8 for
+            // signed-quantized ARA-2 inputs.
             let plane_size = in_w * in_h;
-            let xor_mask = if input_fourcc == PLANAR_RGB_INT8 {
-                0x80u8
-            } else {
-                0x00u8
-            };
+            let xor_mask = if input_is_signed { 0x80u8 } else { 0x00u8 };
             for i in 0..plane_size {
                 dst[i] = pixels[i * 3] ^ xor_mask;
                 dst[plane_size + i] = pixels[i * 3 + 1] ^ xor_mask;
                 dst[2 * plane_size + i] = pixels[i * 3 + 2] ^ xor_mask;
             }
+        } else if pixels.len() != dst.len() {
+            // Match the stricter behaviour in main.rs: fail loudly on a
+            // size mismatch rather than silently truncating.
+            eprintln!(
+                "Input tensor size mismatch: staging={} bytes, input_tensor={} bytes",
+                pixels.len(),
+                dst.len()
+            );
+            return ExitCode::FAILURE;
         } else {
-            dst[..pixels.len()].copy_from_slice(pixels);
+            dst.copy_from_slice(pixels);
         }
     }
 
