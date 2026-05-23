@@ -5,6 +5,61 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-05-23
+
+### Added
+
+- **Neutron NPU support for i.MX 95**: `TfLiteRuntime` scans loaded models for
+  the Neutron custom op and auto-selects between `libneutron_delegate.so` and
+  `libvx_delegate.so` (i.MX 8M Plus). Verified at 8 detections @ threshold 0.1
+  with zero-copy enabled on i.MX 95 hardware.
+- **Aspect-preserving letterboxing**: preprocessing now letterboxes camera
+  frames into the model input instead of stretching to fit. Detection boxes
+  and instance masks are back-projected through the letterbox transform so
+  published coordinates remain aligned to the original camera frame.
+- Support for the `edgefirst.json` embedded model config used by
+  Neutron-compiled models, in addition to the existing `edgefirst.yaml`.
+- Full DMA-BUF zero-copy input pipeline across all three runtimes — the HAL
+  `ImageProcessor` writes preprocessed pixels directly into the delegate input
+  buffer, with explicit `sync_input_for_device` / `sync_outputs_for_cpu`
+  cache flushes around inference.
+
+### Changed
+
+- Upgraded core dependencies: `edgefirst-hal` 0.9 → 0.23,
+  `edgefirst-tflite` 0.1 → 0.7, `edgefirst-tracker` 0.9 → 0.23,
+  and `ara2` to 0.10.
+- Output decoding migrated to the dtype-dispatching `Decoder::decode` over
+  `TensorDyn`. Box coordinate normalization is now handled by
+  `DecoderBuilder::with_input_dims`, replacing the legacy
+  `1/input_dim` scale-fold hack. Per-tensor quantization is attached to each
+  integer output so the Neutron per-scale decoder consumes the right scales.
+- Forced the G2D image backend for preprocessing. The HAL 0.23 threaded
+  OpenGL backend uses `tokio::mpsc::blocking_send`, which panics under the
+  service's tokio runtime; G2D is synchronous and avoids the issue.
+- **Cross-compilation now uses `cargo zigbuild`** (with `cargo-zigbuild` and
+  `zig` installed) instead of `cargo build --target ...`. The previous
+  `.cargo/config.toml` cross-linker stanza has been removed; plain
+  `cargo build --target aarch64-unknown-linux-gnu` will no longer link.
+  See `.github/copilot-instructions.md` for the updated setup.
+
+### Fixed
+
+- Validate delegate-returned DMA-BUF file descriptors before
+  `BorrowedFd::borrow_raw` and fail loudly on staging/input size mismatches,
+  preventing silent corruption when the delegate hands back an unexpected
+  buffer.
+- The `CameraAdaptor` RGBA fast path is now gated on `has_dmabuf`, so it
+  is not advertised when the CPU staging buffer cannot honor it.
+- Repository clones no longer fail on missing Git LFS objects: the
+  benchmark data files referenced LFS blobs that were never pushed to the
+  remote.
+
+### Removed
+
+- Benchmark data files in `benches/benchmark_data/` and the associated
+  `.gitattributes` LFS tracking rules.
+
 ## [2.8.0] - 2026-03-10
 
 ### Added
