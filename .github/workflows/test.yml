@@ -236,7 +236,16 @@ jobs:
       - name: Download model file
         run: |
           mkdir -p models
-          curl -fSL -o models/yolov8n_640x640.tflite \
+          # Retry on transient DNS/network failures. The NXP walnascar BSP
+          # routes DNS through Connman's dnsproxy on 127.0.0.1, which
+          # intermittently loses its upstreams after link flaps and returns
+          # SERVFAIL/timeout (curl exit 6). --retry-all-errors is required
+          # because curl does NOT retry resolve failures by default;
+          # --connect-timeout bounds each attempt so we fail fast.
+          curl -fSL \
+            --retry 5 --retry-delay 10 --retry-all-errors \
+            --connect-timeout 15 --max-time 180 \
+            -o models/yolov8n_640x640.tflite \
             https://repo.edgefirst.ai/models/yolov8/yolov8n_640x640.tflite
           echo "Model downloaded:"
           ls -lh models/yolov8n_640x640.tflite
