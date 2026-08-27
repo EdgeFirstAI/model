@@ -50,7 +50,7 @@ pub enum LabelSetting {
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Zenoh key expression for camera DMA buffers
-    #[arg(long, env = "CAMERA_TOPIC", default_value = "rt/camera/dma")]
+    #[arg(long, env = "CAMERA_TOPIC", default_value = "camera/frame")]
     pub camera_topic: String,
 
     /// Legacy: use --output-topic instead. Empty string disables publishing.

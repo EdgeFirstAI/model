@@ -11,7 +11,7 @@
 //! topics, verifies messages are received and decodable, then sends SIGTERM
 //! for graceful shutdown.
 
-use edgefirst_schemas::{edgefirst_msgs::Model, serde_cdr};
+use edgefirst_schemas::edgefirst_msgs::Model;
 use std::{
     env,
     process::{Child, Command},
@@ -153,15 +153,14 @@ fn test_model_inference() {
         .declare_subscriber(MODEL_OUTPUT_TOPIC)
         .callback(move |sample| {
             // Try to decode the message
-            match serde_cdr::deserialize::<Model>(&sample.payload().to_bytes()) {
+            match Model::from_cdr(sample.payload().to_bytes()) {
                 Ok(model) => {
-                    // Verify timing fields are non-zero
-                    let input_ns = model.input_time.sec as u64 * 1_000_000_000
-                        + model.input_time.nanosec as u64;
-                    let model_ns = model.model_time.sec as u64 * 1_000_000_000
-                        + model.model_time.nanosec as u64;
-                    let decode_ns = model.decode_time.sec as u64 * 1_000_000_000
-                        + model.decode_time.nanosec as u64;
+                    let input_ns = model.input_time().sec as u64 * 1_000_000_000
+                        + model.input_time().nanosec as u64;
+                    let model_ns = model.model_time().sec as u64 * 1_000_000_000
+                        + model.model_time().nanosec as u64;
+                    let decode_ns = model.decode_time().sec as u64 * 1_000_000_000
+                        + model.decode_time().nanosec as u64;
 
                     if input_ns > 0 && model_ns > 0 && decode_ns > 0 {
                         message_count_clone.fetch_add(1, Ordering::SeqCst);

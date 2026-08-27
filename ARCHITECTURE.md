@@ -29,7 +29,7 @@ The EdgeFirst Model Node is an asynchronous application built on the Tokio async
 ```mermaid
 graph TB
     subgraph "Main Async Runtime (Tokio)"
-        CamSub["Camera Subscriber<br/>rt/camera/dma<br/>DmaBuf messages"]
+        CamSub["Camera Subscriber<br/>camera/frame<br/>CameraFrame messages"]
         WaitFrame["1. Wait for Camera Frame<br/>(async recv)"]
         PidFd["2. PidFd Transfer<br/>(cross-process DMA fd)"]
         G2DPrep["3. ImageProcessor Preprocessing<br/>(YUYV to RGB, resize)"]
@@ -303,7 +303,7 @@ sequenceDiagram
     participant NPU as NPU Hardware
     participant G2D as G2D Hardware
 
-    Camera->>Zenoh: DmaBuf (rt/camera/dma)
+    Camera->>Zenoh: CameraFrame (camera/frame)
     Note over Camera: YUYV 1920x1080<br/>30 FPS
 
     Zenoh->>Model: Subscribe recv()
@@ -339,7 +339,7 @@ graph LR
     end
 
     subgraph "Zenoh Message"
-        Meta["DmaBuf Metadata<br/>pid=100<br/>fd=5<br/>width=1920<br/>height=1080<br/>fourcc=YUYV"]
+        Meta["CameraFrame Metadata<br/>pid=100<br/>planes[0].fd=5<br/>width=1920<br/>height=1080<br/>format=YUYV"]
     end
 
     subgraph "Model Process (PID 200)"
@@ -369,20 +369,27 @@ graph LR
 
 All messages use **ROS2 CDR (Common Data Representation)** serialization for ecosystem compatibility.
 
-### DmaBuf Message (Subscribed)
+### CameraFrame Message (Subscribed)
 
 ```rust
-// edgefirst_msgs/DmaBuf (from edgefirst-schemas)
-pub struct DmaBuffer {
-    pub header: Header,           // ROS2 standard header (timestamp, frame_id)
-    pub fd: i32,                  // Source process file descriptor
-    pub offset: u64,              // Offset into DMA buffer
-    pub stride: u32,              // Row stride (bytes per line)
-    pub width: u32,               // Image width
-    pub height: u32,              // Image height
-    pub length: u32,              // Total buffer size
-    pub fourcc: u32,              // Pixel format (YUYV, NV12, etc.)
+// edgefirst_msgs/CameraFrame (from edgefirst-schemas)
+// Buffer-backed zero-copy CDR view — field accessors shown conceptually.
+pub struct CameraFrame {
+    // header: stamp + frame_id
+    pub seq: u64,
     pub pid: u32,                 // Source process ID (for PidFd transfer)
+    pub width: u32,
+    pub height: u32,
+    pub format: String,           // Pixel format string (e.g. "YUYV", "NV12")
+    pub planes: Vec<CameraPlane>, // DMA-BUF plane descriptors
+}
+
+pub struct CameraPlane {
+    pub fd: i32,                  // Source process file descriptor
+    pub offset: u32,
+    pub stride: u32,
+    pub size: u32,
+    pub used: u32,
 }
 ```
 

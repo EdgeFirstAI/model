@@ -174,7 +174,7 @@ edgefirst-model \
 ```bash
 edgefirst-model \
   --model model.tflite \
-  --camera-topic rt/front_camera/dma \
+  --camera-topic camera/front \
   --visualization
 ```
 
@@ -209,7 +209,7 @@ The model node publishes standard ROS2 message types using CDR serialization, en
 
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
-| `rt/camera/dma` | `edgefirst_msgs/DmaBuf` | Zero-copy DMA buffer metadata from camera |
+| `camera/frame` | `edgefirst_msgs/CameraFrame` | Zero-copy camera frames (DMA-BUF planes) |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera resolution and calibration info |
 
 **ROS2 Bridge Integration:**
@@ -452,7 +452,7 @@ edgefirst-model --help
 
 **Topic Configuration:**
 
-- `--camera-topic <TOPIC>` - Camera DMA topic (default: `rt/camera/dma`)
+- `--camera-topic <TOPIC>` - Camera frame topic (default: `camera/frame`)
 - `--output-topic <TOPIC>` - Unified model output topic (default: `rt/model/output`)
 - `--info-topic <TOPIC>` - Model info topic (default: `rt/model/info`)
 - `--detect-topic <TOPIC>` - Legacy detection topic (default: empty/disabled)
@@ -603,7 +603,7 @@ cargo doc --no-deps --open
 model/
 ├── src/
 │   ├── main.rs          # Application entry, Zenoh session, 3-tier inference loop
-│   ├── lib.rs           # Public library interface, TrackerBox wrapper, DmaBuf handling
+│   ├── lib.rs           # Public library interface, TrackerBox wrapper, CameraFrame handling
 │   ├── model.rs         # ModelContext, decode_outputs, model config guessing
 │   ├── buildmsgs.rs     # Zenoh message construction (CDR serialization)
 │   ├── masks.rs         # Segmentation mask publishing (legacy mask topic)
@@ -655,8 +655,8 @@ edgefirst-camera --camera /dev/video0 &
 # Check Zenoh connectivity
 zenoh-cli query "/rt/**"
 
-# Verify DMA topic matches
-edgefirst-model --model model.tflite --camera-topic rt/camera/dma
+# Verify camera frame topic matches
+edgefirst-model --model model.tflite --camera-topic camera/frame
 ```
 
 **Problem: "Low FPS or high latency"**

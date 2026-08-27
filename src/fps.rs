@@ -50,11 +50,10 @@ impl<const N: usize> Fps<N> {
             .unwrap_or(Duration::from_secs(0));
         self.previous = timestamp;
         let nanos = frame_time.as_nanos();
-        self.history[self.index] = if nanos > 0 {
-            (NSEC_PER_SEC as u128 / nanos) as i32
-        } else {
-            0
-        };
+        self.history[self.index] = (NSEC_PER_SEC as u128)
+            .checked_div(nanos)
+            .map(|v| v as i32)
+            .unwrap_or(0);
         self.index = (self.index + 1) % N;
         let fps = self.history.iter().sum::<i32>() / N as i32;
 

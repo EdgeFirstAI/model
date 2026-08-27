@@ -30,7 +30,7 @@ All topic key expressions are configurable via CLI arguments.
 
 | Topic (default)    | CLI flag                | Message Type                | Description                                                        |
 | ------------------ | ----------------------- | --------------------------- | ------------------------------------------------------------------ |
-| `rt/camera/dma`    | `--camera-topic`        | `edgefirst_msgs/DmaBuf`    | Camera DMA buffer metadata                                        |
+| `camera/frame`     | `--camera-topic`        | `edgefirst_msgs/CameraFrame` | Camera frames with DMA-BUF plane metadata                         |
 | `rt/camera/info`   | `--camera-info-topic`   | `sensor_msgs/CameraInfo`   | Camera resolution info (only when `--visualization` is enabled)    |
 
 ### Published Topics
@@ -279,7 +279,7 @@ z_sub -k "rt/model/boxes2d"
 ### Publish a test message
 
 ```bash
-z_pub -k "rt/camera/dma" -v "<payload>"
+z_pub -k "camera/frame" -v "<payload>"
 ```
 
 ### Zenoh connectivity flags

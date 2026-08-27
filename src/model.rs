@@ -12,8 +12,9 @@ use edgefirst_hal::decoder::{
 };
 use edgefirst_hal::image::ImageProcessor;
 use edgefirst_hal::tensor::{DType, PixelFormat, PlaneDescriptor, TensorDyn};
-use edgefirst_schemas::edgefirst_msgs::DmaBuffer;
 use tracing::instrument;
+
+use crate::ResolvedCameraFrame;
 
 // ── ModelError ───────────────────────────────────────────────────────────────
 
@@ -124,68 +125,63 @@ pub struct ModelContext {
     pub name: String,
 }
 
-// ── dmabuf_to_tensor_dyn ─────────────────────────────────────────────────────
+// ── camera_frame_to_tensor_dyn ───────────────────────────────────────────────
 
-/// Map a V4L2/DRM fourcc code to a HAL [`PixelFormat`].
-///
-/// `DmaBuffer::fourcc` follows the V4L2 convention where the four ASCII
-/// characters are packed little-endian (first char in the lowest byte).
-fn fourcc_to_pixel_format(fourcc: u32) -> Result<PixelFormat, ModelError> {
-    let bytes = fourcc.to_le_bytes();
-    let fmt = match &bytes {
-        b"YUYV" | b"YUY2" => PixelFormat::Yuyv,
-        b"NV12" => PixelFormat::Nv12,
-        b"NV16" => PixelFormat::Nv16,
-        b"RGB3" => PixelFormat::Rgb,
-        b"RGBA" | b"AB24" => PixelFormat::Rgba,
-        b"BGRA" | b"AR24" => PixelFormat::Bgra,
-        b"GREY" => PixelFormat::Grey,
+/// Map a camera format string (V4L2 fourcc text) to a HAL [`PixelFormat`].
+fn format_str_to_pixel_format(format: &str) -> Result<PixelFormat, ModelError> {
+    let fmt = match format {
+        "YUYV" | "YUY2" | "yuyv" | "yuy2" => PixelFormat::Yuyv,
+        "NV12" | "nv12" => PixelFormat::Nv12,
+        "NV16" | "nv16" => PixelFormat::Nv16,
+        "RGB3" | "rgb3" => PixelFormat::Rgb,
+        "RGBA" | "AB24" | "rgba" | "ab24" => PixelFormat::Rgba,
+        "BGRA" | "AR24" | "bgra" | "ar24" => PixelFormat::Bgra,
+        "GREY" | "grey" | "Y8  " | "y8  " => PixelFormat::Grey,
         _ => {
             return Err(ModelError::new(
                 ModelErrorKind::Image,
-                format!(
-                    "Unsupported camera fourcc {:?}",
-                    String::from_utf8_lossy(&bytes)
-                ),
+                format!("Unsupported camera format {format:?}"),
             ));
         }
     };
     Ok(fmt)
 }
 
-/// Wrap a camera DMA buffer as a HAL [`TensorDyn`] for the `ImageProcessor`.
+/// Wrap a camera frame as a HAL [`TensorDyn`] for the `ImageProcessor`.
 ///
 /// The camera frame's DMA-BUF fd is imported zero-copy; the `ImageProcessor`
 /// reads it directly via the G2D / OpenGL backend. `PlaneDescriptor::new`
 /// duplicates the fd, so the camera process keeps ownership of the original.
 #[instrument(skip_all)]
-pub fn dmabuf_to_tensor_dyn(
+pub fn camera_frame_to_tensor_dyn(
     processor: &ImageProcessor,
-    dma: &DmaBuffer,
+    frame: &ResolvedCameraFrame,
 ) -> Result<TensorDyn, ModelError> {
-    let format = fourcc_to_pixel_format(dma.fourcc)?;
-    // Validate the fd before the unsafe borrow — `BorrowedFd::borrow_raw` is
-    // UB on a negative/closed descriptor. `update_dmabuf_with_pidfd` sets a
-    // non-negative fd on success, but be defensive.
-    if dma.fd < 0 {
+    let format = format_str_to_pixel_format(frame.format())?;
+    if frame.fd() < 0 {
         return Err(ModelError::new(
             ModelErrorKind::Io,
-            format!("DmaBuffer carried an invalid fd {}", dma.fd),
+            format!("CameraFrame carried an invalid fd {}", frame.fd()),
         ));
     }
-    // SAFETY: `dma.fd` is a live DMA-BUF fd obtained for this process via
-    // pidfd_getfd (validated non-negative above); PlaneDescriptor::new dup()s
-    // it before borrowing ends.
-    let plane = PlaneDescriptor::new(unsafe { BorrowedFd::borrow_raw(dma.fd) })
+    // SAFETY: fd is a live DMA-BUF obtained via pidfd_getfd for this process.
+    let mut plane = PlaneDescriptor::new(unsafe { BorrowedFd::borrow_raw(frame.fd()) })
         .map_err(|e| ModelError::new(ModelErrorKind::Tensor, format!("PlaneDescriptor: {e}")))?;
+    if frame.offset() > 0 {
+        plane = plane.with_offset(frame.offset() as usize);
+    }
+    if frame.stride() > 0 {
+        plane = plane.with_stride(frame.stride() as usize);
+    }
     processor
         .import_image(
             plane,
             None,
-            dma.width as usize,
-            dma.height as usize,
+            frame.width() as usize,
+            frame.height() as usize,
             format,
             DType::U8,
+            None,
         )
         .map_err(|e| {
             ModelError::new(
@@ -1153,72 +1149,66 @@ mod tests {
         assert!(config.is_none(), "Empty shapes should return None");
     }
 
-    /// V4L2/DRM fourcc helper: pack 4 ASCII chars little-endian (first char
-    /// in the lowest byte) into a u32, matching the on-wire `DmaBuffer.fourcc`.
-    fn fourcc(s: &[u8; 4]) -> u32 {
-        u32::from_le_bytes(*s)
-    }
-
     #[test]
-    fn fourcc_yuyv_aliases() {
+    fn format_yuyv_aliases() {
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"YUYV")).unwrap(),
+            format_str_to_pixel_format("YUYV").unwrap(),
             PixelFormat::Yuyv
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"YUY2")).unwrap(),
+            format_str_to_pixel_format("YUY2").unwrap(),
             PixelFormat::Yuyv
         );
     }
 
     #[test]
-    fn fourcc_nv12_and_nv16() {
+    fn format_nv12_and_nv16() {
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"NV12")).unwrap(),
+            format_str_to_pixel_format("NV12").unwrap(),
             PixelFormat::Nv12
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"NV16")).unwrap(),
+            format_str_to_pixel_format("NV16").unwrap(),
             PixelFormat::Nv16
         );
     }
 
     #[test]
-    fn fourcc_rgb_and_grey() {
+    fn format_rgb_and_grey() {
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"RGB3")).unwrap(),
+            format_str_to_pixel_format("RGB3").unwrap(),
             PixelFormat::Rgb
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"GREY")).unwrap(),
+            format_str_to_pixel_format("GREY").unwrap(),
             PixelFormat::Grey
         );
     }
 
     #[test]
-    fn fourcc_rgba_bgra_aliases() {
+    fn format_rgba_bgra_aliases() {
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"RGBA")).unwrap(),
+            format_str_to_pixel_format("RGBA").unwrap(),
             PixelFormat::Rgba
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"AB24")).unwrap(),
+            format_str_to_pixel_format("AB24").unwrap(),
             PixelFormat::Rgba
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"BGRA")).unwrap(),
+            format_str_to_pixel_format("BGRA").unwrap(),
             PixelFormat::Bgra
         );
         assert_eq!(
-            fourcc_to_pixel_format(fourcc(b"AR24")).unwrap(),
+            format_str_to_pixel_format("AR24").unwrap(),
             PixelFormat::Bgra
         );
     }
 
     #[test]
-    fn fourcc_unsupported_errors() {
-        let err = fourcc_to_pixel_format(fourcc(b"ZZZZ")).unwrap_err();
-        assert!(format!("{err}").contains("Unsupported camera fourcc"));
+    fn format_unsupported_errors() {
+        let err = format_str_to_pixel_format("ZZZZ").unwrap_err();
+        assert!(format!("{err}").contains("Unsupported camera format"));
     }
 
     #[test]

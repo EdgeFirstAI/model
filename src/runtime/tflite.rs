@@ -566,7 +566,7 @@ impl Runtime for TfLiteRuntime {
         };
 
         let result = processor
-            .import_image(plane, None, width, height, fmt, dtype)
+            .import_image(plane, None, width, height, fmt, dtype, None)
             .map_err(|e| {
                 ModelError::new(
                     ModelErrorKind::Image,

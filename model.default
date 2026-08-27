@@ -112,8 +112,8 @@ VISUALIZATION="false"
 # Zenoh key expressions for subscribing and publishing messages. All topics
 # can be overridden via CLI flags or environment variables.
 
-# Camera DMA buffer subscription topic.
-CAMERA_TOPIC="rt/camera/dma"
+# Camera frame subscription topic (CameraFrame schema).
+CAMERA_TOPIC="camera/frame"
 
 # Camera info subscription topic (needed when VISUALIZATION is enabled).
 CAMERA_INFO_TOPIC="rt/camera/info"

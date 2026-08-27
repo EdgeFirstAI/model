@@ -6,7 +6,9 @@ use edgefirst_hal::decoder::DecoderBuilder;
 use edgefirst_hal::image::{
     ComputeBackend, Flip, ImageProcessor, ImageProcessorConfig, ImageProcessorTrait, Rotation,
 };
-use edgefirst_hal::tensor::{DType, PixelFormat, TensorDyn, TensorMapTrait, TensorTrait};
+use edgefirst_hal::tensor::{
+    CpuAccess, DType, PixelFormat, TensorDyn, TensorMapTrait, TensorTrait,
+};
 use edgefirst_model::{
     args::Args,
     buildmsgs::{
@@ -16,15 +18,10 @@ use edgefirst_model::{
     heart_beat,
     letterbox::LetterboxTransform,
     masks::mask_thread,
-    model::{ModelContext, decode_outputs, dmabuf_to_tensor_dyn, guess_model_config},
-    runtime, update_dmabuf_with_pidfd, wait_for_camera_frame,
+    model::{ModelContext, camera_frame_to_tensor_dyn, decode_outputs, guess_model_config},
+    runtime, wait_for_camera_frame,
 };
-use edgefirst_schemas::{
-    edgefirst_msgs::{Model as ModelMsg, ModelInfo},
-    schema_registry::SchemaType,
-    sensor_msgs::CameraInfo,
-    serde_cdr,
-};
+use edgefirst_schemas::sensor_msgs::CameraInfo;
 use log::{error, info, trace, warn};
 use std::{
     process::ExitCode,
@@ -159,13 +156,13 @@ pub async fn main() -> ExitCode {
             .declare_subscriber(&args.camera_info_topic)
             .await
             .unwrap();
-        info!("Declared subscriber on {:?}", &args.camera_info_topic);
+        info!("Declared subscriber on {:?}", args.camera_info_topic);
         match info_sub.recv_timeout(Duration::from_secs(10)) {
             Ok(v) => {
-                match serde_cdr::deserialize::<CameraInfo>(&v.unwrap().payload().to_bytes()) {
+                match CameraInfo::from_cdr(v.unwrap().payload().to_bytes()) {
                     Ok(v) => {
-                        stream_width = v.width as f64;
-                        stream_height = v.height as f64;
+                        stream_width = v.width() as f64;
+                        stream_height = v.height() as f64;
                         info!("Found stream resolution: {stream_width}x{stream_height}");
                     }
                     Err(e) => {
@@ -193,7 +190,7 @@ pub async fn main() -> ExitCode {
         .declare_subscriber(&args.camera_topic)
         .await
         .unwrap();
-    info!("Declared subscriber on {:?}", &args.camera_topic);
+    info!("Declared subscriber on {:?}", args.camera_topic);
 
     let (tx, rx) = mpsc::channel(50);
     let heartbeat = tokio::spawn(heart_beat(
@@ -404,14 +401,7 @@ pub async fn main() -> ExitCode {
         None
     };
 
-    let mut model_info_msg = build_model_info_msg(
-        time_from_ns(0u32),
-        Some(&model_ctx),
-        &args.model,
-        has_box,
-        has_seg | has_instance_seg,
-    );
-    info!("built model_info_msg");
+    let model_ctx_for_info = model_ctx.clone();
 
     let sub_camera = heartbeat.await.unwrap();
 
@@ -479,7 +469,14 @@ pub async fn main() -> ExitCode {
                 } else {
                     input_fmt
                 };
-                match img_proc.create_image(in_w, in_h, staging_fmt, DType::U8, None) {
+                match img_proc.create_image(
+                    in_w,
+                    in_h,
+                    staging_fmt,
+                    DType::U8,
+                    None,
+                    CpuAccess::ReadWrite,
+                ) {
                     Ok(v) => {
                         info!("CPU staging input: {in_w}x{in_h} {staging_fmt:?}");
                         (v, false)
@@ -496,7 +493,7 @@ pub async fn main() -> ExitCode {
     let mut output_masks = Vec::with_capacity(50);
     let mut output_tracks = Vec::with_capacity(50);
     while !SHUTDOWN.load(Ordering::SeqCst) {
-        let Some(mut dma_buf) = ({
+        let Some(frame) = ({
             let _span = info_span!("wait_for_camera_frame").entered();
             wait_for_camera_frame(&sub_camera, timeout)
         }) else {
@@ -504,16 +501,7 @@ pub async fn main() -> ExitCode {
         };
         trace!("Received camera frame");
 
-        // the _fd needs to remain valid while `dma_buf` is used
-        let _fd = match update_dmabuf_with_pidfd(&mut dma_buf) {
-            Ok(fd) => fd,
-            Err(e) => {
-                error!("Could not update dma_buf with pidfd: {e:?}");
-                return ExitCode::FAILURE;
-            }
-        };
-
-        let src_image = match dmabuf_to_tensor_dyn(&img_proc, &dma_buf) {
+        let src_image = match camera_frame_to_tensor_dyn(&img_proc, &frame) {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not create source image: {e:?}");
@@ -523,8 +511,8 @@ pub async fn main() -> ExitCode {
 
         // Aspect-preserving fit of the camera frame into the model input.
         let letterbox = LetterboxTransform::compute(
-            dma_buf.width as usize,
-            dma_buf.height as usize,
+            frame.width() as usize,
+            frame.height() as usize,
             in_w,
             in_h,
         );
@@ -627,8 +615,7 @@ pub async fn main() -> ExitCode {
             let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
-            let timestamp = dma_buf.header.stamp.nanosec as u64
-                + dma_buf.header.stamp.sec as u64 * 1_000_000_000;
+            let timestamp = frame.stamp().nanosec as u64 + frame.stamp().sec as u64 * 1_000_000_000;
             let wrapped: Vec<_> = output_boxes.iter().map(|b| TrackerBox(*b)).collect();
             let track_results = tracker.update(&wrapped, timestamp);
 
@@ -699,7 +686,7 @@ pub async fn main() -> ExitCode {
 
         let _pub_span = info_span!("zenoh_publish").entered();
         if has_seg && let Some(mask_tx) = mask_tx.as_ref() {
-            let masks = build_segmentation_msg_(dma_buf.header.stamp.clone(), &output_masks);
+            let masks = build_segmentation_msg_(frame.stamp(), &output_masks);
             if let Err(e) = mask_tx.send(masks).await {
                 error!("Cannot send to mask publishing thread {e:?}");
             }
@@ -710,7 +697,8 @@ pub async fn main() -> ExitCode {
                 &output_boxes,
                 &output_tracks,
                 &info.labels,
-                dma_buf.header.clone(),
+                frame.stamp(),
+                frame.frame_id(),
                 time_from_ns(input_duration),
                 time_from_ns(model_duration),
                 time_from_ns(decode_duration.as_nanos()),
@@ -733,7 +721,7 @@ pub async fn main() -> ExitCode {
                 &output_boxes,
                 &output_tracks,
                 &info.labels,
-                dma_buf.header.stamp.clone(),
+                frame.stamp(),
                 (stream_width, stream_height),
                 &model_name,
                 args.labels,
@@ -756,15 +744,16 @@ pub async fn main() -> ExitCode {
             &output_tracks,
             &info.labels,
             &output_masks,
-            dma_buf.header.clone(),
+            frame.stamp(),
+            frame.frame_id(),
             input_duration,
             model_duration,
             output_duration,
             decode_duration.as_nanos(),
             has_instance_seg,
         );
-        let msg = ZBytes::from(serde_cdr::serialize(&model_output).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema(ModelMsg::SCHEMA_NAME);
+        let msg = ZBytes::from(model_output.into_cdr());
+        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Model");
 
         match publ_output.put(msg).encoding(enc).await {
             Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
@@ -777,9 +766,15 @@ pub async fn main() -> ExitCode {
             }
         }
 
-        model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-        let msg = ZBytes::from(serde_cdr::serialize(&model_info_msg).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema(ModelInfo::SCHEMA_NAME);
+        let model_info_msg = build_model_info_msg(
+            frame.stamp(),
+            Some(&model_ctx_for_info),
+            &args.model,
+            has_box,
+            has_seg | has_instance_seg,
+        );
+        let msg = ZBytes::from(model_info_msg.into_cdr());
+        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
 
         if let Err(e) = publ_model_info.put(msg).encoding(enc).await {
             error!(

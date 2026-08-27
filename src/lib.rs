@@ -39,12 +39,7 @@ impl edgefirst_tracker::DetectionBox for TrackerBox {
 use crate::buildmsgs::*;
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
-use edgefirst_schemas::{
-    self,
-    edgefirst_msgs::{DmaBuffer, Mask, ModelInfo},
-    schema_registry::SchemaType,
-    serde_cdr,
-};
+use edgefirst_schemas::{self, builtin_interfaces::Time, edgefirst_msgs::CameraFrame};
 use log::{error, trace, warn};
 use nix::{
     sys::time::TimeValLike,
@@ -69,6 +64,49 @@ pub struct ModelTypeActual {
     pub detection_with_mask: bool,
 }
 
+/// Camera frame received from Zenoh with the DMA-BUF fd imported into this process.
+pub struct ResolvedCameraFrame {
+    frame: CameraFrame<Vec<u8>>,
+    plane_fd: i32,
+    stride: u32,
+    offset: u32,
+    _fd_guard: File,
+}
+
+impl ResolvedCameraFrame {
+    pub fn stamp(&self) -> Time {
+        self.frame.stamp()
+    }
+
+    pub fn frame_id(&self) -> &str {
+        self.frame.frame_id()
+    }
+
+    pub fn width(&self) -> u32 {
+        self.frame.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.frame.height()
+    }
+
+    pub fn format(&self) -> &str {
+        self.frame.format()
+    }
+
+    pub fn fd(&self) -> i32 {
+        self.plane_fd
+    }
+
+    pub fn stride(&self) -> u32 {
+        self.stride
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+}
+
 pub async fn heart_beat(
     session: Session,
     args: Args,
@@ -78,8 +116,6 @@ pub async fn heart_beat(
 ) -> Subscriber<FifoChannelHandler<Sample>> {
     let model_path = args.model.clone();
 
-    let mut model_info_msg =
-        build_model_info_msg(time_from_ns(0u32), None, &model_path, false, false);
     let status = format!("Loading Model: {}", model_path.to_string_lossy());
 
     loop {
@@ -93,7 +129,7 @@ pub async fn heart_beat(
             &args,
             &sub_camera,
             stream_dims,
-            &mut model_info_msg,
+            &model_path,
             &status,
         )
         .await;
@@ -105,24 +141,18 @@ async fn heart_beat_loop(
     args: &Args,
     sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
     stream_dims: (f64, f64),
-    model_info_msg: &mut ModelInfo,
+    model_path: &std::path::Path,
     status: &str,
 ) {
-    let Some(mut dma_buf) = wait_for_camera_frame(sub_camera, Duration::from_millis(100)) else {
+    let Some(frame) = wait_for_camera_frame(sub_camera, Duration::from_millis(100)) else {
         return;
     };
     trace!("Received camera frame");
 
-    let Ok(_fd) = update_dmabuf_with_pidfd(&mut dma_buf) else {
-        return;
-    };
-
-    trace!("Opened DMA buffer from camera");
-
     if !args.mask_topic.is_empty() {
-        let mask = build_segmentation_msg(dma_buf.header.stamp.clone(), None, 0, None);
-        let msg = ZBytes::from(serde_cdr::serialize(&mask).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema(Mask::SCHEMA_NAME);
+        let mask = build_segmentation_msg(frame.stamp(), None, 0, None);
+        let msg = ZBytes::from(mask.into_cdr());
+        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
         match session.put(&args.mask_topic, msg).encoding(enc).await {
             Ok(_) => (),
@@ -137,7 +167,8 @@ async fn heart_beat_loop(
             &[],
             &[],
             &[],
-            dma_buf.header.clone(),
+            frame.stamp(),
+            frame.frame_id(),
             time_from_ns(0u32),
             time_from_ns(0u32),
             time_from_ns(0u32),
@@ -151,9 +182,9 @@ async fn heart_beat_loop(
         }
     }
 
-    model_info_msg.header.stamp = dma_buf.header.stamp.clone();
-    let msg = ZBytes::from(serde_cdr::serialize(&model_info_msg).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema(ModelInfo::SCHEMA_NAME);
+    let model_info_msg = build_model_info_msg(frame.stamp(), None, model_path, false, false);
+    let msg = ZBytes::from(model_info_msg.into_cdr());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
 
     match session.put(&args.info_topic, msg).encoding(enc).await {
         Ok(_) => (),
@@ -167,7 +198,7 @@ async fn heart_beat_loop(
             &[],
             &[],
             &[],
-            dma_buf.header.stamp.clone(),
+            frame.stamp(),
             stream_dims,
             status,
             LabelSetting::Index,
@@ -195,8 +226,8 @@ pub fn get_curr_time() -> u64 {
 pub fn wait_for_camera_frame(
     sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
     timeout: Duration,
-) -> Option<DmaBuffer> {
-    let dma_buf = if let Some(v) = sub_camera.drain().last() {
+) -> Option<ResolvedCameraFrame> {
+    let sample = if let Some(v) = sub_camera.drain().last() {
         v
     } else {
         match sub_camera.recv_timeout(timeout) {
@@ -220,28 +251,46 @@ pub fn wait_for_camera_frame(
             }
         }
     };
-    match serde_cdr::deserialize(&dma_buf.payload().to_bytes()) {
+
+    let cdr = sample.payload().to_bytes();
+    let frame = match CameraFrame::from_cdr(cdr.to_vec()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to deserialize CameraFrame: {e:?}");
+            return None;
+        }
+    };
+
+    match resolve_camera_frame_fd(frame) {
         Ok(v) => Some(v),
         Err(e) => {
-            error!("Failed to deserialize message: {e:?}");
+            error!("Failed to import camera DMA-BUF fd: {e:?}");
             None
         }
     }
 }
 
-pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuffer) -> Result<File, std::io::Error> {
-    let pidfd: PidFd = match PidFd::from_pid(dma_buf.pid as i32) {
+fn resolve_camera_frame_fd(
+    frame: CameraFrame<Vec<u8>>,
+) -> Result<ResolvedCameraFrame, std::io::Error> {
+    let planes = frame.planes();
+    let plane0 = planes.first().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "CameraFrame has no planes")
+    })?;
+
+    let pidfd = match PidFd::from_pid(frame.pid() as i32) {
         Ok(v) => v,
         Err(e) => {
             error!(
                 "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                dma_buf.pid, e
+                frame.pid(),
+                e
             );
             return Err(e);
         }
     };
 
-    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty()) {
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), plane0.fd, GetFdFlags::empty()) {
         Ok(v) => v,
         Err(e) => {
             error!(
@@ -250,14 +299,19 @@ pub fn update_dmabuf_with_pidfd(dma_buf: &mut DmaBuffer) -> Result<File, std::io
             return Err(e);
         }
     };
-    dma_buf.pid = std::process::id();
-    dma_buf.fd = fd.as_raw_fd();
-    Ok(fd)
+
+    Ok(ResolvedCameraFrame {
+        plane_fd: fd.as_raw_fd(),
+        stride: plane0.stride,
+        offset: plane0.offset,
+        _fd_guard: fd,
+        frame,
+    })
 }
 
 // If the receiver is empty, waits for the next message, otherwise returns the
 // most recent message on this receiver. If the receiver is closed, returns None
-async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
+pub(crate) async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
     let mut msg = match rx.try_recv() {
         Err(TryRecvError::Empty) => {
             return rx.recv().await;

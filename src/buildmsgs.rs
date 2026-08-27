@@ -3,15 +3,14 @@
 
 use edgefirst_schemas::{
     builtin_interfaces::{Duration, Time},
-    edgefirst_msgs::{Box, Detect, Mask, Model as ModelMsg, ModelInfo, Track, model_info},
+    edgefirst_msgs::{
+        Detect, DetectBoxView, Mask, MaskView, Model as ModelMsg, ModelInfo, model_info,
+    },
     foxglove_msgs::{
-        FoxgloveColor, FoxgloveImageAnnotations, FoxglovePoint2, FoxglovePointAnnotations,
-        FoxgloveTextAnnotations,
+        FoxgloveColor, FoxgloveImageAnnotation, FoxglovePoint2, FoxglovePointAnnotationView,
+        FoxgloveTextAnnotationView,
         point_annotation_type::{LINE_LOOP, UNKNOWN},
     },
-    schema_registry::SchemaType,
-    serde_cdr,
-    std_msgs::Header,
 };
 use log::debug;
 use std::path::Path;
@@ -35,11 +34,12 @@ const TRANSPARENT: FoxgloveColor = FoxgloveColor {
     a: 0.0,
 };
 
+const EMPTY_ENCODING: &str = "";
+
 fn u128_to_foxglove_color(hexcode: u128) -> FoxgloveColor {
     const BYTES_PER_CHANNEL: u8 = 8;
     const FACTOR: u32 = (1 << BYTES_PER_CHANNEL) - 1;
 
-    // only use the first 32 bits
     let hexcode = (hexcode >> (128 - (4 * BYTES_PER_CHANNEL))) as u32;
     FoxgloveColor {
         r: ((hexcode >> (BYTES_PER_CHANNEL * 3)) & FACTOR) as f64 / FACTOR as f64,
@@ -59,43 +59,35 @@ pub fn build_image_annotations_msg_and_encode_(
     labels_setting: LabelSetting,
 ) -> (ZBytes, Encoding) {
     let (stream_width, stream_height) = stream_dims;
-    let mut annotations = FoxgloveImageAnnotations {
-        circles: Vec::new(),
-        points: Vec::new(),
-        texts: Vec::new(),
-    };
+    let mut point_views = Vec::with_capacity(boxes.len() + 1);
+    let mut text_entries: Vec<(String, FoxglovePoint2, FoxgloveColor, f64)> =
+        Vec::with_capacity(boxes.len() + 1);
 
-    let empty_points = FoxglovePointAnnotations {
-        timestamp: timestamp.clone(),
+    point_views.push(FoxglovePointAnnotationView {
+        timestamp,
         type_: UNKNOWN,
         points: Vec::new(),
-        outline_color: WHITE.clone(),
+        outline_color: WHITE,
         outline_colors: Vec::new(),
-        fill_color: TRANSPARENT.clone(),
+        fill_color: TRANSPARENT,
         thickness: 2.0,
-    };
-
-    let empty_text = FoxgloveTextAnnotations {
-        timestamp: timestamp.clone(),
-        text: text.to_owned(),
-        position: FoxglovePoint2 {
+    });
+    text_entries.push((
+        text.to_owned(),
+        FoxglovePoint2 {
             x: stream_width * 0.025,
             y: stream_height * 0.95,
         },
-        font_size: 0.015 * stream_width.max(stream_height),
-        text_color: WHITE.clone(),
-        background_color: TRANSPARENT.clone(),
-    };
-
-    annotations.points.push(empty_points);
-    annotations.texts.push(empty_text);
+        WHITE,
+        0.015 * stream_width.max(stream_height),
+    ));
 
     for (i, b) in boxes.iter().enumerate() {
         let color = match tracks.get(i) {
-            None => WHITE.clone(),
+            None => WHITE,
             Some(track) => u128_to_foxglove_color(track.uuid.as_u128()),
         };
-        let outline_colors = vec![color.clone(), color.clone(), color.clone(), color.clone()];
+        let outline_colors = vec![color, color, color, color];
         let points = vec![
             FoxglovePoint2 {
                 x: b.bbox.xmin as f64 * stream_width,
@@ -114,17 +106,17 @@ pub fn build_image_annotations_msg_and_encode_(
                 y: b.bbox.ymax as f64 * stream_height,
             },
         ];
-        let points = FoxglovePointAnnotations {
-            timestamp: timestamp.clone(),
+        point_views.push(FoxglovePointAnnotationView {
+            timestamp,
             type_: LINE_LOOP,
             points,
-            outline_color: color.clone(),
+            outline_color: color,
             outline_colors,
-            fill_color: TRANSPARENT.clone(),
+            fill_color: TRANSPARENT,
             thickness: 2.0,
-        };
+        });
 
-        let text = match labels_setting {
+        let label_text = match labels_setting {
             LabelSetting::Index => format!("{:.2}", b.label),
             LabelSetting::Score => format!("{:.2}", b.score),
             LabelSetting::Label => labels
@@ -143,23 +135,38 @@ pub fn build_image_annotations_msg_and_encode_(
                 None => format!("{:.2}", b.score),
             },
         };
-
-        let text = FoxgloveTextAnnotations {
-            timestamp: timestamp.clone(),
-            text,
-            position: FoxglovePoint2 {
+        text_entries.push((
+            label_text,
+            FoxglovePoint2 {
                 x: b.bbox.xmin as f64 * stream_width,
                 y: b.bbox.ymin as f64 * stream_height,
             },
-            font_size: 0.02 * stream_width.max(stream_height),
-            text_color: color.clone(),
-            background_color: TRANSPARENT.clone(),
-        };
-        annotations.points.push(points);
-        annotations.texts.push(text);
+            color,
+            0.02 * stream_width.max(stream_height),
+        ));
     }
 
-    let msg = ZBytes::from(serde_cdr::serialize(&annotations).unwrap());
+    let text_views: Vec<FoxgloveTextAnnotationView<'_>> = text_entries
+        .iter()
+        .map(
+            |(text, position, text_color, font_size)| FoxgloveTextAnnotationView {
+                timestamp,
+                text: text.as_str(),
+                position: *position,
+                font_size: *font_size,
+                text_color: *text_color,
+                background_color: TRANSPARENT,
+            },
+        )
+        .collect();
+
+    let annotations = FoxgloveImageAnnotation::builder()
+        .circles(&[])
+        .points(&point_views)
+        .texts(&text_views)
+        .build()
+        .expect("valid annotations");
+    let msg = ZBytes::from(annotations.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("foxglove_msgs/msg/ImageAnnotations");
 
     (msg, enc)
@@ -171,28 +178,29 @@ pub fn build_segmentation_msg(
     model_ctx: Option<&ModelContext>,
     output_index: usize,
     output_data: Option<&[u8]>,
-) -> Mask {
+) -> Mask<Vec<u8>> {
     let output_shape = model_ctx
         .and_then(|ctx| ctx.output_shapes.get(output_index).cloned())
         .unwrap_or_else(|| vec![0, 0, 0, 0]);
 
     let mask = output_data.map(|d| d.to_vec()).unwrap_or_default();
 
-    Mask {
-        height: output_shape.get(1).copied().unwrap_or(0) as u32,
-        width: output_shape.get(2).copied().unwrap_or(0) as u32,
-        length: 1,
-        encoding: "".to_string(),
-        mask,
-        boxed: false,
-    }
+    Mask::builder()
+        .height(output_shape.get(1).copied().unwrap_or(0) as u32)
+        .width(output_shape.get(2).copied().unwrap_or(0) as u32)
+        .length(1)
+        .encoding(EMPTY_ENCODING)
+        .mask(&mask)
+        .boxed(false)
+        .build()
+        .expect("valid mask message")
 }
 
 #[instrument(skip_all)]
 pub fn build_segmentation_msg_(
     _in_time: Time,
     output_masks: &[edgefirst_hal::decoder::Segmentation],
-) -> Mask {
+) -> Mask<Vec<u8>> {
     let (shape, mask) = if !output_masks.is_empty() {
         let output_mask = &output_masks[0];
         let shape = output_mask.segmentation.shape();
@@ -204,14 +212,15 @@ pub fn build_segmentation_msg_(
         ((0, 0), Vec::new())
     };
 
-    Mask {
-        height: shape.0 as u32,
-        width: shape.1 as u32,
-        length: 1,
-        encoding: "".to_string(),
-        mask,
-        boxed: false,
-    }
+    Mask::builder()
+        .height(shape.0 as u32)
+        .width(shape.1 as u32)
+        .length(1)
+        .encoding(EMPTY_ENCODING)
+        .mask(&mask)
+        .boxed(false)
+        .build()
+        .expect("valid mask message")
 }
 
 pub fn time_from_ns<T: Into<u128>>(ts: T) -> Time {
@@ -230,63 +239,92 @@ pub fn duration_from_ns<T: Into<u128>>(ts: T) -> Duration {
     }
 }
 
-pub fn convert_boxes(
-    box_: &edgefirst_hal::decoder::DetectBox,
-    track: Option<&edgefirst_tracker::TrackInfo>,
+fn build_detect_box_views<'a>(
+    boxes: &[edgefirst_hal::decoder::DetectBox],
+    tracks: &[edgefirst_tracker::TrackInfo],
     labels: &[String],
     ts: Time,
-) -> Box {
-    let track = match track {
-        Some(v) => Track {
-            id: v.uuid.to_string(),
-            lifetime: v.count,
-            created: time_from_ns(v.created),
-        },
-        None => Track {
-            id: String::from(""),
-            lifetime: 1,
-            created: ts.clone(),
-        },
-    };
-    Box {
-        center_x: (box_.bbox.xmax + box_.bbox.xmin) / 2.0,
-        center_y: (box_.bbox.ymax + box_.bbox.ymin) / 2.0,
-        width: box_.bbox.xmax - box_.bbox.xmin,
-        height: box_.bbox.ymax - box_.bbox.ymin,
-        label: labels
-            .get(box_.label)
-            .cloned()
-            .unwrap_or_else(|| box_.label.to_string()),
-        score: box_.score,
-        distance: 0.0,
-        speed: 0.0,
-        track,
+    label_strings: &'a mut Vec<String>,
+    track_ids: &'a mut Vec<String>,
+) -> Vec<DetectBoxView<'a>> {
+    label_strings.clear();
+    track_ids.clear();
+    label_strings.reserve(boxes.len());
+    track_ids.reserve(boxes.len());
+
+    for (i, b) in boxes.iter().enumerate() {
+        label_strings.push(
+            labels
+                .get(b.label)
+                .cloned()
+                .unwrap_or_else(|| b.label.to_string()),
+        );
+        track_ids.push(match tracks.get(i) {
+            Some(v) => v.uuid.to_string(),
+            None => String::new(),
+        });
     }
+
+    boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let (track_lifetime, track_created) = match tracks.get(i) {
+                Some(v) => (v.count, time_from_ns(v.created)),
+                None => (1, ts),
+            };
+            DetectBoxView {
+                center_x: (b.bbox.xmax + b.bbox.xmin) / 2.0,
+                center_y: (b.bbox.ymax + b.bbox.ymin) / 2.0,
+                width: b.bbox.xmax - b.bbox.xmin,
+                height: b.bbox.ymax - b.bbox.ymin,
+                label: &label_strings[i],
+                score: b.score,
+                distance: 0.0,
+                speed: 0.0,
+                track_id: &track_ids[i],
+                track_lifetime,
+                track_created,
+            }
+        })
+        .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 #[instrument(skip_all)]
 pub fn build_detect_msg_and_encode_(
     boxes: &[edgefirst_hal::decoder::DetectBox],
     tracks: &[edgefirst_tracker::TrackInfo],
     labels: &[String],
-    header: Header,
+    stamp: Time,
+    frame_id: &str,
     in_time: Time,
     model_time: Time,
     curr_time: Time,
 ) -> (ZBytes, Encoding) {
-    let detect = Detect {
-        header,
-        input_timestamp: in_time,
-        model_time,
-        output_time: curr_time.clone(),
-        boxes: boxes
-            .iter()
-            .enumerate()
-            .map(|(ind, b)| convert_boxes(b, tracks.get(ind), labels, curr_time.clone()))
-            .collect(),
-    };
-    let msg = ZBytes::from(serde_cdr::serialize(&detect).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema(Detect::SCHEMA_NAME);
+    let mut label_strings = Vec::new();
+    let mut track_ids = Vec::new();
+    let box_views = build_detect_box_views(
+        boxes,
+        tracks,
+        labels,
+        curr_time,
+        &mut label_strings,
+        &mut track_ids,
+    );
+
+    let detect = Detect::builder()
+        .stamp(stamp)
+        .frame_id(frame_id)
+        .input_timestamp(in_time)
+        .model_time(model_time)
+        .output_time(curr_time)
+        .boxes(&box_views)
+        .build()
+        .expect("valid detect message");
+
+    let msg = ZBytes::from(detect.into_cdr());
+    let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
 
     (msg, enc)
 }
@@ -298,59 +336,69 @@ pub fn build_model_output_msg(
     tracks: &[edgefirst_tracker::TrackInfo],
     labels: &[String],
     output_masks: &[edgefirst_hal::decoder::Segmentation],
-    header: Header,
+    stamp: Time,
+    frame_id: &str,
     input_duration: u128,
     model_duration: u128,
     output_duration: u128,
     decode_duration: u128,
     has_instance_seg: bool,
-) -> ModelMsg {
-    let timestamp = header.stamp.clone();
-    let msg_boxes: Vec<Box> = boxes
-        .iter()
-        .enumerate()
-        .map(|(ind, b)| convert_boxes(b, tracks.get(ind), labels, timestamp.clone()))
-        .collect();
+) -> ModelMsg<Vec<u8>> {
+    let mut label_strings = Vec::new();
+    let mut track_ids = Vec::new();
+    let box_views = build_detect_box_views(
+        boxes,
+        tracks,
+        labels,
+        stamp,
+        &mut label_strings,
+        &mut track_ids,
+    );
 
-    let masks = if has_instance_seg {
-        output_masks
-            .iter()
-            .map(|seg| {
-                let shape = seg.segmentation.shape();
-                Mask {
-                    height: shape[0] as u32,
-                    width: shape[1] as u32,
-                    length: 1,
-                    encoding: "".to_string(),
-                    mask: seg.segmentation.iter().copied().collect(),
-                    boxed: true,
-                }
-            })
-            .collect()
+    let mut mask_data: Vec<Vec<u8>> = Vec::new();
+    let mut mask_views: Vec<MaskView<'_>> = Vec::new();
+    if has_instance_seg {
+        for seg in output_masks {
+            let _shape = seg.segmentation.shape();
+            let data: Vec<u8> = seg.segmentation.iter().copied().collect();
+            mask_data.push(data);
+        }
+        for (seg, data) in output_masks.iter().zip(mask_data.iter()) {
+            let shape = seg.segmentation.shape();
+            mask_views.push(MaskView {
+                height: shape[0] as u32,
+                width: shape[1] as u32,
+                length: 1,
+                encoding: EMPTY_ENCODING,
+                mask: data,
+                boxed: true,
+            });
+        }
     } else if !output_masks.is_empty() {
         let seg = &output_masks[0];
         let shape = seg.segmentation.shape();
-        vec![Mask {
+        mask_data.push(seg.segmentation.iter().copied().collect());
+        mask_views.push(MaskView {
             height: shape[0] as u32,
             width: shape[1] as u32,
             length: 1,
-            encoding: "".to_string(),
-            mask: seg.segmentation.iter().copied().collect(),
+            encoding: EMPTY_ENCODING,
+            mask: &mask_data[0],
             boxed: false,
-        }]
-    } else {
-        Vec::new()
-    };
-
-    ModelMsg {
-        header,
-        input_time: duration_from_ns(input_duration),
-        model_time: duration_from_ns(model_duration),
-        output_time: duration_from_ns(output_duration),
-        decode_time: duration_from_ns(decode_duration),
-        boxes: msg_boxes,
-        masks,
+        });
     }
+
+    ModelMsg::builder()
+        .stamp(stamp)
+        .frame_id(frame_id)
+        .input_time(duration_from_ns(input_duration))
+        .model_time(duration_from_ns(model_duration))
+        .output_time(duration_from_ns(output_duration))
+        .decode_time(duration_from_ns(decode_duration))
+        .boxes(&box_views)
+        .masks(&mask_views)
+        .build()
+        .expect("valid model message")
 }
 
 fn tensor_type_to_model_info_datatype(t: DType) -> u8 {
@@ -391,7 +439,7 @@ pub fn build_model_info_msg(
     path: &Path,
     has_det: bool,
     has_seg: bool,
-) -> ModelInfo {
+) -> ModelInfo<Vec<u8>> {
     let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
     let mut labels = Vec::new();
@@ -425,25 +473,26 @@ pub fn build_model_info_msg(
     debug!("Model name = {model_name}");
     let mut model_types = Vec::new();
     if has_seg {
-        model_types.push("Segmentation".to_string());
+        model_types.push("Segmentation");
     }
     if has_det {
-        model_types.push("Detection".to_string());
+        model_types.push("Detection");
     }
     let (input_shape, input_type) = get_input_info(model_ctx);
+    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-    ModelInfo {
-        header: Header {
-            stamp: in_time.clone(),
-            frame_id: String::new(),
-        },
-        labels,
-        input_shape,
-        input_type,
-        output_shape,
-        output_type,
-        model_format,
-        model_name,
-        model_type: model_types.join(";"),
-    }
+    let model_type = model_types.join(";");
+    ModelInfo::builder()
+        .stamp(in_time)
+        .frame_id("")
+        .input_shape(&input_shape)
+        .input_type(input_type)
+        .output_shape(&output_shape)
+        .output_type(output_type)
+        .labels(&label_refs)
+        .model_type(&model_type)
+        .model_format(&model_format)
+        .model_name(&model_name)
+        .build()
+        .expect("valid model info message")
 }
