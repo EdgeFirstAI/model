@@ -442,7 +442,6 @@ pub fn build_model_info_msg(
 ) -> ModelInfo<Vec<u8>> {
     let mut output_shape = vec![0, 0, 0, 0];
     let mut output_type = model_info::RAW;
-    let mut labels = Vec::new();
     if let Some(ctx) = model_ctx {
         if let Some(shape) = ctx.output_shapes.first() {
             output_shape = shape.iter().map(|f| *f as u32).collect();
@@ -450,7 +449,6 @@ pub fn build_model_info_msg(
         if let Some(dt) = ctx.output_types.first() {
             output_type = tensor_type_to_model_info_datatype(*dt);
         }
-        labels = ctx.labels.clone();
     }
 
     let model_format = match path.extension() {
@@ -479,7 +477,10 @@ pub fn build_model_info_msg(
         model_types.push("Detection");
     }
     let (input_shape, input_type) = get_input_info(model_ctx);
-    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+    // Borrow labels from ModelContext — avoid cloning the Vec<String> on every call.
+    let label_refs: Vec<&str> = model_ctx
+        .map(|ctx| ctx.labels.iter().map(String::as_str).collect())
+        .unwrap_or_default();
 
     let model_type = model_types.join(";");
     ModelInfo::builder()
@@ -495,4 +496,188 @@ pub fn build_model_info_msg(
         .model_name(&model_name)
         .build()
         .expect("valid model info message")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::LabelSetting;
+    use edgefirst_hal::decoder::{BoundingBox, DetectBox};
+    use edgefirst_schemas::edgefirst_msgs::{CameraFrame, CameraPlaneView};
+    use std::path::PathBuf;
+
+    fn sample_box(label: usize, score: f32) -> DetectBox {
+        DetectBox {
+            bbox: BoundingBox::new(0.1, 0.2, 0.5, 0.6),
+            score,
+            label,
+        }
+    }
+
+    #[test]
+    fn time_and_duration_from_ns() {
+        let t = time_from_ns(1_500_000_000u128);
+        assert_eq!(t.sec, 1);
+        assert_eq!(t.nanosec, 500_000_000);
+        let d = duration_from_ns(2_250_000_000u128);
+        assert_eq!(d.sec, 2);
+        assert_eq!(d.nanosec, 250_000_000);
+    }
+
+    #[test]
+    fn build_segmentation_empty_and_with_data() {
+        let empty = build_segmentation_msg(time_from_ns(0u32), None, 0, None);
+        assert_eq!(empty.height(), 0);
+        assert_eq!(empty.width(), 0);
+        assert!(empty.mask_data().is_empty());
+
+        let ctx = ModelContext {
+            input_shapes: vec![vec![1, 3, 64, 64]],
+            input_types: vec![DType::U8],
+            output_shapes: vec![vec![1, 32, 48, 1]],
+            output_types: vec![DType::U8],
+            labels: vec!["a".into()],
+            name: "t".into(),
+        };
+        let data = vec![1u8, 2, 3, 4];
+        let mask = build_segmentation_msg(time_from_ns(0u32), Some(&ctx), 0, Some(&data));
+        assert_eq!(mask.height(), 32);
+        assert_eq!(mask.width(), 48);
+        assert_eq!(mask.mask_data(), data.as_slice());
+    }
+
+    #[test]
+    fn build_detect_and_model_output_roundtrip() {
+        let boxes = [sample_box(0, 0.9)];
+        let labels = vec!["person".to_string()];
+        let stamp = time_from_ns(1_000_000_000u32);
+        let (bytes, enc) = build_detect_msg_and_encode_(
+            &boxes,
+            &[],
+            &labels,
+            stamp,
+            "cam0",
+            time_from_ns(10u32),
+            time_from_ns(20u32),
+            time_from_ns(30u32),
+        );
+        assert!(enc.to_string().contains("Detect") || format!("{enc:?}").contains("Detect"));
+        let detect = Detect::from_cdr(bytes.to_bytes().to_vec()).unwrap();
+        assert_eq!(detect.frame_id(), "cam0");
+        assert_eq!(detect.boxes_len(), 1);
+
+        let model = build_model_output_msg(
+            &boxes,
+            &[],
+            &labels,
+            &[],
+            stamp,
+            "cam0",
+            100,
+            200,
+            300,
+            400,
+            false,
+        );
+        assert_eq!(model.frame_id(), "cam0");
+        assert_eq!(model.boxes_len(), 1);
+        assert_eq!(model.masks_len(), 0);
+    }
+
+    #[test]
+    fn build_model_info_uses_context_and_path() {
+        let ctx = ModelContext {
+            input_shapes: vec![vec![1, 640, 640, 3]],
+            input_types: vec![DType::U8],
+            output_shapes: vec![vec![1, 84, 8400]],
+            output_types: vec![DType::F32],
+            labels: vec!["person".into(), "car".into()],
+            name: "yolo".into(),
+        };
+        let path = PathBuf::from("/models/yolo.tflite");
+        let info = build_model_info_msg(time_from_ns(5u32), Some(&ctx), &path, true, false);
+        assert_eq!(info.model_name(), "yolo");
+        assert_eq!(info.model_format(), "TFLite");
+        assert!(info.model_type().contains("Detection"));
+        assert_eq!(info.labels_len(), 2);
+
+        let loading = build_model_info_msg(time_from_ns(0u32), None, &path, false, true);
+        assert_eq!(loading.model_name(), "Loading Model...");
+        assert!(loading.model_type().contains("Segmentation"));
+    }
+
+    #[test]
+    fn build_image_annotations_with_boxes() {
+        let boxes = [sample_box(0, 0.8), sample_box(1, 0.7)];
+        let labels = vec!["person".to_string(), "car".to_string()];
+        let (bytes, _) = build_image_annotations_msg_and_encode_(
+            &boxes,
+            &[],
+            &labels,
+            time_from_ns(0u32),
+            (1920.0, 1080.0),
+            "status",
+            LabelSetting::LabelScore,
+        );
+        assert!(!bytes.is_empty());
+        let (bytes2, _) = build_image_annotations_msg_and_encode_(
+            &boxes,
+            &[],
+            &labels,
+            time_from_ns(0u32),
+            (1.0, 1.0),
+            "x",
+            LabelSetting::Index,
+        );
+        assert!(!bytes2.is_empty());
+    }
+
+    #[test]
+    fn camera_frame_cdr_roundtrip_planes() {
+        let plane = CameraPlaneView {
+            fd: 7,
+            offset: 0,
+            stride: 3840,
+            size: 1920 * 1080 * 2,
+            used: 1920 * 1080 * 2,
+            data: &[],
+        };
+        let frame = CameraFrame::builder()
+            .stamp(time_from_ns(42u32))
+            .frame_id("camera")
+            .seq(3)
+            .pid(1234)
+            .width(1920)
+            .height(1080)
+            .format("YUYV")
+            .planes(&[plane])
+            .build()
+            .expect("camera frame");
+        let decoded = CameraFrame::from_cdr(frame.into_cdr()).unwrap();
+        assert_eq!(decoded.pid(), 1234);
+        assert_eq!(decoded.width(), 1920);
+        assert_eq!(decoded.height(), 1080);
+        assert_eq!(decoded.format(), "YUYV");
+        assert_eq!(decoded.frame_id(), "camera");
+        let planes = decoded.planes();
+        assert_eq!(planes.len(), 1);
+        assert_eq!(planes[0].fd, 7);
+        assert_eq!(planes[0].stride, 3840);
+    }
+
+    #[test]
+    fn tensor_type_mapping_covers_common_dtypes() {
+        assert_eq!(
+            tensor_type_to_model_info_datatype(DType::U8),
+            model_info::UINT8
+        );
+        assert_eq!(
+            tensor_type_to_model_info_datatype(DType::F32),
+            model_info::FLOAT32
+        );
+        assert_eq!(
+            tensor_type_to_model_info_datatype(DType::I8),
+            model_info::INT8
+        );
+    }
 }

@@ -401,7 +401,14 @@ pub async fn main() -> ExitCode {
         None
     };
 
-    let model_ctx_for_info = model_ctx.clone();
+    let mut model_info_msg = build_model_info_msg(
+        time_from_ns(0u32),
+        Some(&model_ctx),
+        &args.model,
+        has_box,
+        has_seg | has_instance_seg,
+    );
+    info!("built model_info_msg");
 
     let sub_camera = heartbeat.await.unwrap();
 
@@ -615,7 +622,8 @@ pub async fn main() -> ExitCode {
             let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
-            let timestamp = frame.stamp().nanosec as u64 + frame.stamp().sec as u64 * 1_000_000_000;
+            let stamp = frame.stamp();
+            let timestamp = stamp.nanosec as u64 + stamp.sec as u64 * 1_000_000_000;
             let wrapped: Vec<_> = output_boxes.iter().map(|b| TrackerBox(*b)).collect();
             let track_results = tracker.update(&wrapped, timestamp);
 
@@ -766,14 +774,10 @@ pub async fn main() -> ExitCode {
             }
         }
 
-        let model_info_msg = build_model_info_msg(
-            frame.stamp(),
-            Some(&model_ctx_for_info),
-            &args.model,
-            has_box,
-            has_seg | has_instance_seg,
-        );
-        let msg = ZBytes::from(model_info_msg.into_cdr());
+        if let Err(e) = model_info_msg.set_stamp(frame.stamp()) {
+            error!("Failed to update ModelInfo stamp: {e:?}");
+        }
+        let msg = ZBytes::from(model_info_msg.as_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
 
         if let Err(e) = publ_model_info.put(msg).encoding(enc).await {

@@ -160,6 +160,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn crop_always_uses_letterbox_fit() {
+        let padded = LetterboxTransform::compute(1280, 720, 640, 640);
+        assert!(padded.is_padded());
+        let crop = padded.crop();
+        assert!(matches!(
+            crop.fit,
+            edgefirst_hal::image::Fit::Letterbox { pad: PAD_COLOR }
+        ));
+
+        let square = LetterboxTransform::compute(640, 640, 640, 640);
+        assert!(!square.is_padded());
+        let crop = square.crop();
+        assert!(matches!(
+            crop.fit,
+            edgefirst_hal::image::Fit::Letterbox { .. }
+        ));
+    }
+
+    #[test]
     fn matches_hal_letterbox_rect_on_odd_aspect() {
         // Aspect-driven HAL formula can differ from min-scale rounding.
         let lb = LetterboxTransform::compute(85, 320, 64, 224);
