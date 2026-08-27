@@ -14,7 +14,7 @@
 //! camera-frame coordinates afterwards.
 
 use edgefirst_hal::decoder::{BoundingBox, Segmentation};
-use edgefirst_hal::image::{Crop, Rect};
+use edgefirst_hal::image::Crop;
 use ndarray::s;
 
 /// Padding fill colour for the letterbox bars (RGBA). Matches the neutral grey
@@ -54,12 +54,17 @@ impl LetterboxTransform {
             };
         }
 
-        let scale = f64::min(dst_w as f64 / src_w as f64, dst_h as f64 / src_h as f64);
-        // Clamp the scaled extent to the canvas to absorb rounding.
-        let scaled_w = ((src_w as f64 * scale).round() as usize).clamp(1, dst_w);
-        let scaled_h = ((src_h as f64 * scale).round() as usize).clamp(1, dst_h);
-        let pad_x = (dst_w - scaled_w) / 2;
-        let pad_y = (dst_h - scaled_h) / 2;
+        // Match HAL `letterbox_rect` so Crop::letterbox and unletter share
+        // the same placement (avoids 1px pad/scaled drift across formulas).
+        let src_aspect = src_w as f64 / src_h as f64;
+        let dst_aspect = dst_w as f64 / dst_h as f64;
+        let (scaled_w, scaled_h) = if src_aspect > dst_aspect {
+            (dst_w, ((dst_w as f64 / src_aspect).round() as usize).max(1))
+        } else {
+            (((dst_h as f64 * src_aspect).round() as usize).max(1), dst_h)
+        };
+        let pad_x = dst_w.saturating_sub(scaled_w) / 2;
+        let pad_y = dst_h.saturating_sub(scaled_h) / 2;
 
         Self {
             dst_w,
@@ -78,15 +83,11 @@ impl LetterboxTransform {
 
     /// HAL [`Crop`] placing the scaled source content centered in the canvas,
     /// with the surrounding letterbox bars filled with [`PAD_COLOR`].
+    ///
+    /// Always uses [`Crop::letterbox`] so placement matches
+    /// [`LetterboxTransform::compute`] (same HAL `letterbox_rect` math).
     pub fn crop(&self) -> Crop {
-        Crop::new()
-            .with_dst_rect(Some(Rect::new(
-                self.pad_x,
-                self.pad_y,
-                self.scaled_w,
-                self.scaled_h,
-            )))
-            .with_dst_color(Some(PAD_COLOR))
+        Crop::letterbox(PAD_COLOR)
     }
 
     /// Map a canvas-normalized x coordinate back to source-normalized `[0,1]`.
@@ -157,6 +158,38 @@ impl LetterboxTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_always_uses_letterbox_fit() {
+        let padded = LetterboxTransform::compute(1280, 720, 640, 640);
+        assert!(padded.is_padded());
+        let crop = padded.crop();
+        assert!(matches!(
+            crop.fit,
+            edgefirst_hal::image::Fit::Letterbox { pad: PAD_COLOR }
+        ));
+
+        let square = LetterboxTransform::compute(640, 640, 640, 640);
+        assert!(!square.is_padded());
+        let crop = square.crop();
+        assert!(matches!(
+            crop.fit,
+            edgefirst_hal::image::Fit::Letterbox { .. }
+        ));
+    }
+
+    #[test]
+    fn matches_hal_letterbox_rect_on_odd_aspect() {
+        // Aspect-driven HAL formula can differ from min-scale rounding.
+        let lb = LetterboxTransform::compute(85, 320, 64, 224);
+        assert_eq!(lb.scaled_h, 224);
+        assert_eq!(
+            lb.scaled_w,
+            ((224.0_f64 * (85.0 / 320.0)).round() as usize).max(1)
+        );
+        assert_eq!(lb.pad_x, (64 - lb.scaled_w) / 2);
+        assert_eq!(lb.pad_y, 0);
+    }
 
     #[test]
     fn square_into_square_is_noop() {
