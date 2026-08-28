@@ -70,6 +70,9 @@ pub struct ResolvedCameraFrame {
     plane_fd: i32,
     stride: u32,
     offset: u32,
+    width: u32,
+    height: u32,
+    format: String,
     _fd_guard: File,
 }
 
@@ -83,15 +86,15 @@ impl ResolvedCameraFrame {
     }
 
     pub fn width(&self) -> u32 {
-        self.frame.width()
+        self.width
     }
 
     pub fn height(&self) -> u32 {
-        self.frame.height()
+        self.height
     }
 
     pub fn format(&self) -> &str {
-        self.frame.format()
+        &self.format
     }
 
     pub fn fd(&self) -> i32 {
@@ -270,27 +273,70 @@ pub fn wait_for_camera_frame(
     }
 }
 
+fn camera_frame_invalid(msg: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg.into())
+}
+
+fn camera_frame_u32(name: &str, value: u64) -> Result<u32, std::io::Error> {
+    u32::try_from(value).map_err(|_| {
+        camera_frame_invalid(format!(
+            "CameraFrame tensor {name} {value} does not fit in u32"
+        ))
+    })
+}
+
+fn camera_frame_nonzero_u32(name: &str, value: u64) -> Result<u32, std::io::Error> {
+    let dim = camera_frame_u32(name, value)?;
+    if dim == 0 {
+        return Err(camera_frame_invalid(format!(
+            "CameraFrame tensor {name} is 0"
+        )));
+    }
+    Ok(dim)
+}
+
 fn resolve_camera_frame_fd(
     frame: CameraFrame<Vec<u8>>,
 ) -> Result<ResolvedCameraFrame, std::io::Error> {
-    let planes = frame.planes();
-    let plane0 = planes.first().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, "CameraFrame has no planes")
-    })?;
+    let (pid, handle, stride, offset, width, height, format) = {
+        let tensor = frame.tensor();
+        let plane0 = tensor
+            .plane_at(0)
+            .ok_or_else(|| camera_frame_invalid("CameraFrame tensor has no plane 0"))?;
+        let height = tensor
+            .shape_at(0)
+            .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing height (shape[0])"))?;
+        let width = tensor
+            .shape_at(1)
+            .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
+        (
+            tensor.pid(),
+            plane0.handle,
+            plane0.stride,
+            plane0.offset,
+            width,
+            height,
+            tensor.format().to_owned(),
+        )
+    };
 
-    let pidfd = match PidFd::from_pid(frame.pid() as i32) {
+    let pid_i32 = i32::try_from(pid)
+        .map_err(|_| camera_frame_invalid(format!("CameraFrame tensor pid {pid} exceeds i32")))?;
+    let pidfd = match PidFd::from_pid(pid_i32) {
         Ok(v) => v,
         Err(e) => {
             error!(
-                "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                frame.pid(),
-                e
+                "Error getting PID {pid:?}, please check if the camera process is running: {e:?}"
             );
             return Err(e);
         }
     };
 
-    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), plane0.fd, GetFdFlags::empty()) {
+    let target_fd = i32::try_from(handle).map_err(|_| {
+        camera_frame_invalid(format!("CameraFrame plane handle {handle} exceeds i32"))
+    })?;
+
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty()) {
         Ok(v) => v,
         Err(e) => {
             error!(
@@ -302,8 +348,11 @@ fn resolve_camera_frame_fd(
 
     Ok(ResolvedCameraFrame {
         plane_fd: fd.as_raw_fd(),
-        stride: plane0.stride,
-        offset: plane0.offset,
+        stride: camera_frame_u32("stride", stride)?,
+        offset: camera_frame_u32("offset", offset)?,
+        width: camera_frame_nonzero_u32("width", width)?,
+        height: camera_frame_nonzero_u32("height", height)?,
+        format,
         _fd_guard: fd,
         frame,
     })
