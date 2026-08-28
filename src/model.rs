@@ -357,6 +357,7 @@ fn guess_modelpack_segmentation(
     None
 }
 
+#[allow(clippy::needless_late_init)]
 fn guess_yolo_detection(
     shape: [&[usize]; 1],
     quant: [&Option<(f32, i32)>; 1],
@@ -401,6 +402,7 @@ fn guess_yolo_detection(
     })
 }
 
+#[allow(clippy::needless_late_init)]
 fn guess_modelpack_detection(
     shape: [&[usize]; 2],
     quant: [&Option<(f32, i32)>; 2],
@@ -555,6 +557,7 @@ fn guess_modelpack_segmentation_2(
     })
 }
 
+#[allow(clippy::needless_late_init)]
 fn guess_yolo_segdet(
     shape: [&[usize]; 2],
     quant: [&Option<(f32, i32)>; 2],
@@ -634,6 +637,7 @@ fn guess_yolo_segdet(
     })
 }
 
+#[allow(clippy::needless_late_init)]
 fn guess_yolo_split_det(
     shape: [&[usize]; 2],
     quant: [&Option<(f32, i32)>; 2],

@@ -503,7 +503,7 @@ mod tests {
     use super::*;
     use crate::args::LabelSetting;
     use edgefirst_hal::decoder::{BoundingBox, DetectBox};
-    use edgefirst_schemas::edgefirst_msgs::{CameraFrame, CameraPlaneView};
+    use edgefirst_schemas::edgefirst_msgs::{CameraFrame, TensorFields, TensorPlaneView};
     use std::path::PathBuf;
 
     fn sample_box(label: usize, score: f32) -> DetectBox {
@@ -634,35 +634,54 @@ mod tests {
 
     #[test]
     fn camera_frame_cdr_roundtrip_planes() {
-        let plane = CameraPlaneView {
-            fd: 7,
+        const TENSOR_STORAGE_KIND_DMA_BUF: u32 = 2;
+        const TENSOR_DTYPE_U8: u32 = 0;
+        let shape = [1080u64, 1920];
+        let strides = [3840i64, 2];
+        let plane = TensorPlaneView {
+            handle: 7,
             offset: 0,
             stride: 3840,
             size: 1920 * 1080 * 2,
             used: 1920 * 1080 * 2,
+            modifier: 0,
+            handle_bytes: &[],
             data: &[],
+        };
+        let tensor = TensorFields {
+            storage_kind: TENSOR_STORAGE_KIND_DMA_BUF,
+            pid: 1234,
+            fence_fd: -1,
+            dtype: TENSOR_DTYPE_U8,
+            quant_axis: -2,
+            shape: &shape,
+            strides: &strides,
+            quant_scales: &[],
+            quant_zero_points: &[],
+            format: "YUYV".into(),
+            color_space: "".into(),
+            color_transfer: "".into(),
+            color_encoding: "".into(),
+            color_range: "".into(),
+            planes: std::slice::from_ref(&plane),
         };
         let frame = CameraFrame::builder()
             .stamp(time_from_ns(42u32))
             .frame_id("camera")
             .seq(3)
-            .pid(1234)
-            .width(1920)
-            .height(1080)
-            .format("YUYV")
-            .planes(&[plane])
+            .tensor(&tensor)
             .build()
             .expect("camera frame");
-        let decoded = CameraFrame::from_cdr(frame.into_cdr()).unwrap();
-        assert_eq!(decoded.pid(), 1234);
-        assert_eq!(decoded.width(), 1920);
-        assert_eq!(decoded.height(), 1080);
-        assert_eq!(decoded.format(), "YUYV");
+        let decoded = CameraFrame::from_cdr(frame.to_cdr()).unwrap();
         assert_eq!(decoded.frame_id(), "camera");
-        let planes = decoded.planes();
-        assert_eq!(planes.len(), 1);
-        assert_eq!(planes[0].fd, 7);
-        assert_eq!(planes[0].stride, 3840);
+        let t = decoded.tensor();
+        assert_eq!(t.pid(), 1234);
+        assert_eq!(t.shape().collect::<Vec<_>>(), vec![1080, 1920]);
+        assert_eq!(t.format(), "YUYV");
+        assert_eq!(t.num_planes(), 1);
+        let plane = t.plane_at(0).unwrap();
+        assert_eq!(plane.handle, 7);
+        assert_eq!(plane.stride, 3840);
     }
 
     #[test]

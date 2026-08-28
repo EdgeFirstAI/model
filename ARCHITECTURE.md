@@ -339,7 +339,7 @@ graph LR
     end
 
     subgraph "Zenoh Message"
-        Meta["CameraFrame Metadata<br/>pid=100<br/>planes[0].fd=5<br/>width=1920<br/>height=1080<br/>format=YUYV"]
+        Meta["CameraFrame Tensor<br/>pid=100<br/>plane.handle=5<br/>shape=[1080,1920]<br/>format=YUYV"]
     end
 
     subgraph "Model Process (PID 200)"
@@ -372,25 +372,9 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization for eco
 ### CameraFrame Message (Subscribed)
 
 ```rust
-// edgefirst_msgs/CameraFrame (from edgefirst-schemas)
-// Buffer-backed zero-copy CDR view — field accessors shown conceptually.
-pub struct CameraFrame {
-    // header: stamp + frame_id
-    pub seq: u64,
-    pub pid: u32,                 // Source process ID (for PidFd transfer)
-    pub width: u32,
-    pub height: u32,
-    pub format: String,           // Pixel format string (e.g. "YUYV", "NV12")
-    pub planes: Vec<CameraPlane>, // DMA-BUF plane descriptors
-}
-
-pub struct CameraPlane {
-    pub fd: i32,                  // Source process file descriptor
-    pub offset: u32,
-    pub stride: u32,
-    pub size: u32,
-    pub used: u32,
-}
+// edgefirst_msgs/CameraFrame (edgefirst-schemas 4.0)
+// Layout: Header + seq + Tensor. Width/height from tensor.shape() as [h, w].
+// Format, pid, and DMA planes live on the tensor (plane.handle: i64).
 ```
 
 ---

@@ -5,6 +5,16 @@ All notable changes to EdgeFirst Model will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Upgrade `edgefirst-schemas` 3.5 → 4.0.0. CameraFrame ingest now reads the
+  embedded `Tensor` (`shape` `[h, w]`, `pid`, `TensorPlane.handle`) instead of
+  the removed frame-level `width`/`planes`/`pid` fields. Package version is
+  2.10.0.
+- Refresh remaining crates (zenoh 1.10, clap 4.6, tokio 1.53, Tracy 0.12/0.19).
+
 ## [2.9.0] - 2026-05-23
 
 ### Added
