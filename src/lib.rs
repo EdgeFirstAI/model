@@ -157,7 +157,12 @@ async fn heart_beat_loop(
         let msg = ZBytes::from(mask.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
-        match session.put(&args.mask_topic, msg).encoding(enc).await {
+        match session
+            .put(&args.mask_topic, msg)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             Ok(_) => (),
             Err(e) => {
                 error!("Error sending message on {}: {:?}", args.mask_topic, e)
@@ -177,7 +182,12 @@ async fn heart_beat_loop(
             time_from_ns(0u32),
         );
 
-        match session.put(&args.detect_topic, msg).encoding(enc).await {
+        match session
+            .put(&args.detect_topic, msg)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             Ok(_) => (),
             Err(e) => {
                 error!("Error sending message on {}: {:?}", args.detect_topic, e)
@@ -189,7 +199,12 @@ async fn heart_beat_loop(
     let msg = ZBytes::from(model_info_msg.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
 
-    match session.put(&args.info_topic, msg).encoding(enc).await {
+    match session
+        .put(&args.info_topic, msg)
+        .encoding(enc)
+        .timestamp(session.new_timestamp())
+        .await
+    {
         Ok(_) => (),
         Err(e) => {
             error!("Error sending message on {}: {:?}", args.info_topic, e)
@@ -207,7 +222,12 @@ async fn heart_beat_loop(
             LabelSetting::Index,
         );
 
-        match session.put(&args.visual_topic, msg).encoding(enc).await {
+        match session
+            .put(&args.visual_topic, msg)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             Ok(_) => trace!("Sent message on {}", args.visual_topic),
             Err(e) => {
                 error!("Error sending message on {}: {:?}", args.visual_topic, e)

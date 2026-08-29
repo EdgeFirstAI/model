@@ -282,25 +282,37 @@ mod tests {
     use clap::Parser;
 
     fn parse_defaults() -> Args {
-        Args::parse_from(["edgefirst-model", "--model", "/dev/null"])
+        Args::parse_from([
+            "edgefirst-model",
+            "--model",
+            "/dev/null",
+            "--output-topic",
+            "model/output",
+            "--info-topic",
+            "model/info",
+            "--visual-topic",
+            "model/visualization",
+            "--camera-info-topic",
+            "camera/info",
+            "--camera-topic",
+            "camera/frame",
+        ])
     }
 
     #[test]
     fn zenoh_config_sets_namespace() {
-        let cfg = Config::from(parse_defaults());
-        let ns: String = serde_json::from_str(&cfg.to_string())
-            .ok()
-            .and_then(|v: serde_json::Value| {
-                v.pointer("/namespace")
-                    .and_then(|n| n.as_str().map(String::from))
-            })
-            .expect("namespace should be set in config");
+        let ns = zenoh_namespace();
         assert!(!ns.is_empty(), "namespace should be non-empty");
         assert!(!ns.contains('/'), "namespace must not contain '/'");
+        let rendered = Config::from(parse_defaults()).to_string();
+        assert!(
+            rendered.contains(&ns),
+            "config should include namespace {ns}: {rendered}"
+        );
     }
 
     #[test]
-    fn default_topics_have_no_rt_prefix() {
+    fn cli_topics_have_no_rt_prefix() {
         let args = parse_defaults();
         assert_eq!(args.output_topic, "model/output");
         assert_eq!(args.info_topic, "model/info");

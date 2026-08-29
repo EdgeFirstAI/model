@@ -394,7 +394,7 @@ pub async fn main() -> ExitCode {
             .await
             .unwrap();
         let (mask_tx, mask_rx) = mpsc::channel(50);
-        tokio::spawn(mask_thread(mask_rx, publ_mask));
+        tokio::spawn(mask_thread(mask_rx, publ_mask, session.clone()));
         Some(mask_tx)
     } else {
         info!("Legacy mask topic disabled (empty MASK_TOPIC)");
@@ -712,7 +712,12 @@ pub async fn main() -> ExitCode {
                 time_from_ns(decode_duration.as_nanos()),
             );
 
-            match publ_detect.put(msg).encoding(enc).await {
+            match publ_detect
+                .put(msg)
+                .encoding(enc)
+                .timestamp(session.new_timestamp())
+                .await
+            {
                 Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
                 Err(e) => {
                     error!(
@@ -735,7 +740,12 @@ pub async fn main() -> ExitCode {
                 args.labels,
             );
 
-            match publ_visual.put(msg).encoding(enc).await {
+            match publ_visual
+                .put(msg)
+                .encoding(enc)
+                .timestamp(session.new_timestamp())
+                .await
+            {
                 Ok(_) => trace!("Sent message on {}", publ_visual.key_expr()),
                 Err(e) => {
                     error!(
@@ -763,7 +773,12 @@ pub async fn main() -> ExitCode {
         let msg = ZBytes::from(model_output.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Model");
 
-        match publ_output.put(msg).encoding(enc).await {
+        match publ_output
+            .put(msg)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
             Err(e) => {
                 error!(
@@ -780,7 +795,12 @@ pub async fn main() -> ExitCode {
         let msg = ZBytes::from(model_info_msg.as_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/ModelInfo");
 
-        if let Err(e) = publ_model_info.put(msg).encoding(enc).await {
+        if let Err(e) = publ_model_info
+            .put(msg)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             error!(
                 "Error sending message on {}: {:?}",
                 publ_model_info.key_expr(),

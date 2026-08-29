@@ -10,7 +10,11 @@ use zenoh::{
     pubsub::Publisher,
 };
 
-pub async fn mask_thread(mut rx: Receiver<Mask<Vec<u8>>>, publ_mask: Publisher<'_>) {
+pub async fn mask_thread(
+    mut rx: Receiver<Mask<Vec<u8>>>,
+    publ_mask: Publisher<'_>,
+    session: zenoh::Session,
+) {
     loop {
         let msg = match drain_recv(&mut rx).await {
             Some(v) => v,
@@ -20,7 +24,12 @@ pub async fn mask_thread(mut rx: Receiver<Mask<Vec<u8>>>, publ_mask: Publisher<'
         let buf = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
-        match publ_mask.put(buf).encoding(enc).await {
+        match publ_mask
+            .put(buf)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+        {
             Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
             Err(e) => {
                 error!("Error sending message on {}: {:?}", publ_mask.key_expr(), e)

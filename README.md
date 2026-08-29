@@ -183,8 +183,8 @@ edgefirst-model \
 ```bash
 edgefirst-model \
   --model model.tflite \
-  --detect-topic rt/model/boxes2d \
-  --mask-topic rt/model/mask
+  --detect-topic model/boxes2d \
+  --mask-topic model/mask
 ```
 
 ---
@@ -195,22 +195,25 @@ edgefirst-model \
 
 The model node publishes standard ROS2 message types using CDR serialization, ensuring seamless integration with existing ROS2 ecosystems:
 
+Application keys are bare (`model/output`). The Zenoh session namespace
+prefixes the system hostname on the wire (`{hostname}/model/output`).
+
 **Published Topics:**
 
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
-| `rt/model/output` | `edgefirst_msgs/Model` | **Unified model output** with boxes, masks, and timing |
-| `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model metadata, timing, and performance metrics |
-| `rt/model/visualization` | `foxglove_msgs/ImageAnnotations` | Foxglove-compatible visualization overlays |
-| *(disabled)* | `edgefirst_msgs/Detect` | Legacy detection boxes (set `DETECT_TOPIC=rt/model/boxes2d` to enable) |
-| *(disabled)* | `edgefirst_msgs/Mask` | Legacy segmentation masks (set `MASK_TOPIC=rt/model/mask` to enable) |
+| `model/output` | `edgefirst_msgs/Model` | **Unified model output** with boxes, masks, and timing |
+| `model/info` | `edgefirst_msgs/ModelInfo` | Model metadata, timing, and performance metrics |
+| `model/visualization` | `foxglove_msgs/ImageAnnotations` | Foxglove-compatible visualization overlays |
+| *(disabled)* | `edgefirst_msgs/Detect` | Legacy detection boxes (set `DETECT_TOPIC=model/boxes2d` to enable) |
+| *(disabled)* | `edgefirst_msgs/Mask` | Legacy segmentation masks (set `MASK_TOPIC=model/mask` to enable) |
 
 **Subscribed Topics:**
 
 | Topic (default) | Message Type | Description |
 |----------------|--------------|-------------|
 | `camera/frame` | `edgefirst_msgs/CameraFrame` | Zero-copy camera frames (DMA-BUF planes) |
-| `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera resolution and calibration info |
+| `camera/info` | `sensor_msgs/CameraInfo` | Camera resolution and calibration info |
 
 **ROS2 Bridge Integration:**
 
@@ -226,7 +229,7 @@ zenoh-bridge-dds
 
 # View with ROS2 tools
 ros2 topic list
-ros2 topic echo /rt/model/boxes2d
+ros2 topic echo /model/boxes2d
 rviz2  # Visualize detections
 ```
 
@@ -257,7 +260,7 @@ graph LR
     end
 
     subgraph "Output"
-        Pub["Zenoh Publisher<br/>rt/model/output"]
+        Pub["Zenoh Publisher<br/>model/output"]
     end
 
     DMA --> Convert
@@ -395,9 +398,9 @@ The model node supports both semantic segmentation and instance segmentation:
 - Output: Bounding box + mask for each detected object
 - Example: YOLOv8-seg
 
-### Unified Model Output (`rt/model/output`)
+### Unified Model Output (`model/output`)
 
-The `rt/model/output` topic publishes an `edgefirst_msgs/Model` message that combines detection boxes, segmentation masks, and detailed timing information in a single message. It is published on every frame for **all model types** (detection, semantic segmentation, and instance segmentation).
+The `model/output` topic publishes an `edgefirst_msgs/Model` message that combines detection boxes, segmentation masks, and detailed timing information in a single message. It is published on every frame for **all model types** (detection, semantic segmentation, and instance segmentation).
 
 **How it handles each model type:**
 
@@ -415,10 +418,10 @@ The `Model` message also includes per-stage timing fields (`input_time`, `model_
 
 Prior to the unified output, detection results and segmentation masks were published on separate topics. These legacy topics are now **disabled by default** and must be explicitly enabled via environment variable or CLI flag:
 
-- **`rt/model/boxes2d`** (`edgefirst_msgs/Detect`) — Enable with `DETECT_TOPIC=rt/model/boxes2d` or `--detect-topic rt/model/boxes2d`. Contains bounding boxes with scores, labels, and tracks, plus timing fields using `Time`. Does not include any mask data.
-- **`rt/model/mask`** (`edgefirst_msgs/Mask`) — Enable with `MASK_TOPIC=rt/model/mask` or `--mask-topic rt/model/mask`. Publishes a single full-frame mask for semantic segmentation models only.
+- **`model/boxes2d`** (`edgefirst_msgs/Detect`) — Enable with `DETECT_TOPIC=model/boxes2d` or `--detect-topic model/boxes2d`. Contains bounding boxes with scores, labels, and tracks, plus timing fields using `Time`. Does not include any mask data.
+- **`model/mask`** (`edgefirst_msgs/Mask`) — Enable with `MASK_TOPIC=model/mask` or `--mask-topic model/mask`. Publishes a single full-frame mask for semantic segmentation models only.
 
-New subscribers should prefer `rt/model/output` which provides a complete view of all model outputs in a single message.
+New subscribers should prefer `model/output` which provides a complete view of all model outputs in a single message.
 
 ---
 
@@ -453,17 +456,17 @@ edgefirst-model --help
 **Topic Configuration:**
 
 - `--camera-topic <TOPIC>` - Camera frame topic (default: `camera/frame`)
-- `--output-topic <TOPIC>` - Unified model output topic (default: `rt/model/output`)
-- `--info-topic <TOPIC>` - Model info topic (default: `rt/model/info`)
+- `--output-topic <TOPIC>` - Unified model output topic (default: `model/output`)
+- `--info-topic <TOPIC>` - Model info topic (default: `model/info`)
 - `--detect-topic <TOPIC>` - Legacy detection topic (default: empty/disabled)
 - `--mask-topic <TOPIC>` - Legacy mask topic (default: empty/disabled)
 
 **Visualization:**
 
 - `--visualization` - Enable Foxglove visualization messages
-- `--visual-topic <TOPIC>` - Visualization topic (default: `rt/model/visualization`)
+- `--visual-topic <TOPIC>` - Visualization topic (default: `model/visualization`)
 - `--labels <MODE>` - Label annotation mode: `index`, `label`, `score`, `label-score`, `track`
-- `--camera-info-topic <TOPIC>` - Camera info topic for resolution (default: `rt/camera/info`)
+- `--camera-info-topic <TOPIC>` - Camera info topic for resolution (default: `camera/info`)
 
 **Zenoh Configuration:**
 
@@ -487,8 +490,8 @@ export MODEL=/models/yolov8n.tflite
 export DELEGATE=/usr/lib/libvx_delegate.so
 export THRESHOLD=0.5
 export TRACK=true
-export OUTPUT_TOPIC=rt/model/output
-export DETECT_TOPIC=rt/model/boxes2d  # Re-enable legacy detect topic
+export OUTPUT_TOPIC=model/output
+export DETECT_TOPIC=model/boxes2d  # Re-enable legacy detect topic
 
 edgefirst-model  # Uses environment configuration
 ```
@@ -653,7 +656,7 @@ edgefirst-model --model model.tflite
 edgefirst-camera --camera /dev/video0 &
 
 # Check Zenoh connectivity
-zenoh-cli query "/rt/**"
+zenoh-cli query "**"
 
 # Verify camera frame topic matches
 edgefirst-model --model model.tflite --camera-topic camera/frame
@@ -698,7 +701,7 @@ edgefirst-model --model model.tflite --track --track-update 0.1
 edgefirst-model --model model.tflite --classes ""  # All classes
 
 # Check unified output for mask data
-z_sub -k "rt/model/output"
+z_sub -k "model/output"
 ```
 
 ### Logging
