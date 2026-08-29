@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Set the Zenoh session namespace to the system hostname and drop the `rt/`
+  prefix from default key expressions. Wire keys are `{hostname}/model/…`
+  (EDGEAI-1396).
 - Upgrade `edgefirst-schemas` 3.5 → 4.0.0. CameraFrame ingest now reads the
   embedded `Tensor` (`shape` `[h, w]`, `pid`, `TensorPlane.handle`) instead of
   the removed frame-level `width`/`planes`/`pid` fields.

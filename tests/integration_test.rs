@@ -36,8 +36,17 @@ const COLLECTION_DURATION: Duration = Duration::from_secs(10);
 /// slower than simpler services like the IMU.
 const STARTUP_DELAY: Duration = Duration::from_secs(10);
 
-/// Topic the model service publishes unified output to.
-const MODEL_OUTPUT_TOPIC: &str = "rt/model/output";
+/// Wire key the model service publishes to (`{hostname}/model/output`).
+/// The subscriber session has no namespace, so it must use the prefixed key.
+fn model_output_wire_topic() -> String {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    let host = if raw.is_empty() || raw.contains('/') {
+        "localhost".to_owned()
+    } else {
+        raw
+    };
+    format!("{host}/model/output")
+}
 
 /// Find the edgefirst-model binary.
 /// In CI, it's passed via environment variable. Locally, look in target directory.
@@ -150,7 +159,7 @@ fn test_model_inference() {
     let message_count_clone = message_count.clone();
 
     let subscriber = session
-        .declare_subscriber(MODEL_OUTPUT_TOPIC)
+        .declare_subscriber(model_output_wire_topic())
         .callback(move |sample| {
             // Try to decode the message
             match Model::from_cdr(sample.payload().to_bytes()) {

@@ -58,7 +58,7 @@ pub struct Args {
     pub detect_topic: String,
 
     /// Zenoh key expression for publishing model info
-    #[arg(long, env = "INFO_TOPIC", default_value = "rt/model/info")]
+    #[arg(long, env = "INFO_TOPIC", default_value = "model/info")]
     pub info_topic: String,
 
     /// Legacy: use --output-topic instead. Empty string disables publishing.
@@ -66,7 +66,7 @@ pub struct Args {
     pub mask_topic: String,
 
     /// Zenoh key expression for publishing unified model output
-    #[arg(long, env = "OUTPUT_TOPIC", default_value = "rt/model/output")]
+    #[arg(long, env = "OUTPUT_TOPIC", default_value = "model/output")]
     pub output_topic: String,
 
     /// Path to the inference model file (e.g., .tflite)
@@ -144,11 +144,11 @@ pub struct Args {
     pub visualization: bool,
 
     /// Zenoh key expression for publishing Foxglove visualization topic
-    #[arg(long, env = "VISUAL_TOPIC", default_value = "rt/model/visualization")]
+    #[arg(long, env = "VISUAL_TOPIC", default_value = "model/visualization")]
     pub visual_topic: String,
 
     /// Zenoh key expression for camera info (needed for visualization)
-    #[arg(long, env = "CAMERA_INFO_TOPIC", default_value = "rt/camera/info")]
+    #[arg(long, env = "CAMERA_INFO_TOPIC", default_value = "camera/info")]
     pub camera_info_topic: String,
 
     /// Filter output to only include these class labels (space-separated; empty = all)
@@ -216,9 +216,33 @@ fn parse_class_names(arg: &str) -> Result<Vec<String>, String> {
     Ok(arg.split_whitespace().map(String::from).collect())
 }
 
+/// System hostname used as the Zenoh session namespace.
+///
+/// Empty or `/`-containing hostnames would create unintended sub-keys, so we
+/// fall back to `"localhost"` and warn. Two devices both falling back would
+/// silently share a namespace; that is a deployment defect.
+fn zenoh_namespace() -> String {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    if raw.is_empty() || raw.contains('/') {
+        tracing::warn!(
+            hostname = %raw,
+            "system hostname is empty or contains '/' — falling back to \"localhost\""
+        );
+        "localhost".into()
+    } else {
+        raw
+    }
+}
+
 impl From<Args> for Config {
     fn from(args: Args) -> Self {
         let mut config = Config::default();
+
+        // Session namespace = hostname: application keys are bare
+        // (`model/output`) and the wire form is `{hostname}/model/output`.
+        config
+            .insert_json5("namespace", &json!(zenoh_namespace()).to_string())
+            .unwrap();
 
         config
             .insert_json5("mode", &json!(args.mode).to_string())
@@ -249,5 +273,39 @@ impl From<Args> for Config {
             .unwrap();
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse_defaults() -> Args {
+        Args::parse_from(["edgefirst-model", "--model", "/dev/null"])
+    }
+
+    #[test]
+    fn zenoh_config_sets_namespace() {
+        let cfg = Config::from(parse_defaults());
+        let ns: String = serde_json::from_str(&cfg.to_string())
+            .ok()
+            .and_then(|v: serde_json::Value| {
+                v.pointer("/namespace")
+                    .and_then(|n| n.as_str().map(String::from))
+            })
+            .expect("namespace should be set in config");
+        assert!(!ns.is_empty(), "namespace should be non-empty");
+        assert!(!ns.contains('/'), "namespace must not contain '/'");
+    }
+
+    #[test]
+    fn default_topics_have_no_rt_prefix() {
+        let args = parse_defaults();
+        assert_eq!(args.output_topic, "model/output");
+        assert_eq!(args.info_topic, "model/info");
+        assert_eq!(args.visual_topic, "model/visualization");
+        assert_eq!(args.camera_info_topic, "camera/info");
+        assert_eq!(args.camera_topic, "camera/frame");
     }
 }
