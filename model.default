@@ -116,23 +116,23 @@ VISUALIZATION="false"
 CAMERA_TOPIC="camera/frame"
 
 # Camera info subscription topic (needed when VISUALIZATION is enabled).
-CAMERA_INFO_TOPIC="rt/camera/info"
+CAMERA_INFO_TOPIC="camera/info"
 
 # Unified model output topic (boxes, masks, timing in a single message).
-OUTPUT_TOPIC="rt/model/output"
+OUTPUT_TOPIC="model/output"
 
 # Model metadata topic (model name, labels, input/output shapes).
-INFO_TOPIC="rt/model/info"
+INFO_TOPIC="model/info"
 
 # Foxglove visualization topic (when VISUALIZATION is enabled).
-VISUAL_TOPIC="rt/model/visualization"
+VISUAL_TOPIC="model/visualization"
 
 # Legacy detection topic. Empty string disables publishing. Set to
-# "rt/model/boxes2d" to re-enable for backwards compatibility.
+# "model/boxes2d" to re-enable for backwards compatibility.
 DETECT_TOPIC=""
 
 # Legacy mask topic. Empty string disables publishing. Set to
-# "rt/model/mask" to re-enable for backwards compatibility.
+# "model/mask" to re-enable for backwards compatibility.
 MASK_TOPIC=""
 
 # Space-separated class label names to include in output (empty = all classes).

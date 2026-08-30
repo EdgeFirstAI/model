@@ -52,12 +52,12 @@ graph TB
         MaskTask["Mask Processing Task<br/>(legacy publish, opt-in)"]
     end
 
-    subgraph "Zenoh Topics (Published)"
-        OutputTop["rt/model/output<br/>edgefirst_msgs/Model"]
-        InfoTop["rt/model/info<br/>edgefirst_msgs/ModelInfo"]
-        DetectTop["rt/model/boxes2d<br/>edgefirst_msgs/Detect (opt-in)"]
-        MaskTop["rt/model/mask<br/>edgefirst_msgs/Mask (opt-in)"]
-        VisualTop["rt/model/visualization<br/>foxglove_msgs/ImageAnnotations"]
+    subgraph "Zenoh Topics (Published, wire keys {hostname}/…)"
+        OutputTop["model/output<br/>edgefirst_msgs/Model"]
+        InfoTop["model/info<br/>edgefirst_msgs/ModelInfo"]
+        DetectTop["model/boxes2d<br/>edgefirst_msgs/Detect (opt-in)"]
+        MaskTop["model/mask<br/>edgefirst_msgs/Mask (opt-in)"]
+        VisualTop["model/visualization<br/>foxglove_msgs/ImageAnnotations"]
     end
 
     subgraph "Hardware Accelerators"
@@ -319,12 +319,12 @@ sequenceDiagram
     Model->>Model: Decoder: decode + NMS (edgefirst_hal)
     Model->>Model: ByteTrack update (edgefirst_tracker)
 
-    Model->>Zenoh: Model msg (rt/model/output)
+    Model->>Zenoh: Model msg (model/output)
     Note over Model: Unified output with boxes,<br/>masks, and timing
-    Model->>Zenoh: ModelInfo msg (rt/model/info)
+    Model->>Zenoh: ModelInfo msg (model/info)
     opt Legacy topics enabled
-    Model->>Zenoh: Detect msg (rt/model/boxes2d, opt-in)
-    Model->>Zenoh: Mask msg (rt/model/mask, opt-in)
+    Model->>Zenoh: Detect msg (model/boxes2d, opt-in)
+    Model->>Zenoh: Mask msg (model/mask, opt-in)
     end
 ```
 
@@ -412,7 +412,7 @@ pub struct Track {
 
 **Published Rate:** Same as camera FPS (typically 30 Hz)
 
-> **Note:** The `Detect` message is a legacy topic retained for backwards compatibility. New subscribers should use the unified `Model` message on `rt/model/output` instead (see below).
+> **Note:** The `Detect` message is a legacy topic retained for backwards compatibility. New subscribers should use the unified `Model` message on `model/output` instead (see below).
 
 ---
 
@@ -486,13 +486,13 @@ pub struct Mask {
 
 **Class Filtering:** The `--classes` argument filters detection boxes and their associated instance masks by label name (e.g. `CLASSES="person car"`). Semantic segmentation masks are not affected by this filter.
 
-> **Note:** The legacy `Mask` topic is disabled by default. Enable with `MASK_TOPIC=rt/model/mask` or `--mask-topic rt/model/mask`. It only publishes for semantic segmentation models. Instance segmentation masks were never published on this topic. The unified `Model` message on `rt/model/output` publishes masks for both semantic and instance segmentation.
+> **Note:** The legacy `Mask` topic is disabled by default. Enable with `MASK_TOPIC=model/mask` or `--mask-topic model/mask`. It only publishes for semantic segmentation models. Instance segmentation masks were never published on this topic. The unified `Model` message on `model/output` publishes masks for both semantic and instance segmentation.
 
 ---
 
 ### ImageAnnotations Message (Published, Optional)
 
-Foxglove Studio visualization overlays, enabled with `--visualization` flag. Bounding boxes are rendered as `LINE_LOOP` point annotations with class label text annotations. Coordinates are in absolute pixel space (scaled from normalized). Published on `rt/model/visualization`.
+Foxglove Studio visualization overlays, enabled with `--visualization` flag. Bounding boxes are rendered as `LINE_LOOP` point annotations with class label text annotations. Coordinates are in absolute pixel space (scaled from normalized). Published on `model/visualization`.
 
 ---
 

@@ -31,17 +31,17 @@ All topic key expressions are configurable via CLI arguments.
 | Topic (default)    | CLI flag                | Message Type                | Description                                                        |
 | ------------------ | ----------------------- | --------------------------- | ------------------------------------------------------------------ |
 | `camera/frame`     | `--camera-topic`        | `edgefirst_msgs/CameraFrame` | Camera frames with DMA-BUF plane metadata                         |
-| `rt/camera/info`   | `--camera-info-topic`   | `sensor_msgs/CameraInfo`   | Camera resolution info (only when `--visualization` is enabled)    |
+| `camera/info`   | `--camera-info-topic`   | `sensor_msgs/CameraInfo`   | Camera resolution info (only when `--visualization` is enabled)    |
 
 ### Published Topics
 
 | Topic (default)              | CLI flag / Env var                     | Message Type                       | Description                                                  |
 | ---------------------------- | -------------------------------------- | ---------------------------------- | ------------------------------------------------------------ |
-| `rt/model/output`            | `--output-topic` / `OUTPUT_TOPIC`      | `edgefirst_msgs/Model`             | Unified model output (boxes, masks, timing)                  |
-| `rt/model/info`              | `--info-topic` / `INFO_TOPIC`          | `edgefirst_msgs/ModelInfo`         | Model metadata                                               |
-| `rt/model/visualization`     | `--visual-topic` / `VISUAL_TOPIC`      | `foxglove_msgs/ImageAnnotations`   | Visualization overlays (when `--visualization` enabled)      |
-| *(disabled by default)*      | `--detect-topic` / `DETECT_TOPIC`      | `edgefirst_msgs/Detect`            | Legacy detection boxes (set to `rt/model/boxes2d` to enable) |
-| *(disabled by default)*      | `--mask-topic` / `MASK_TOPIC`          | `edgefirst_msgs/Mask`              | Legacy segmentation masks (set to `rt/model/mask` to enable) |
+| `model/output`            | `--output-topic` / `OUTPUT_TOPIC`      | `edgefirst_msgs/Model`             | Unified model output (boxes, masks, timing)                  |
+| `model/info`              | `--info-topic` / `INFO_TOPIC`          | `edgefirst_msgs/ModelInfo`         | Model metadata                                               |
+| `model/visualization`     | `--visual-topic` / `VISUAL_TOPIC`      | `foxglove_msgs/ImageAnnotations`   | Visualization overlays (when `--visualization` enabled)      |
+| *(disabled by default)*      | `--detect-topic` / `DETECT_TOPIC`      | `edgefirst_msgs/Detect`            | Legacy detection boxes (set to `model/boxes2d` to enable) |
+| *(disabled by default)*      | `--mask-topic` / `MASK_TOPIC`          | `edgefirst_msgs/Mask`              | Legacy segmentation masks (set to `model/mask` to enable) |
 
 ---
 
@@ -75,17 +75,17 @@ On-target testing requires:
 
 ```bash
 ./edgefirst-model --model model.tflite \
-  --detect-topic rt/model/boxes2d \
-  --mask-topic rt/model/mask
+  --detect-topic model/boxes2d \
+  --mask-topic model/mask
 ```
 
-### Test unified model output (`rt/model/output`)
+### Test unified model output (`model/output`)
 
 The unified `Model` message is published on every frame for all model types. Verify it with:
 
 ```bash
 # Subscribe to the unified output topic
-z_sub -k "rt/model/output"
+z_sub -k "model/output"
 ```
 
 **Detection model** — verify `boxes` is populated and `masks` is empty:
@@ -124,7 +124,7 @@ Integration tests in `tests/integration_test.rs` exercise the full inference pip
 
 | Test | Description |
 |------|-------------|
-| `test_model_inference` | Starts the model service, subscribes to `rt/model/output`, collects messages for 10s, validates `Model` messages have non-zero timing fields and rate >= 10 Hz |
+| `test_model_inference` | Starts the model service, subscribes to `model/output`, collects messages for 10s, validates `Model` messages have non-zero timing fields and rate >= 10 Hz |
 | `test_graceful_shutdown` | Starts the model service, sends SIGTERM, verifies clean exit within 5s |
 
 **Run manually on device:**
@@ -183,7 +183,7 @@ The model node auto-detects model configuration through the following resolution
 2. **Embedded metadata** -- The model file may contain an `edgefirst.yaml` entry with model configuration.
 3. **Shape-based heuristic guessing** -- When no config is found, the node inspects input/output tensor shapes to guess the model type (fallback).
 
-Once loaded, model metadata is published on the info topic (`rt/model/info` by default). Verify correct loading by subscribing to this topic and inspecting the `ModelInfo` message.
+Once loaded, model metadata is published on the info topic (`model/info` by default). Verify correct loading by subscribing to this topic and inspecting the `ModelInfo` message.
 
 ---
 
@@ -261,19 +261,19 @@ Use Zenoh CLI tools to monitor and verify pub/sub communication during testing.
 ### Subscribe to all model outputs
 
 ```bash
-z_sub -k "rt/model/**"
+z_sub -k "model/**"
 ```
 
 ### Subscribe to the unified model output
 
 ```bash
-z_sub -k "rt/model/output"
+z_sub -k "model/output"
 ```
 
 ### Subscribe to a specific legacy topic
 
 ```bash
-z_sub -k "rt/model/boxes2d"
+z_sub -k "model/boxes2d"
 ```
 
 ### Publish a test message
