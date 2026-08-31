@@ -7,16 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-08-31
+
 ### Changed
 
+- **Breaking**: ingest `CameraFrame` on the default `camera/frame` topic
+  instead of the deprecated `DmaBuffer` / `rt/camera/dma` path. Requires a
+  Camera publisher that speaks `camera/frame` (Camera 2.8+ for the schemas
+  4.0 tensor layout).
+- **Breaking**: drop the `rt/` prefix from default application key
+  expressions and set the Zenoh session namespace to the system hostname.
+  Wire keys are `{hostname}/model/…` (EDGEAI-1396).
 - Attach a Zenoh source timestamp on published model samples so the
   recorder can use publisher time instead of receive time.
-- Set the Zenoh session namespace to the system hostname and drop the `rt/`
-  prefix from default key expressions. Wire keys are `{hostname}/model/…`
-  (EDGEAI-1396).
-- Upgrade `edgefirst-schemas` 3.5 → 4.0.0. CameraFrame ingest now reads the
-  embedded `Tensor` (`shape` `[h, w]`, `pid`, `TensorPlane.handle`) instead of
-  the removed frame-level `width`/`planes`/`pid` fields.
+- Upgrade `edgefirst-schemas` → 4.0.0. CameraFrame ingest now reads the
+  embedded `Tensor` (`shape` `[h, w]`, `pid`, `TensorPlane.handle`) instead
+  of the removed frame-level `width`/`planes`/`pid` fields.
+- Upgraded core dependencies: `edgefirst-hal` 0.23 → 0.28,
+  `edgefirst-tracker` 0.23 → 0.28, `ara2` 0.10 → 0.16, and `zenoh`
+  1.7 → 1.10.
+
+### Fixed
+
+- Reject invalid `CameraFrame` tensor dimensions and plane handles instead
+  of silently mis-decoding frames (EDGEAI-1422).
 
 ## [2.9.0] - 2026-05-23
 
