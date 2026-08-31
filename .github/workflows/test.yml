@@ -236,26 +236,35 @@ jobs:
       - name: Download model file
         run: |
           mkdir -p models
+          # Official EdgeFirst Model Zoo (same pin as meta-edgefirst
+          # edgefirst-modelzoo_1.0.0.bb for mx8mp / i.MX 8M Plus).
+          MODEL_REV=9e30a2b170b0964c266a326b6cb63b31e176ca42
+          MODEL_FILE=yolov8n-det-int8-smart.tflite
+          MODEL_SHA256=3baa07a3f7f776bfda360bb284226441f4567d5db29cbbad8bd76a46aba5c5bc
+          MODEL_URL="https://huggingface.co/EdgeFirst/yolov8-det/resolve/${MODEL_REV}/tflite/${MODEL_FILE}"
+          MODEL_PATH="models/${MODEL_FILE}"
+
           # Retry on transient DNS/network failures. The NXP walnascar BSP
           # routes DNS through Connman's dnsproxy on 127.0.0.1, which
           # intermittently loses its upstreams after link flaps and returns
           # SERVFAIL/timeout (curl exit 6). --retry-all-errors is required
           # because curl does NOT retry resolve failures by default;
           # --connect-timeout bounds each attempt so we fail fast.
-          # yolov8n_640x640.tflite was removed from the model repo; use the
-          # current VX-compatible YOLOv8n package published for i.MX 8M Plus.
-          MODEL_FILE=yolov8n-t-27e5_quant-u8-i8_smart.tflite
           curl -fSL \
             --retry 5 --retry-delay 10 --retry-all-errors \
             --connect-timeout 15 --max-time 180 \
-            -o "models/${MODEL_FILE}" \
-            "https://repo.edgefirst.ai/models/yolov8/${MODEL_FILE}"
+            -o "${MODEL_PATH}" \
+            "${MODEL_URL}"
+
+          echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum -c -
           echo "Model downloaded:"
-          ls -lh "models/${MODEL_FILE}"
+          ls -lh "${MODEL_PATH}"
+
+          # Single source of truth for subsequent steps (Copilot review).
+          echo "MODEL=${MODEL_PATH}" >> "$GITHUB_ENV"
 
       - name: Run hardware integration tests
         env:
-          MODEL: models/yolov8n-t-27e5_quant-u8-i8_smart.tflite
           DELEGATE: /usr/lib/libvx_delegate.so
         run: |
           # Set up profraw collection directory for coverage
@@ -264,6 +273,8 @@ jobs:
 
           # Set the binary location for integration tests
           export MODEL_BINARY="instrumented-binaries/edgefirst-model"
+
+          echo "Using MODEL=${MODEL}"
 
           # Track overall test status
           TEST_FAILED=0

@@ -134,7 +134,7 @@ Integration tests in `tests/integration_test.rs` exercise the full inference pip
 cargo test --test integration_test --no-run
 
 # Run with required environment variables
-MODEL=/path/to/yolov8n-t-27e5_quant-u8-i8_smart.tflite \
+MODEL=/path/to/yolov8n-det-int8-smart.tflite \
 DELEGATE=/usr/lib/libvx_delegate.so \
   cargo test --test integration_test -- --include-ignored --test-threads=1
 ```
