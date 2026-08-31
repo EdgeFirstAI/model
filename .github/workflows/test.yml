@@ -350,11 +350,13 @@ jobs:
           path: coverage-hardware/
 
       - name: Process profraw files into coverage report
+        env:
+          DOWNLOAD_HW_COV_OUTCOME: ${{ steps.download-hw-cov.outcome }}
         run: |
           echo "=== Downloaded llvm-cov-target directory ==="
           ls -la target/llvm-cov-target/ || echo "Directory not found"
 
-          if [ "${{ steps.download-hw-cov.outcome }}" != "success" ]; then
+          if [ "$DOWNLOAD_HW_COV_OUTCOME" != "success" ]; then
             echo "WARNING: coverage-hardware artifact missing (hardware job likely failed before upload) - skipping coverage"
             exit 0
           fi
