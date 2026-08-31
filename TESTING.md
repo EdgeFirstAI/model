@@ -134,7 +134,7 @@ Integration tests in `tests/integration_test.rs` exercise the full inference pip
 cargo test --test integration_test --no-run
 
 # Run with required environment variables
-MODEL=/path/to/yolov8n_640x640.tflite \
+MODEL=/path/to/yolov8n-det-int8-smart.tflite \
 DELEGATE=/usr/lib/libvx_delegate.so \
   cargo test --test integration_test -- --include-ignored --test-threads=1
 ```
@@ -154,7 +154,7 @@ Phase 1: BUILD (GitHub ARM Runner)
 
 Phase 2: RUN (imx8mpevk Self-Hosted Runner)
 ├── Download instrumented binaries
-├── Download model file from repo.edgefirst.ai
+├── Download model from Hugging Face EdgeFirst Model Zoo
 ├── Run integration tests with LLVM_PROFILE_FILE set
 ├── Collect profraw files from service + test processes
 └── Upload artifacts: profraw files, test output

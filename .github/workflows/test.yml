@@ -236,6 +236,14 @@ jobs:
       - name: Download model file
         run: |
           mkdir -p models
+          # Official EdgeFirst Model Zoo (same pin as meta-edgefirst
+          # edgefirst-modelzoo_1.0.0.bb for mx8mp / i.MX 8M Plus).
+          MODEL_REV=9e30a2b170b0964c266a326b6cb63b31e176ca42
+          MODEL_FILE=yolov8n-det-int8-smart.tflite
+          MODEL_SHA256=3baa07a3f7f776bfda360bb284226441f4567d5db29cbbad8bd76a46aba5c5bc
+          MODEL_URL="https://huggingface.co/EdgeFirst/yolov8-det/resolve/${MODEL_REV}/tflite/${MODEL_FILE}"
+          MODEL_PATH="models/${MODEL_FILE}"
+
           # Retry on transient DNS/network failures. The NXP walnascar BSP
           # routes DNS through Connman's dnsproxy on 127.0.0.1, which
           # intermittently loses its upstreams after link flaps and returns
@@ -245,14 +253,18 @@ jobs:
           curl -fSL \
             --retry 5 --retry-delay 10 --retry-all-errors \
             --connect-timeout 15 --max-time 180 \
-            -o models/yolov8n_640x640.tflite \
-            https://repo.edgefirst.ai/models/yolov8/yolov8n_640x640.tflite
+            -o "${MODEL_PATH}" \
+            "${MODEL_URL}"
+
+          echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum -c -
           echo "Model downloaded:"
-          ls -lh models/yolov8n_640x640.tflite
+          ls -lh "${MODEL_PATH}"
+
+          # Single source of truth for subsequent steps (Copilot review).
+          echo "MODEL=${MODEL_PATH}" >> "$GITHUB_ENV"
 
       - name: Run hardware integration tests
         env:
-          MODEL: models/yolov8n_640x640.tflite
           DELEGATE: /usr/lib/libvx_delegate.so
         run: |
           # Set up profraw collection directory for coverage
@@ -261,6 +273,8 @@ jobs:
 
           # Set the binary location for integration tests
           export MODEL_BINARY="instrumented-binaries/edgefirst-model"
+
+          echo "Using MODEL=${MODEL}"
 
           # Track overall test status
           TEST_FAILED=0
@@ -339,15 +353,24 @@ jobs:
           path: target/llvm-cov-target/
 
       - name: Download hardware coverage artifacts
+        id: download-hw-cov
+        continue-on-error: true
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
           name: coverage-hardware
           path: coverage-hardware/
 
       - name: Process profraw files into coverage report
+        env:
+          DOWNLOAD_HW_COV_OUTCOME: ${{ steps.download-hw-cov.outcome }}
         run: |
           echo "=== Downloaded llvm-cov-target directory ==="
           ls -la target/llvm-cov-target/ || echo "Directory not found"
+
+          if [ "$DOWNLOAD_HW_COV_OUTCOME" != "success" ]; then
+            echo "WARNING: coverage-hardware artifact missing (hardware job likely failed before upload) - skipping coverage"
+            exit 0
+          fi
 
           echo ""
           echo "=== Profraw files from hardware ==="
