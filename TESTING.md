@@ -154,7 +154,7 @@ Phase 1: BUILD (GitHub ARM Runner)
 
 Phase 2: RUN (imx8mpevk Self-Hosted Runner)
 ├── Download instrumented binaries
-├── Download model file from repo.edgefirst.ai
+├── Download model from Hugging Face EdgeFirst Model Zoo
 ├── Run integration tests with LLVM_PROFILE_FILE set
 ├── Collect profraw files from service + test processes
 └── Upload artifacts: profraw files, test output
