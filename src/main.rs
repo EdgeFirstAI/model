@@ -347,9 +347,18 @@ pub async fn main() -> ExitCode {
             | YoloSplitSegDet { .. }
             | YoloEndToEndSegDet { .. }
             | YoloSplitEndToEndSegDet { .. } => (true, false, true),
-            PerScale => (true, false, false),
+            // Per-scale YOLO-seg still reports PerScale; instance crops come
+            // from the HAL decoder. Trust embedded mask_coefs/protos metadata.
+            PerScale => (
+                true,
+                false,
+                runtime::config_declares_instance_masks(info.config.as_ref()),
+            ),
         }
     };
+    info!(
+        "Decoder model_type={model_type_:?} has_box={has_box} has_seg={has_seg} has_instance_seg={has_instance_seg}"
+    );
 
     drop(tx);
 
@@ -769,6 +778,7 @@ pub async fn main() -> ExitCode {
             output_duration,
             decode_duration.as_nanos(),
             has_instance_seg,
+            has_seg,
         );
         let msg = ZBytes::from(model_output.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Model");

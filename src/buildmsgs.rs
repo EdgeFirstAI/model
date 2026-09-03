@@ -343,6 +343,7 @@ pub fn build_model_output_msg(
     output_duration: u128,
     decode_duration: u128,
     has_instance_seg: bool,
+    has_seg: bool,
 ) -> ModelMsg<Vec<u8>> {
     let mut label_strings = Vec::new();
     let mut track_ids = Vec::new();
@@ -358,12 +359,20 @@ pub fn build_model_output_msg(
     let mut mask_data: Vec<Vec<u8>> = Vec::new();
     let mut mask_views: Vec<MaskView<'_>> = Vec::new();
     if has_instance_seg {
-        for seg in output_masks {
-            let _shape = seg.segmentation.shape();
+        if output_masks.len() > boxes.len() {
+            debug!(
+                "Dropping {} leftover instance crops ({} boxes, {} crops)",
+                output_masks.len() - boxes.len(),
+                boxes.len(),
+                output_masks.len()
+            );
+        }
+        let n = boxes.len().min(output_masks.len());
+        for seg in output_masks.iter().take(n) {
             let data: Vec<u8> = seg.segmentation.iter().copied().collect();
             mask_data.push(data);
         }
-        for (seg, data) in output_masks.iter().zip(mask_data.iter()) {
+        for (seg, data) in output_masks.iter().take(n).zip(mask_data.iter()) {
             let shape = seg.segmentation.shape();
             mask_views.push(MaskView {
                 height: shape[0] as u32,
@@ -374,7 +383,7 @@ pub fn build_model_output_msg(
                 boxed: true,
             });
         }
-    } else if !output_masks.is_empty() {
+    } else if has_seg && !output_masks.is_empty() {
         let seg = &output_masks[0];
         let shape = seg.segmentation.shape();
         mask_data.push(seg.segmentation.iter().copied().collect());
@@ -578,10 +587,107 @@ mod tests {
             300,
             400,
             false,
+            false,
         );
         assert_eq!(model.frame_id(), "cam0");
         assert_eq!(model.boxes_len(), 1);
         assert_eq!(model.masks_len(), 0);
+    }
+
+    fn instance_crop(
+        height: usize,
+        width: usize,
+        fill: u8,
+    ) -> edgefirst_hal::decoder::Segmentation {
+        edgefirst_hal::decoder::Segmentation {
+            xmin: 0.1,
+            ymin: 0.2,
+            xmax: 0.5,
+            ymax: 0.6,
+            segmentation: ndarray::Array3::from_elem((height, width, 1), fill),
+        }
+    }
+
+    #[test]
+    fn instance_path_emits_one_boxed_mask_per_box() {
+        let boxes = [sample_box(0, 0.9), sample_box(0, 0.8)];
+        let labels = vec!["person".to_string()];
+        let crops = [
+            instance_crop(2, 3, 200),
+            instance_crop(4, 4, 210),
+            instance_crop(1, 1, 255),
+        ];
+        let model = build_model_output_msg(
+            &boxes,
+            &[],
+            &labels,
+            &crops,
+            time_from_ns(0u32),
+            "cam0",
+            0,
+            0,
+            0,
+            0,
+            true,
+            false,
+        );
+        assert_eq!(model.boxes_len(), 2);
+        assert_eq!(model.masks_len(), 2, "leftover crops must not be published");
+        let cdr = model.into_cdr();
+        let parsed = ModelMsg::from_cdr(cdr).unwrap();
+        let masks = parsed.masks();
+        assert_eq!(masks.len(), 2);
+        assert!(masks.iter().all(|m| m.boxed));
+        assert_eq!((masks[0].height, masks[0].width), (2, 3));
+        assert_eq!((masks[1].height, masks[1].width), (4, 4));
+    }
+
+    #[test]
+    fn detection_only_does_not_publish_leftover_crops_as_semantic() {
+        let boxes = [sample_box(0, 0.9)];
+        let labels = vec!["person".to_string()];
+        let crops = [instance_crop(2, 3, 250)];
+        let model = build_model_output_msg(
+            &boxes,
+            &[],
+            &labels,
+            &crops,
+            time_from_ns(0u32),
+            "cam0",
+            0,
+            0,
+            0,
+            0,
+            false,
+            false,
+        );
+        assert_eq!(model.masks_len(), 0);
+    }
+
+    #[test]
+    fn semantic_path_publishes_first_mask_unboxed() {
+        let labels = vec!["person".to_string()];
+        let crops = [instance_crop(2, 2, 1)];
+        let model = build_model_output_msg(
+            &[],
+            &[],
+            &labels,
+            &crops,
+            time_from_ns(0u32),
+            "cam0",
+            0,
+            0,
+            0,
+            0,
+            false,
+            true,
+        );
+        assert_eq!(model.masks_len(), 1);
+        let cdr = model.into_cdr();
+        let parsed = ModelMsg::from_cdr(cdr).unwrap();
+        let mask = parsed.masks().into_iter().next().expect("semantic mask");
+        assert!(!mask.boxed);
+        assert_eq!((mask.height, mask.width), (2, 2));
     }
 
     #[test]

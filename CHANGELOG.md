@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.1] - 2026-09-03
+
+### Fixed
+
+- YOLO instance-segmentation models decoded as HAL `PerScale` now publish one
+  `boxed: true` mask per detection when the embedded schema has `mask_coefs`
+  or proto outputs, instead of a single leftover crop with `boxed: false`.
+- Shape guessing accepts proto spatial sizes down to 80 (80×80 as well as 160×160).
+
 ## [2.10.0] - 2026-08-31
 
 ### Changed
