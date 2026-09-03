@@ -43,6 +43,27 @@ pub enum EmbeddedConfig {
     Json(String),
 }
 
+impl EmbeddedConfig {
+    /// Decoder config text (YAML or JSON) as stored in the model archive.
+    pub fn as_text(&self) -> &str {
+        match self {
+            Self::Yaml(s) | Self::Json(s) => s,
+        }
+    }
+}
+
+/// True when the embedded decoder schema describes YOLO instance-mask tensors.
+///
+/// Schema v2 per-scale YOLO-seg models still decode as HAL [`PerScale`], so the
+/// node cannot rely on `ModelType` alone. `mask_coefs` / proto outputs are the
+/// instance-seg signal in both JSON and YAML embeddings.
+pub fn config_declares_instance_masks(config: Option<&EmbeddedConfig>) -> bool {
+    let Some(text) = config.map(EmbeddedConfig::as_text) else {
+        return false;
+    };
+    text.contains("mask_coefs") || text.contains("type: protos")
+}
+
 /// Model metadata extracted from the model file.
 #[derive(Debug, Clone)]
 pub struct ModelInfo {
@@ -256,5 +277,30 @@ pub fn create_runtime(
             crate::model::ModelErrorKind::Other,
             format!("Unsupported model format: {ext:?}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_mask_coefs_declares_instance_masks() {
+        let cfg =
+            EmbeddedConfig::Json(r#"{"outputs":[{"type":"mask_coefs"},{"type":"protos"}]}"#.into());
+        assert!(config_declares_instance_masks(Some(&cfg)));
+    }
+
+    #[test]
+    fn yaml_protos_declares_instance_masks() {
+        let cfg = EmbeddedConfig::Yaml("type: protos\n".into());
+        assert!(config_declares_instance_masks(Some(&cfg)));
+    }
+
+    #[test]
+    fn detection_only_config_does_not_declare_instance_masks() {
+        let cfg = EmbeddedConfig::Json(r#"{"task":"detection"}"#.into());
+        assert!(!config_declares_instance_masks(Some(&cfg)));
+        assert!(!config_declares_instance_masks(None));
     }
 }

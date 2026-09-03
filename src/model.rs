@@ -215,6 +215,9 @@ pub fn decode_outputs(
 // ── guess_model_config ───────────────────────────────────────────────────────
 
 const MIN_NUM_BOXES: usize = 256;
+/// Smallest proto H/W accepted as YOLO-seg (stride-8 640→80, not only 160).
+/// Must stay above typical proto channel counts (32) so those dims stay NumProtos.
+const MIN_PROTO_SPATIAL: usize = 80;
 #[instrument(skip_all)]
 pub fn guess_model_config(
     output_shapes: &[Vec<usize>],
@@ -582,11 +585,11 @@ fn guess_yolo_segdet(
         let mut found_height = false;
         for &dim in &shape0[1..] {
             match dim {
-                160.. if !found_height => {
+                MIN_PROTO_SPATIAL.. if !found_height => {
                     dshape_protos.push((DimName::Height, dim));
                     found_height = true;
                 }
-                160.. if found_height => {
+                MIN_PROTO_SPATIAL.. if found_height => {
                     dshape_protos.push((DimName::Width, dim));
                 }
                 d if num_protos == 0 => {
@@ -1151,6 +1154,27 @@ mod tests {
     fn guess_empty_shapes() {
         let config = guess_model_config(&[], &[]);
         assert!(config.is_none(), "Empty shapes should return None");
+    }
+
+    #[test]
+    fn guess_yolo_segdet_accepts_160_and_80_protos() {
+        let none = None;
+        for proto_hw in [160, 80] {
+            let proto = vec![1, proto_hw, proto_hw, 32];
+            let det = vec![1, 116, 8400];
+            assert!(
+                guess_yolo_segdet([&proto, &det], [&none, &none]).is_some(),
+                "YOLO-seg protos {proto_hw}x{proto_hw}x32 should match"
+            );
+        }
+        // 80×80 is below the ModelPack spatial floor, so the two-output
+        // dispatcher should land on YOLO-seg rather than ModelPack det.
+        let shapes = vec![vec![1, 80, 80, 32], vec![1, 116, 8400]];
+        let quants = vec![None, None];
+        assert!(
+            guess_model_config(&shapes, &quants).is_some(),
+            "80×80 proto + detection should guess a config"
+        );
     }
 
     #[test]
