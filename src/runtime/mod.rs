@@ -43,25 +43,41 @@ pub enum EmbeddedConfig {
     Json(String),
 }
 
-impl EmbeddedConfig {
-    /// Decoder config text (YAML or JSON) as stored in the model archive.
-    pub fn as_text(&self) -> &str {
-        match self {
-            Self::Yaml(s) | Self::Json(s) => s,
-        }
-    }
-}
-
 /// True when the embedded decoder schema describes YOLO instance-mask tensors.
 ///
 /// Schema v2 per-scale YOLO-seg models still decode as HAL [`PerScale`], so the
 /// node cannot rely on `ModelType` alone. `mask_coefs` / proto outputs are the
 /// instance-seg signal in both JSON and YAML embeddings.
 pub fn config_declares_instance_masks(config: Option<&EmbeddedConfig>) -> bool {
-    let Some(text) = config.map(EmbeddedConfig::as_text) else {
-        return false;
-    };
-    text.contains("mask_coefs") || text.contains("type: protos")
+    match config {
+        Some(EmbeddedConfig::Json(text)) => {
+            serde_json::from_str(text).is_ok_and(|value| json_declares_instance_masks(&value))
+        }
+        Some(EmbeddedConfig::Yaml(text)) => {
+            text.contains("mask_coefs")
+                || text.lines().any(|line| {
+                    line.trim_start_matches([' ', '-'])
+                        .split_once(':')
+                        .is_some_and(|(key, value)| {
+                            key.trim() == "type"
+                                && value.trim().trim_matches(['"', '\'']) == "protos"
+                        })
+                })
+        }
+        None => false,
+    }
+}
+
+fn json_declares_instance_masks(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+            (key == "type" && matches!(value.as_str(), Some("mask_coefs" | "protos")))
+                || key == "mask_coefs"
+                || json_declares_instance_masks(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_declares_instance_masks),
+        _ => false,
+    }
 }
 
 /// Model metadata extracted from the model file.
@@ -285,15 +301,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn json_mask_coefs_declares_instance_masks() {
-        let cfg =
-            EmbeddedConfig::Json(r#"{"outputs":[{"type":"mask_coefs"},{"type":"protos"}]}"#.into());
+    fn json_protos_only_declares_instance_masks() {
+        let cfg = EmbeddedConfig::Json(r#"{"outputs":[{"type": "protos"}]}"#.into());
         assert!(config_declares_instance_masks(Some(&cfg)));
     }
 
     #[test]
-    fn yaml_protos_declares_instance_masks() {
-        let cfg = EmbeddedConfig::Yaml("type: protos\n".into());
+    fn yaml_quoted_protos_declares_instance_masks() {
+        let cfg = EmbeddedConfig::Yaml("- type: \"protos\"\n".into());
+        assert!(config_declares_instance_masks(Some(&cfg)));
+    }
+
+    #[test]
+    fn json_mask_coefs_declares_instance_masks() {
+        let cfg = EmbeddedConfig::Json(r#"{"outputs":[{"type":"mask_coefs"}]}"#.into());
         assert!(config_declares_instance_masks(Some(&cfg)));
     }
 

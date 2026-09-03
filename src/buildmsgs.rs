@@ -12,7 +12,7 @@ use edgefirst_schemas::{
         point_annotation_type::{LINE_LOOP, UNKNOWN},
     },
 };
-use log::{debug, warn};
+use log::debug;
 use std::path::Path;
 use tracing::instrument;
 use zenoh::bytes::{Encoding, ZBytes};
@@ -360,7 +360,7 @@ pub fn build_model_output_msg(
     let mut mask_views: Vec<MaskView<'_>> = Vec::new();
     if has_instance_seg {
         if output_masks.len() > boxes.len() {
-            warn!(
+            debug!(
                 "Dropping {} leftover instance crops ({} boxes, {} crops)",
                 output_masks.len() - boxes.len(),
                 boxes.len(),
