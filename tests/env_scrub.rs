@@ -8,8 +8,8 @@
 //!
 //! `main` speaks the small subset of the libtest CLI that `cargo test` and
 //! `cargo nextest` use to enumerate (`--list --format terse`) and select
-//! (`--exact <name>`, `--ignored`, positional filters) tests, so the target
-//! is discovered and reported like any other test.
+//! (`--exact <name>`, `--ignored`, `--skip <pattern>`, positional filters)
+//! tests, so the target is discovered and reported like any other test.
 
 use clap::Parser;
 use edgefirst_model::args::{Args, KEEP, scrub_empty_env};
@@ -23,10 +23,9 @@ const VARS: [&str; 4] = ["THRESHOLD", "TRACK", "MAX_BOXES", "EDGEFIRST_CONFIG"];
 const ARGV: [&str; 3] = ["edgefirst-model", "--model", "x"];
 
 /// libtest flags that consume the following argument, so it is not a filter.
-const VALUE_FLAGS: [&str; 6] = [
+const VALUE_FLAGS: [&str; 5] = [
     "--test-threads",
     "--format",
-    "--skip",
     "--logfile",
     "--color",
     "--shuffle-seed",
@@ -38,6 +37,7 @@ struct Request {
     ignored: bool,
     exact: bool,
     filters: Vec<String>,
+    skips: Vec<String>,
 }
 
 fn parse_request(argv: impl IntoIterator<Item = String>) -> Request {
@@ -46,6 +46,7 @@ fn parse_request(argv: impl IntoIterator<Item = String>) -> Request {
         ignored: false,
         exact: false,
         filters: Vec::new(),
+        skips: Vec::new(),
     };
     let mut argv = argv.into_iter();
     while let Some(arg) = argv.next() {
@@ -53,25 +54,33 @@ fn parse_request(argv: impl IntoIterator<Item = String>) -> Request {
             "--list" => req.list = true,
             "--ignored" => req.ignored = true,
             "--exact" => req.exact = true,
+            "--skip" => req.skips.extend(argv.next()),
             flag if VALUE_FLAGS.contains(&flag) => {
                 argv.next();
             }
-            flag if flag.starts_with('-') => {}
+            flag if flag.starts_with('-') => {
+                if let Some(pattern) = flag.strip_prefix("--skip=") {
+                    req.skips.push(pattern.to_owned());
+                }
+            }
             filter => req.filters.push(filter.to_owned()),
         }
     }
     req
 }
 
+/// libtest matching: substring by default, equality under `--exact`.
+fn matches(req: &Request, pattern: &str) -> bool {
+    if req.exact {
+        pattern == TEST_NAME
+    } else {
+        TEST_NAME.contains(pattern)
+    }
+}
+
 fn selected(req: &Request) -> bool {
-    req.filters.is_empty()
-        || req.filters.iter().any(|f| {
-            if req.exact {
-                f == TEST_NAME
-            } else {
-                TEST_NAME.contains(f.as_str())
-            }
-        })
+    let filtered_in = req.filters.is_empty() || req.filters.iter().any(|f| matches(req, f));
+    filtered_in && !req.skips.iter().any(|s| matches(req, s))
 }
 
 fn main() {
