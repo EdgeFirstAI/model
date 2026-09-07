@@ -190,6 +190,23 @@ pub struct Args {
 /// same result as keeping it.
 pub const KEEP: &[&str] = &[];
 
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
 /// Treat an empty environment variable as unset, so clap's declared
 /// `default_value` applies instead of failing to parse.
 ///
@@ -201,15 +218,8 @@ pub const KEEP: &[&str] = &[];
 /// Must be called before any thread is spawned — that is, before the tokio
 /// runtime is built. Mutating the process environment is not thread-safe.
 pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
-    for arg in C::command().get_arguments() {
-        let Some(env) = arg.get_env() else { continue };
-        let name = env.to_string_lossy().into_owned();
-        if keep.contains(&name.as_str()) {
-            continue;
-        }
-        if matches!(std::env::var(&name), Ok(v) if v.is_empty()) {
-            unsafe { std::env::remove_var(&name) };
-        }
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        unsafe { std::env::remove_var(&name) };
     }
 }
 
@@ -311,15 +321,7 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Serialises tests that read or mutate the process environment. clap
-    /// consults env vars on every parse, so parsing tests must hold this too.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use std::collections::HashMap;
 
     /// Env-bound arguments with a non-empty default where we have consciously decided
     /// that an empty value is NOT meaningful (so scrubbing to the default is correct).
@@ -365,81 +367,63 @@ mod tests {
         }
     }
 
-    /// Restores the named environment variables to their prior values on drop,
-    /// so a failing assertion cannot leak state into other tests.
-    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvRestore {
-        fn capture(names: &[&'static str]) -> Self {
-            Self(names.iter().map(|n| (*n, std::env::var_os(n))).collect())
-        }
-    }
-
-    impl Drop for EnvRestore {
-        fn drop(&mut self) {
-            for (name, value) in self.0.drain(..) {
-                // SAFETY: caller holds ENV_LOCK; no other thread mutates env.
-                unsafe {
-                    match value {
-                        Some(v) => std::env::set_var(name, v),
-                        None => std::env::remove_var(name),
-                    }
-                }
-            }
-        }
+    /// Fake environment lookup for `empty_env_vars`: never touches the process.
+    fn fake_env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
     }
 
     #[test]
-    fn empty_env_vars_are_treated_as_unset() {
-        const VARS: &[&str] = &[
-            "MODEL",
-            "EDGEFIRST_CONFIG",
-            "DELEGATE",
-            "THRESHOLD",
-            "TRACK",
-        ];
-        let _guard = env_lock();
-        let _restore = EnvRestore::capture(VARS);
+    fn empty_env_var_is_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("THRESHOLD", "")]));
+        assert_eq!(empty, vec!["THRESHOLD".to_string()]);
+    }
 
-        // MODEL="" must still fail: scrubbing makes it absent and --model is
-        // required, so clap reports the missing argument rather than parsing "".
-        // SAFETY: ENV_LOCK is held and no runtime threads exist in this test.
-        unsafe {
-            for name in VARS {
-                std::env::set_var(name, "");
-            }
-            scrub_empty_env::<Args>(KEEP);
-        }
-        for name in VARS {
-            assert!(
-                std::env::var_os(name).is_none(),
-                "{name} should be scrubbed"
-            );
-        }
-        let err = Args::try_parse_from(["prog"]).expect_err("MODEL=\"\" must not parse");
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    #[test]
+    fn non_empty_env_var_is_not_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("THRESHOLD", "0.5")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
 
-        // With a real model path the remaining "" vars fall back to defaults.
-        // SAFETY: as above.
-        unsafe {
-            std::env::set_var("MODEL", "/dev/null");
-            std::env::set_var("EDGEFIRST_CONFIG", "");
-            std::env::set_var("DELEGATE", "");
-            std::env::set_var("THRESHOLD", "");
-            std::env::set_var("TRACK", "");
-            scrub_empty_env::<Args>(KEEP);
-        }
-        assert_eq!(std::env::var("MODEL").as_deref(), Ok("/dev/null"));
-        let args = Args::try_parse_from(["prog"]).expect("defaults should apply");
-        assert_eq!(args.model, PathBuf::from("/dev/null"));
-        assert_eq!(args.edgefirst_config(), None);
-        assert_eq!(args.delegate, "");
-        assert_eq!(args.threshold, 0.45);
-        assert!(!args.track);
+    #[test]
+    fn unset_env_var_is_not_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn kept_env_var_is_not_listed_even_when_empty() {
+        let empty = empty_env_vars::<Args>(&["THRESHOLD"], fake_env(&[("THRESHOLD", "")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn unbound_env_var_is_never_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("NOT_A_MODEL_ARG", "")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn only_empty_bound_vars_are_listed() {
+        let mut empty = empty_env_vars::<Args>(
+            KEEP,
+            fake_env(&[
+                ("MODEL", ""),
+                ("EDGEFIRST_CONFIG", ""),
+                ("THRESHOLD", "0.5"),
+                ("TRACK", ""),
+                ("MAX_BOXES", ""),
+                ("NOT_A_MODEL_ARG", ""),
+            ]),
+        );
+        empty.sort();
+        assert_eq!(empty, ["EDGEFIRST_CONFIG", "MAX_BOXES", "MODEL", "TRACK"]);
     }
 
     fn parse_defaults() -> Args {
-        let _guard = env_lock();
         Args::parse_from([
             "edgefirst-model",
             "--model",
