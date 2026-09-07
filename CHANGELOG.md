@@ -16,7 +16,7 @@ configuration-key changes from 2.10.1.
 
 - Empty environment variables in `/etc/default/model` (`KEY=""`) are now
   treated as unset so the documented default applies instead of failing to
-  start with a clap parse error (e.g. `EDGEFIRST_CONFIG=""`). `MODEL=""`
+  start with a clap parse error (e.g. `THRESHOLD=""`). `MODEL=""`
   still fails, as a model is required (EDGEAI-1094).
 
 ## [2.10.1] - 2026-09-03
