@@ -10,7 +10,7 @@ use edgefirst_hal::tensor::{
     CpuAccess, DType, PixelFormat, TensorDyn, TensorMapTrait, TensorTrait,
 };
 use edgefirst_model::{
-    args::Args,
+    args::{Args, KEEP, scrub_empty_env},
     buildmsgs::{
         build_detect_msg_and_encode_, build_image_annotations_msg_and_encode_,
         build_model_info_msg, build_model_output_msg, build_segmentation_msg_, time_from_ns,
@@ -111,8 +111,24 @@ fn populate_input_tensor(
     Ok(())
 }
 
-#[tokio::main]
-pub async fn main() -> ExitCode {
+pub fn main() -> ExitCode {
+    // SAFETY: single-threaded here; runs before the tokio runtime is built below.
+    unsafe { scrub_empty_env::<Args>(KEEP) };
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("failed to build tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(run())
+}
+
+async fn run() -> ExitCode {
     install_signal_handlers();
 
     let args = Args::parse();

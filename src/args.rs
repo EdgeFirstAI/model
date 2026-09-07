@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use zenoh::config::{Config, WhatAmI};
@@ -182,6 +182,37 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+/// Environment variables where an empty value is meaningful and must be preserved
+/// (i.e. the argument has a non-empty default but "" is a documented "disable" sentinel).
+///
+/// The model service has no such variables: every argument that accepts an
+/// empty value already declares `default_value = ""`, so scrubbing yields the
+/// same result as keeping it.
+pub const KEEP: &[&str] = &[];
+
+/// Treat an empty environment variable as unset, so clap's declared
+/// `default_value` applies instead of failing to parse.
+///
+/// Only variables bound to this program's own arguments are considered;
+/// unrelated process environment is left alone. `keep` names variables
+/// where an empty value is meaningful and must be preserved.
+///
+/// # Safety
+/// Must be called before any thread is spawned — that is, before the tokio
+/// runtime is built. Mutating the process environment is not thread-safe.
+pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
+    for arg in C::command().get_arguments() {
+        let Some(env) = arg.get_env() else { continue };
+        let name = env.to_string_lossy().into_owned();
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        if matches!(std::env::var(&name), Ok(v) if v.is_empty()) {
+            unsafe { std::env::remove_var(&name) };
+        }
+    }
+}
+
 impl Args {
     /// Returns the EdgeFirst config path, or `None` if empty / unset.
     pub fn edgefirst_config(&self) -> Option<&Path> {
@@ -280,8 +311,135 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serialises tests that read or mutate the process environment. clap
+    /// consults env vars on every parse, so parsing tests must hold this too.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Env-bound arguments with a non-empty default where we have consciously decided
+    /// that an empty value is NOT meaningful (so scrubbing to the default is correct).
+    const SCRUB_REVIEWED: &[&str] = &[
+        "CAMERA_TOPIC",
+        "INFO_TOPIC",
+        "OUTPUT_TOPIC",
+        "LABELS",
+        "THRESHOLD",
+        "IOU",
+        "MAX_BOXES",
+        "LABEL_OFFSET",
+        "TRACK",
+        "TRACK_EXTRA_LIFESPAN",
+        "TRACK_SCORE",
+        "TRACK_IOU",
+        "TRACK_UPDATE",
+        "VISUALIZATION",
+        "VISUAL_TOPIC",
+        "CAMERA_INFO_TOPIC",
+        "SSD_MODEL",
+        "TRACY",
+        "MODE",
+        "NO_MULTICAST_SCOUTING",
+    ];
+
+    #[test]
+    fn every_env_arg_is_either_scrubbable_or_explicitly_kept() {
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env() else { continue };
+            let name = env.to_string_lossy().into_owned();
+            let has_nonempty_default = arg
+                .get_default_values()
+                .first()
+                .is_some_and(|d| !d.is_empty());
+            if has_nonempty_default && !KEEP.contains(&name.as_str()) {
+                assert!(
+                    SCRUB_REVIEWED.contains(&name.as_str()),
+                    "{name} has a non-empty default; decide whether empty is meaningful \
+                     and add it to KEEP or SCRUB_REVIEWED"
+                );
+            }
+        }
+    }
+
+    /// Restores the named environment variables to their prior values on drop,
+    /// so a failing assertion cannot leak state into other tests.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvRestore {
+        fn capture(names: &[&'static str]) -> Self {
+            Self(names.iter().map(|n| (*n, std::env::var_os(n))).collect())
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                // SAFETY: caller holds ENV_LOCK; no other thread mutates env.
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(name, v),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_env_vars_are_treated_as_unset() {
+        const VARS: &[&str] = &[
+            "MODEL",
+            "EDGEFIRST_CONFIG",
+            "DELEGATE",
+            "THRESHOLD",
+            "TRACK",
+        ];
+        let _guard = env_lock();
+        let _restore = EnvRestore::capture(VARS);
+
+        // MODEL="" must still fail: scrubbing makes it absent and --model is
+        // required, so clap reports the missing argument rather than parsing "".
+        // SAFETY: ENV_LOCK is held and no runtime threads exist in this test.
+        unsafe {
+            for name in VARS {
+                std::env::set_var(name, "");
+            }
+            scrub_empty_env::<Args>(KEEP);
+        }
+        for name in VARS {
+            assert!(
+                std::env::var_os(name).is_none(),
+                "{name} should be scrubbed"
+            );
+        }
+        let err = Args::try_parse_from(["prog"]).expect_err("MODEL=\"\" must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+
+        // With a real model path the remaining "" vars fall back to defaults.
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("MODEL", "/dev/null");
+            std::env::set_var("EDGEFIRST_CONFIG", "");
+            std::env::set_var("DELEGATE", "");
+            std::env::set_var("THRESHOLD", "");
+            std::env::set_var("TRACK", "");
+            scrub_empty_env::<Args>(KEEP);
+        }
+        assert_eq!(std::env::var("MODEL").as_deref(), Ok("/dev/null"));
+        let args = Args::try_parse_from(["prog"]).expect("defaults should apply");
+        assert_eq!(args.model, PathBuf::from("/dev/null"));
+        assert_eq!(args.edgefirst_config(), None);
+        assert_eq!(args.delegate, "");
+        assert_eq!(args.threshold, 0.45);
+        assert!(!args.track);
+    }
 
     fn parse_defaults() -> Args {
+        let _guard = env_lock();
         Args::parse_from([
             "edgefirst-model",
             "--model",
