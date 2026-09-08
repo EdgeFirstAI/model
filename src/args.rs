@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use zenoh::config::{Config, WhatAmI};
@@ -182,6 +182,47 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+/// Environment variables where an empty value is meaningful and must be preserved
+/// (i.e. the argument has a non-empty default but "" is a documented "disable" sentinel).
+///
+/// The model service has no such variables: every argument that accepts an
+/// empty value already declares `default_value = ""`, so scrubbing yields the
+/// same result as keeping it.
+pub const KEEP: &[&str] = &[];
+
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
+/// Treat an empty environment variable as unset, so clap's declared
+/// `default_value` applies instead of failing to parse.
+///
+/// Only variables bound to this program's own arguments are considered;
+/// unrelated process environment is left alone. `keep` names variables
+/// where an empty value is meaningful and must be preserved.
+///
+/// # Safety
+/// Must be called before any thread is spawned — that is, before the tokio
+/// runtime is built. Mutating the process environment is not thread-safe.
+pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        unsafe { std::env::remove_var(&name) };
+    }
+}
+
 impl Args {
     /// Returns the EdgeFirst config path, or `None` if empty / unset.
     pub fn edgefirst_config(&self) -> Option<&Path> {
@@ -280,6 +321,107 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::collections::HashMap;
+
+    /// Env-bound arguments with a non-empty default where we have consciously decided
+    /// that an empty value is NOT meaningful (so scrubbing to the default is correct).
+    const SCRUB_REVIEWED: &[&str] = &[
+        "CAMERA_TOPIC",
+        "INFO_TOPIC",
+        "OUTPUT_TOPIC",
+        "LABELS",
+        "THRESHOLD",
+        "IOU",
+        "MAX_BOXES",
+        "LABEL_OFFSET",
+        "TRACK",
+        "TRACK_EXTRA_LIFESPAN",
+        "TRACK_SCORE",
+        "TRACK_IOU",
+        "TRACK_UPDATE",
+        "VISUALIZATION",
+        "VISUAL_TOPIC",
+        "CAMERA_INFO_TOPIC",
+        "SSD_MODEL",
+        "TRACY",
+        "MODE",
+        "NO_MULTICAST_SCOUTING",
+    ];
+
+    #[test]
+    fn every_env_arg_is_either_scrubbable_or_explicitly_kept() {
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env() else { continue };
+            let name = env.to_string_lossy().into_owned();
+            let has_nonempty_default = arg
+                .get_default_values()
+                .first()
+                .is_some_and(|d| !d.is_empty());
+            if has_nonempty_default && !KEEP.contains(&name.as_str()) {
+                assert!(
+                    SCRUB_REVIEWED.contains(&name.as_str()),
+                    "{name} has a non-empty default; decide whether empty is meaningful \
+                     and add it to KEEP or SCRUB_REVIEWED"
+                );
+            }
+        }
+    }
+
+    /// Fake environment lookup for `empty_env_vars`: never touches the process.
+    fn fake_env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    #[test]
+    fn empty_env_var_is_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("THRESHOLD", "")]));
+        assert_eq!(empty, vec!["THRESHOLD".to_string()]);
+    }
+
+    #[test]
+    fn non_empty_env_var_is_not_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("THRESHOLD", "0.5")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn unset_env_var_is_not_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn kept_env_var_is_not_listed_even_when_empty() {
+        let empty = empty_env_vars::<Args>(&["THRESHOLD"], fake_env(&[("THRESHOLD", "")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn unbound_env_var_is_never_listed() {
+        let empty = empty_env_vars::<Args>(KEEP, fake_env(&[("NOT_A_MODEL_ARG", "")]));
+        assert!(empty.is_empty(), "{empty:?}");
+    }
+
+    #[test]
+    fn only_empty_bound_vars_are_listed() {
+        let mut empty = empty_env_vars::<Args>(
+            KEEP,
+            fake_env(&[
+                ("MODEL", ""),
+                ("EDGEFIRST_CONFIG", ""),
+                ("THRESHOLD", "0.5"),
+                ("TRACK", ""),
+                ("MAX_BOXES", ""),
+                ("NOT_A_MODEL_ARG", ""),
+            ]),
+        );
+        empty.sort();
+        assert_eq!(empty, ["EDGEFIRST_CONFIG", "MAX_BOXES", "MODEL", "TRACK"]);
+    }
 
     fn parse_defaults() -> Args {
         Args::parse_from([

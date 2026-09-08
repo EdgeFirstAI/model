@@ -4,7 +4,7 @@ description = "EdgeFirst Model Node - AI inference service for EdgeFirst Percept
 repository = "https://github.com/EdgeFirstAI/model"
 homepage = "https://www.edgefirst.ai"
 license = "Apache-2.0"
-version = "2.10.1"
+version = "2.10.2"
 edition = "2024"
 
 [profile.release]
@@ -74,3 +74,7 @@ edgefirst-schemas = "4.0.0"
 image = "0.25"
 libc = "0.2"
 zenoh = "1.10.0"
+
+[[test]]
+name = "env_scrub"
+harness = false

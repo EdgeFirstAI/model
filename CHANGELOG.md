@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.2] - 2026-09-07
+
+Patch release for EDGEAI-1094. Argument parsing only; no wire-format or
+configuration-key changes from 2.10.1.
+
+### Fixed
+
+- Empty environment variables in `/etc/default/model` (`KEY=""`) are now
+  treated as unset so the documented default applies instead of failing to
+  start with a clap parse error (e.g. `THRESHOLD=""`). `MODEL=""`
+  still fails, as a model is required (EDGEAI-1094).
+
 ## [2.10.1] - 2026-09-03
 
 ### Fixed
