@@ -55,6 +55,7 @@ use zenoh::{
     handlers::FifoChannelHandler,
     pubsub::Subscriber,
     sample::Sample,
+    time::{NTP64, Timestamp},
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
@@ -160,7 +161,7 @@ async fn heart_beat_loop(
         match session
             .put(&args.mask_topic, msg)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(session, frame.stamp()))
             .await
         {
             Ok(_) => (),
@@ -185,7 +186,7 @@ async fn heart_beat_loop(
         match session
             .put(&args.detect_topic, msg)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(session, frame.stamp()))
             .await
         {
             Ok(_) => (),
@@ -202,7 +203,7 @@ async fn heart_beat_loop(
     match session
         .put(&args.info_topic, msg)
         .encoding(enc)
-        .timestamp(session.new_timestamp())
+        .timestamp(zenoh_timestamp(session, frame.stamp()))
         .await
     {
         Ok(_) => (),
@@ -225,7 +226,7 @@ async fn heart_beat_loop(
         match session
             .put(&args.visual_topic, msg)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(session, frame.stamp()))
             .await
         {
             Ok(_) => trace!("Sent message on {}", args.visual_topic),
@@ -233,6 +234,48 @@ async fn heart_beat_loop(
                 error!("Error sending message on {}: {:?}", args.visual_topic, e)
             }
         }
+    }
+}
+
+/// Converts a message `Time` to nanoseconds since the Unix epoch. Pre-epoch
+/// stamps (negative `sec`) clamp to zero.
+pub fn time_to_ns(stamp: Time) -> u64 {
+    if stamp.sec < 0 {
+        return 0;
+    }
+    stamp.sec as u64 * 1_000_000_000 + stamp.nanosec as u64
+}
+
+/// Builds the Zenoh sample timestamp for a message carrying `stamp`, so the
+/// sample timestamp and `header.stamp` denote the same instant (to NTP64
+/// resolution, about 0.23 ns). Uses the session's ZenohId so the sample is
+/// attributable to this producer.
+pub fn zenoh_timestamp(session: &Session, stamp: Time) -> Timestamp {
+    Timestamp::new(ntp64_from_time(stamp), session.zid().into())
+}
+
+fn ntp64_from_time(stamp: Time) -> NTP64 {
+    NTP64::from(Duration::from_nanos(time_to_ns(stamp)))
+}
+
+/// Camera stamp timeline fed to the tracker. The tracker expires tracks by
+/// comparing stamps, so a backward clock step would keep lost tracks alive
+/// until the clock caught up again; callers reset the tracker instead.
+#[derive(Debug, Default)]
+pub struct StampTimeline {
+    last: Option<u64>,
+}
+
+impl StampTimeline {
+    /// Records `stamp_ns` and returns how far it stepped back from the
+    /// previous stamp, or `None` when time did not move backward.
+    pub fn observe(&mut self, stamp_ns: u64) -> Option<u64> {
+        let step = self
+            .last
+            .filter(|&last| stamp_ns < last)
+            .map(|last| last - stamp_ns);
+        self.last = Some(stamp_ns);
+        step
     }
 }
 
@@ -394,4 +437,61 @@ pub(crate) async fn drain_recv<T>(rx: &mut Receiver<T>) -> Option<T> {
         msg = v;
     }
     Some(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn time(sec: i32, nanosec: u32) -> Time {
+        Time { sec, nanosec }
+    }
+
+    #[test]
+    fn test_time_to_ns_combines_fields() {
+        assert_eq!(time_to_ns(time(0, 0)), 0);
+        assert_eq!(
+            time_to_ns(time(1_790_000_000, 123_456_789)),
+            1_790_000_000_123_456_789
+        );
+    }
+
+    #[test]
+    fn test_time_to_ns_clamps_pre_epoch() {
+        assert_eq!(time_to_ns(time(-1, 999_999_999)), 0);
+    }
+
+    #[test]
+    fn test_ntp64_from_time_round_trips_within_resolution() {
+        for stamp in [
+            time(0, 1),
+            time(1_748_544_498, 0),
+            time(1_790_000_000, 123_456_789),
+            time(1_790_000_000, 999_999_999),
+        ] {
+            let decoded = ntp64_from_time(stamp).to_duration().as_nanos() as i128;
+            let expected = time_to_ns(stamp) as i128;
+            assert!(
+                (decoded - expected).abs() <= 1,
+                "{stamp:?} decoded to {decoded}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stamp_timeline_reports_backward_step() {
+        let mut timeline = StampTimeline::default();
+        assert_eq!(timeline.observe(1_000), None);
+        assert_eq!(timeline.observe(2_000), None);
+        assert_eq!(timeline.observe(500), Some(1_500));
+        assert_eq!(timeline.observe(600), None);
+    }
+
+    #[test]
+    fn test_stamp_timeline_ignores_forward_step_and_repeats() {
+        let mut timeline = StampTimeline::default();
+        assert_eq!(timeline.observe(1_000), None);
+        assert_eq!(timeline.observe(1_000), None);
+        assert_eq!(timeline.observe(41_054_973_000_000_000), None);
+    }
 }

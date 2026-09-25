@@ -308,7 +308,7 @@ pub fn build_detect_msg_and_encode_(
         boxes,
         tracks,
         labels,
-        curr_time,
+        stamp,
         &mut label_strings,
         &mut track_ids,
     );
@@ -592,6 +592,29 @@ mod tests {
         assert_eq!(model.frame_id(), "cam0");
         assert_eq!(model.boxes_len(), 1);
         assert_eq!(model.masks_len(), 0);
+    }
+
+    #[test]
+    fn build_detect_untracked_box_created_at_frame_stamp() {
+        let boxes = [sample_box(0, 0.9)];
+        let labels = vec!["person".to_string()];
+        let stamp = Time {
+            sec: 1_790_000_000,
+            nanosec: 123_456_789,
+        };
+        let (bytes, _) = build_detect_msg_and_encode_(
+            &boxes,
+            &[],
+            &labels,
+            stamp,
+            "cam0",
+            time_from_ns(10u32),
+            time_from_ns(20u32),
+            time_from_ns(30u32),
+        );
+        let detect = Detect::from_cdr(bytes.to_bytes().to_vec()).unwrap();
+        let created = detect.boxes()[0].track_created;
+        assert_eq!((created.sec, created.nanosec), (stamp.sec, stamp.nanosec));
     }
 
     fn instance_crop(

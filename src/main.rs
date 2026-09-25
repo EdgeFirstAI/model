@@ -10,6 +10,7 @@ use edgefirst_hal::tensor::{
     CpuAccess, DType, PixelFormat, TensorDyn, TensorMapTrait, TensorTrait,
 };
 use edgefirst_model::{
+    StampTimeline,
     args::{Args, KEEP, scrub_empty_env},
     buildmsgs::{
         build_detect_msg_and_encode_, build_image_annotations_msg_and_encode_,
@@ -19,7 +20,7 @@ use edgefirst_model::{
     letterbox::LetterboxTransform,
     masks::mask_thread,
     model::{ModelContext, camera_frame_to_tensor_dyn, decode_outputs, guess_model_config},
-    runtime, wait_for_camera_frame,
+    runtime, time_to_ns, wait_for_camera_frame, zenoh_timestamp,
 };
 use edgefirst_schemas::sensor_msgs::CameraInfo;
 use log::{error, info, trace, warn};
@@ -251,12 +252,13 @@ async fn run() -> ExitCode {
         name: info.name.clone().unwrap_or_default(),
     };
 
-    let mut tracker = edgefirst_tracker::ByteTrackBuilder::new()
+    let tracker_builder = edgefirst_tracker::ByteTrackBuilder::new()
         .track_extra_lifespan((args.track_extra_lifespan * 1_000_000_000.0) as u64)
         .track_high_conf(args.threshold)
         .track_iou(args.track_iou)
-        .track_update(args.track_update)
-        .build::<edgefirst_model::TrackerBox>();
+        .track_update(args.track_update);
+    let mut tracker = tracker_builder.build::<edgefirst_model::TrackerBox>();
+    let mut track_timeline = StampTimeline::default();
 
     if args.track && args.track_score >= args.threshold {
         warn!(
@@ -647,8 +649,14 @@ async fn run() -> ExitCode {
             let _span = info_span!("tracker_update").entered();
             use edgefirst_model::TrackerBox;
             use edgefirst_tracker::Tracker;
-            let stamp = frame.stamp();
-            let timestamp = stamp.nanosec as u64 + stamp.sec as u64 * 1_000_000_000;
+            let timestamp = time_to_ns(frame.stamp());
+            if let Some(step) = track_timeline.observe(timestamp) {
+                info!(
+                    "Camera stamp stepped back by {:.3} s (clock step); resetting tracks",
+                    step as f64 / 1e9
+                );
+                tracker = tracker_builder.build();
+            }
             let wrapped: Vec<_> = output_boxes.iter().map(|b| TrackerBox(*b)).collect();
             let track_results = tracker.update(&wrapped, timestamp);
 
@@ -720,7 +728,7 @@ async fn run() -> ExitCode {
         let _pub_span = info_span!("zenoh_publish").entered();
         if has_seg && let Some(mask_tx) = mask_tx.as_ref() {
             let masks = build_segmentation_msg_(frame.stamp(), &output_masks);
-            if let Err(e) = mask_tx.send(masks).await {
+            if let Err(e) = mask_tx.send((frame.stamp(), masks)).await {
                 error!("Cannot send to mask publishing thread {e:?}");
             }
         }
@@ -740,7 +748,7 @@ async fn run() -> ExitCode {
             match publ_detect
                 .put(msg)
                 .encoding(enc)
-                .timestamp(session.new_timestamp())
+                .timestamp(zenoh_timestamp(&session, frame.stamp()))
                 .await
             {
                 Ok(_) => trace!("Sent Detect message on {}", publ_detect.key_expr()),
@@ -768,7 +776,7 @@ async fn run() -> ExitCode {
             match publ_visual
                 .put(msg)
                 .encoding(enc)
-                .timestamp(session.new_timestamp())
+                .timestamp(zenoh_timestamp(&session, frame.stamp()))
                 .await
             {
                 Ok(_) => trace!("Sent message on {}", publ_visual.key_expr()),
@@ -802,7 +810,7 @@ async fn run() -> ExitCode {
         match publ_output
             .put(msg)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(&session, frame.stamp()))
             .await
         {
             Ok(_) => trace!("Sent Model message on {}", publ_output.key_expr()),
@@ -824,7 +832,7 @@ async fn run() -> ExitCode {
         if let Err(e) = publ_model_info
             .put(msg)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(&session, frame.stamp()))
             .await
         {
             error!(
