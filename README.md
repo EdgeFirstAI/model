@@ -414,6 +414,14 @@ For instance segmentation, each entry in the `masks` array corresponds to the bo
 
 The `Model` message also includes per-stage timing fields (`input_time`, `model_time`, `output_time`, `decode_time`) using `Duration` instead of the `Time` type used by the older `Detect` message, providing clearer semantics for duration measurements.
 
+### Timestamps
+
+Every message the model publishes for a frame carries the acquisition stamp of the input camera frame. This covers `model/output`, `model/info`, `model/visualization`, the legacy `model/boxes2d` and `model/mask` topics, and the placeholder messages published while the model loads. The stamp appears in both `header.stamp` and the Zenoh sample timestamp, so a recorder writes the camera acquisition time as the MCAP `publish_time`, and `model/output` and `model/info` align exactly with the camera frame they describe. The two values denote the same instant to within NTP64 resolution (about 0.23 ns), so consumers should compare them with a tolerance of a nanosecond or two rather than exactly. `Mask` has no header, so on `model/mask` the Zenoh sample timestamp is the only record of the frame stamp.
+
+Processing latency is carried only in duration fields. On the legacy `Detect` message, `input_timestamp`, `model_time` and `output_time` are durations stored in `Time` fields, not instants.
+
+The tracker runs on the camera stamp timeline, and `track_created` is reported on that timeline. A system clock step resets the tracks: after a forward step, existing tracks expire through the normal `--track-extra-lifespan` check. When the camera stamp moves backward, the tracker is cleared and the step is logged once. Tracks restart with new IDs after a step.
+
 ### Legacy Topics (Opt-In)
 
 Prior to the unified output, detection results and segmentation masks were published on separate topics. These legacy topics are now **disabled by default** and must be explicitly enabled via environment variable or CLI flag:

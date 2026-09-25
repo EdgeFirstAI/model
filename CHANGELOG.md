@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every Zenoh sample now carries the input camera frame's acquisition stamp as its sample timestamp, the same instant as `header.stamp`. Previously it carried the wall-clock time of publishing. This covers `model/output`, `model/info`, `model/visualization`, `model/boxes2d`, `model/mask`, and the placeholder messages sent while the model loads. Recorders now write the camera acquisition time as the MCAP `publish_time` for model topics, so model and camera data align after a system clock step (EDGEAI-1939).
+- The tracker is reset when the camera stamp moves backward (a system clock step) instead of keeping lost tracks alive until the clock catches up. Tracks restart with new IDs after a step (EDGEAI-1939).
+
+### Fixed
+
+- On the legacy `model/boxes2d` topic, untracked boxes reported the decode duration as `track_created` instead of the frame stamp (EDGEAI-1939).
+
 ## [2.10.2] - 2026-09-07
 
 Patch release for EDGEAI-1094. Argument parsing only; no wire-format or

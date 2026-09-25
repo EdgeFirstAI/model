@@ -179,6 +179,9 @@ loop {
 - `update_dmabuf_with_pidfd()` -- Cross-process DMA fd transfer via PidFd
 - `heart_beat()` -- Background task publishing empty messages while model loads
 - `get_curr_time()` -- Monotonic clock timestamp
+- `zenoh_timestamp()` -- Zenoh sample timestamp carrying a message stamp; every put uses the input camera frame stamp
+- `time_to_ns()` -- Converts a message `Time` to nanoseconds since the Unix epoch
+- `StampTimeline` -- Detects backward steps in the camera stamps fed to the tracker
 - `guess_model_config()` -- Shape-based heuristic to produce a `ConfigOutputs` when no metadata is available (defined in `model.rs`)
 - `ModelTypeActual` -- Describes model capabilities (detection, segmentation, instance segmentation)
 
@@ -385,9 +388,9 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization for eco
 // edgefirst_msgs/Detect (from edgefirst-schemas)
 pub struct Detect {
     pub header: Header,
-    pub input_timestamp: Time,    // Input preprocessing duration
-    pub model_time: Time,         // Inference duration
-    pub output_time: Time,        // Output decoding duration
+    pub input_timestamp: Time,    // Input preprocessing duration (a duration in a Time field)
+    pub model_time: Time,         // Inference duration (a duration in a Time field)
+    pub output_time: Time,        // Output decoding duration (a duration in a Time field)
     pub boxes: Vec<Box>,
 }
 
@@ -406,7 +409,7 @@ pub struct Box {
 pub struct Track {
     pub id: String,               // Track UUID (if tracking enabled)
     pub lifetime: i32,            // Track age (update count)
-    pub created: Time,            // Track creation timestamp
+    pub created: Time,            // Camera stamp of the frame that created the track
 }
 ```
 
@@ -622,6 +625,10 @@ if args.track {
     output_tracks.extend(tracks.into_iter().flatten());
 }
 ```
+
+### Timeline and Clock Steps
+
+The tracker is fed the camera frame stamp, so lifespans and `track_created` are on the camera stamp timeline. A system clock step resets the tracks. A forward step expires them through the lifespan check. A backward step would otherwise keep lost tracks alive until the clock caught up, so when `StampTimeline` sees the camera stamp move backward, the main loop rebuilds the tracker and logs the step once. Clock steps are rare, and losing track identity across one is an accepted limitation.
 
 ### Configuration
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Au-Zone Technologies. All Rights Reserved.
 
-use crate::drain_recv;
-use edgefirst_schemas::edgefirst_msgs::Mask;
+use crate::{drain_recv, zenoh_timestamp};
+use edgefirst_schemas::{builtin_interfaces::Time, edgefirst_msgs::Mask};
 use log::{error, trace};
 use tokio::sync::mpsc::Receiver;
 use zenoh::{
@@ -10,13 +10,16 @@ use zenoh::{
     pubsub::Publisher,
 };
 
+/// Publishes masks paired with the camera frame stamp they were computed
+/// from. `Mask` has no header, so the Zenoh sample timestamp is the only
+/// record of that stamp.
 pub async fn mask_thread(
-    mut rx: Receiver<Mask<Vec<u8>>>,
+    mut rx: Receiver<(Time, Mask<Vec<u8>>)>,
     publ_mask: Publisher<'_>,
     session: zenoh::Session,
 ) {
     loop {
-        let msg = match drain_recv(&mut rx).await {
+        let (stamp, msg) = match drain_recv(&mut rx).await {
             Some(v) => v,
             None => return,
         };
@@ -27,7 +30,7 @@ pub async fn mask_thread(
         match publ_mask
             .put(buf)
             .encoding(enc)
-            .timestamp(session.new_timestamp())
+            .timestamp(zenoh_timestamp(&session, stamp))
             .await
         {
             Ok(_) => trace!("Sent Mask message on {}", publ_mask.key_expr()),
