@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-09-29
+
 ### Changed
 
 - Every Zenoh sample now carries the input camera frame's acquisition stamp as its sample timestamp, the same instant as `header.stamp`. Previously it carried the wall-clock time of publishing. This covers `model/output`, `model/info`, `model/visualization`, `model/boxes2d`, `model/mask`, and the placeholder messages sent while the model loads. Recorders now write the camera acquisition time as the MCAP `publish_time` for model topics, so model and camera data align after a system clock step (EDGEAI-1939).
