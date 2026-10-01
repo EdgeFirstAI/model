@@ -7,6 +7,7 @@ pub mod fps;
 pub mod letterbox;
 pub mod masks;
 pub mod model;
+pub mod recycle;
 pub mod runtime;
 
 /// Newtype wrapper to bridge `edgefirst_tracker::DetectionBox` for
@@ -40,12 +41,13 @@ use crate::buildmsgs::*;
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
 use edgefirst_schemas::{self, builtin_interfaces::Time, edgefirst_msgs::CameraFrame};
-use log::{error, trace, warn};
+use log::{error, info, trace, warn};
 use nix::{
     sys::time::TimeValLike,
     time::{ClockId, clock_gettime},
 };
 use pidfd_getfd::{GetFdFlags, get_file_from_pidfd};
+use recycle::RecycleWindow;
 use std::{fs::File, os::fd::AsRawFd, time::Duration};
 use tokio::sync::mpsc::{Receiver, error::TryRecvError};
 
@@ -148,7 +150,9 @@ async fn heart_beat_loop(
     model_path: &std::path::Path,
     status: &str,
 ) {
-    let Some(frame) = wait_for_camera_frame(sub_camera, Duration::from_millis(100)) else {
+    let mut recycle = RecycleWindow::new();
+    let Some(frame) = wait_for_camera_frame(sub_camera, Duration::from_millis(100), &mut recycle)
+    else {
         return;
     };
     trace!("Received camera frame");
@@ -246,6 +250,14 @@ pub fn time_to_ns(stamp: Time) -> u64 {
     stamp.sec as u64 * 1_000_000_000 + stamp.nanosec as u64
 }
 
+/// Current `CLOCK_REALTIME` in nanoseconds since the Unix epoch, the clock
+/// camera frame stamps are expressed in. Zero before the epoch.
+pub fn realtime_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+}
+
 /// Builds the Zenoh sample timestamp for a message carrying `stamp`, so the
 /// sample timestamp and `header.stamp` denote the same instant (to NTP64
 /// resolution, about 0.23 ns). Uses the session's ZenohId so the sample is
@@ -289,24 +301,31 @@ pub fn get_curr_time() -> u64 {
     }
 }
 
+/// Wait for the newest camera frame and import its DMA-BUF. Every queued
+/// frame, not only the newest, is fed to `recycle` so the camera's buffer
+/// pool can be learned.
 pub fn wait_for_camera_frame(
     sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
     timeout: Duration,
+    recycle: &mut RecycleWindow,
 ) -> Option<ResolvedCameraFrame> {
-    let sample = if let Some(v) = sub_camera.drain().last() {
-        v
-    } else {
-        match sub_camera.recv_timeout(timeout) {
-            Ok(msg) => match msg {
-                Some(v) => v,
-                None => {
-                    warn!(
-                        "timeout receiving camera frame on {}",
-                        sub_camera.key_expr()
-                    );
-                    return None;
-                }
-            },
+    let mut newest = None;
+    for sample in sub_camera.drain() {
+        if let Some(frame) = decode_camera_frame(&sample, recycle) {
+            newest = Some(frame);
+        }
+    }
+    let frame = match newest {
+        Some(v) => v,
+        None => match sub_camera.recv_timeout(timeout) {
+            Ok(Some(sample)) => decode_camera_frame(&sample, recycle)?,
+            Ok(None) => {
+                warn!(
+                    "timeout receiving camera frame on {}",
+                    sub_camera.key_expr()
+                );
+                return None;
+            }
             Err(e) => {
                 error!(
                     "error receiving camera frame on {}: {:?}",
@@ -315,16 +334,7 @@ pub fn wait_for_camera_frame(
                 );
                 return None;
             }
-        }
-    };
-
-    let cdr = sample.payload().to_bytes();
-    let frame = match CameraFrame::from_cdr(cdr.to_vec()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Failed to deserialize CameraFrame: {e:?}");
-            return None;
-        }
+        },
     };
 
     match resolve_camera_frame_fd(frame) {
@@ -334,6 +344,33 @@ pub fn wait_for_camera_frame(
             None
         }
     }
+}
+
+/// Deserialize a camera sample and record its buffer in `recycle`.
+fn decode_camera_frame(
+    sample: &Sample,
+    recycle: &mut RecycleWindow,
+) -> Option<CameraFrame<Vec<u8>>> {
+    let frame = match CameraFrame::from_cdr(sample.payload().to_bytes().to_vec()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to deserialize CameraFrame: {e:?}");
+            return None;
+        }
+    };
+    let tensor = frame.tensor();
+    if let Some(plane) = tensor.plane_at(0)
+        && let Some(pool) = recycle.observe(tensor.pid(), plane.handle, time_to_ns(frame.stamp()))
+    {
+        info!(
+            "{}: camera cycles {} buffers at {:.1} FPS; frames older than {:.0} ms are skipped",
+            sample.key_expr(),
+            pool.buffers,
+            1e9 / pool.period_ns as f64,
+            pool.window_ns() as f64 * 1e-6
+        );
+    }
+    Some(frame)
 }
 
 fn camera_frame_invalid(msg: impl Into<String>) -> std::io::Error {
