@@ -20,6 +20,8 @@ use edgefirst_model::{
     letterbox::LetterboxTransform,
     masks::mask_thread,
     model::{ModelContext, camera_frame_to_tensor_dyn, decode_outputs, guess_model_config},
+    realtime_ns,
+    recycle::{RecycleWindow, SkipLog},
     runtime, time_to_ns, wait_for_camera_frame, zenoh_timestamp,
 };
 use edgefirst_schemas::sensor_msgs::CameraInfo;
@@ -526,14 +528,29 @@ async fn run() -> ExitCode {
     let mut output_boxes = Vec::with_capacity(50);
     let mut output_masks = Vec::with_capacity(50);
     let mut output_tracks = Vec::with_capacity(50);
+    let mut recycle = RecycleWindow::new();
+    let mut skip_log = SkipLog::default();
     while !SHUTDOWN.load(Ordering::SeqCst) {
         let Some(frame) = ({
             let _span = info_span!("wait_for_camera_frame").entered();
-            wait_for_camera_frame(&sub_camera, timeout)
+            wait_for_camera_frame(&sub_camera, timeout, &mut recycle)
         }) else {
             continue;
         };
         trace!("Received camera frame");
+
+        let stamp_ns = time_to_ns(frame.stamp());
+        let now_ns = realtime_ns();
+        if recycle.is_stale(stamp_ns, now_ns) {
+            if let Some(skipped) = skip_log.record(std::time::Instant::now()) {
+                warn!(
+                    "skipped {skipped} camera frame(s) older than {:.0} ms (newest {:.0} ms); their camera buffer may be overwritten",
+                    recycle.window_ns() as f64 * 1e-6,
+                    now_ns.saturating_sub(stamp_ns) as f64 * 1e-6
+                );
+            }
+            continue;
+        }
 
         let src_image = match camera_frame_to_tensor_dyn(&img_proc, &frame) {
             Ok(v) => v,
