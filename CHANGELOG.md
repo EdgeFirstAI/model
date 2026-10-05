@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.1] - 2026-10-05
+
 ### Fixed
 
 - Camera frames that arrive after their capture buffer may have been overwritten are skipped instead of converted. The limit is `(N - 1)` frame periods less a margin, with `N` learned from the distinct DMA-BUF descriptors in `CameraFrame` and the period from the stamp interval, so it follows the camera service's `CAMERA_BUFFERS` and frame rate. While it is being learned the limit uses the buffers and shortest interval seen so far, so it never overstates the window. Skips are logged at most once per 10 s with a count. Every received frame is observed, not only the one converted. A stale queued frame left over from model loading was previously converted (EDGEAI-2009).
