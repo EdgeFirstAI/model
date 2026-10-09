@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `CameraFrame` tensors whose `format` is a HAL wire name (`rgb8`, `rgba8`, `bgra8`, `mono8`, `YUYV`, `NV12`, ...) are now decoded. Format names are resolved through `edgefirst_tensor::PixelFormat::from_str_code`; V4L2 fourcc text (`RGB3`, `GREY`, `AB24`, ...) is still accepted (EDGEAI-2196).
+- The chroma plane of an NV12 `CameraFrame` is read from its published plane 1 when that is not directly after the luma rows: an aligned chroma offset, a separate chroma pitch, or a chroma plane in its own DMA-BUF (NV12M), whose fd is imported. Frames without a plane 1, as camera 2.x publishes NV12, keep the derived position (EDGEAI-2196).
 
 ### Changed
 

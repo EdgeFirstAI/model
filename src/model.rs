@@ -132,7 +132,7 @@ pub struct ModelContext {
 /// The canonical form is the HAL wire name (`edgefirst_tensor::PixelFormat::as_str`,
 /// e.g. `"rgb8"`, `"NV12"`). V4L2 fourcc text (`"RGB3"`, `"GREY"`, ...) is also
 /// accepted so frames from cameras that publish fourcc text still decode.
-fn format_str_to_pixel_format(format: &str) -> Result<PixelFormat, ModelError> {
+pub(crate) fn format_str_to_pixel_format(format: &str) -> Result<PixelFormat, ModelError> {
     if let Some(fmt) = edgefirst_tensor::PixelFormat::from_str_code(format)
         .and_then(|wire| PixelFormat::from_fourcc(wire.to_fourcc()))
     {
@@ -182,10 +182,27 @@ pub fn camera_frame_to_tensor_dyn(
     if frame.stride() > 0 {
         plane = plane.with_stride(frame.stride() as usize);
     }
+    let chroma = frame
+        .chroma()
+        .map(|c| {
+            let fd = c.fd().unwrap_or(frame.fd());
+            // SAFETY: fd is plane 0's fd or the chroma DMA-BUF fd, both
+            // obtained via pidfd_getfd and owned by `frame`.
+            let mut chroma = PlaneDescriptor::new(unsafe { BorrowedFd::borrow_raw(fd) })
+                .map_err(|e| {
+                    ModelError::new(ModelErrorKind::Tensor, format!("PlaneDescriptor: {e}"))
+                })?
+                .with_offset(c.offset() as usize);
+            if c.stride() > 0 {
+                chroma = chroma.with_stride(c.stride() as usize);
+            }
+            Ok::<_, ModelError>(chroma)
+        })
+        .transpose()?;
     processor
         .import_image(
             plane,
-            None,
+            chroma,
             frame.width() as usize,
             frame.height() as usize,
             format,
