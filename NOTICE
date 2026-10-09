@@ -12,6 +12,7 @@ that require attribution:
   * clap 4.6.6 (MIT OR Apache-2.0)
   * edgefirst-hal 0.28.3 (Apache-2.0)
   * edgefirst-schemas 4.0.0 (Apache-2.0)
+  * edgefirst-tensor 0.34.1 (Apache-2.0)
   * edgefirst-tflite 0.7.0 (Apache-2.0)
   * edgefirst-tracker 0.28.3 (Apache-2.0)
   * gethostname 1.1.0 (Apache-2.0)

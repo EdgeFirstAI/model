@@ -461,7 +461,7 @@ This section is customized for the **EdgeFirst Model Node** project.
 
 ### Technology Stack
 
-- **Language**: Rust 1.90.0+ (edition 2024)
+- **Language**: Rust 1.94.0+ (edition 2024)
 - **Build system**: Cargo (single crate)
 - **Key dependencies**:
   - `edgefirst-hal 0.9.0`: Hardware abstraction (decoder, image processing, tensor)
