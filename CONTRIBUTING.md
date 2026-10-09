@@ -30,7 +30,7 @@ This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDU
 **Development Environment:**
 
 - Linux (Ubuntu 20.04+ or Debian 11+ recommended)
-- Rust 1.90.0 or later (Edition 2024)
+- Rust 1.94.0 or later (Edition 2024)
 - For hardware testing: NXP i.MX8M Plus with NPU, camera node running, model file
 
 **Install Rust:**

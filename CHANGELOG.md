@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Added a direct dependency on `edgefirst-tensor` 0.34.1 (`static` feature only) for the shared tensor vocabulary (EDGEAI-2196).
+- Minimum supported Rust version declared as 1.94 (`rust-version`), as required by `edgefirst-tensor`; README and CONTRIBUTING updated from 1.90 (EDGEAI-2196).
 
 ## [2.11.1] - 2026-10-05
 

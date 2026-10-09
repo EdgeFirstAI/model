@@ -6,6 +6,7 @@ homepage = "https://www.edgefirst.ai"
 license = "Apache-2.0"
 version = "2.11.1"
 edition = "2024"
+rust-version = "1.94"
 
 [profile.release]
 opt-level = 3
