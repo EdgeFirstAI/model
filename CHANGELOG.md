@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `CameraFrame` tensors whose `format` is a HAL wire name (`rgb8`, `rgba8`, `bgra8`, `mono8`, `YUYV`, `NV12`, ...) are now decoded. Format names are resolved through `edgefirst_tensor::PixelFormat::from_str_code`; V4L2 fourcc text (`RGB3`, `GREY`, `AB24`, ...) is still accepted (EDGEAI-2196).
+
+### Changed
+
+- Added a direct dependency on `edgefirst-tensor` 0.34.1 (`static` feature only) for the shared tensor vocabulary (EDGEAI-2196).
+
 ## [2.11.1] - 2026-10-05
 
 ### Fixed
