@@ -127,8 +127,17 @@ pub struct ModelContext {
 
 // ── camera_frame_to_tensor_dyn ───────────────────────────────────────────────
 
-/// Map a camera format string (V4L2 fourcc text) to a HAL [`PixelFormat`].
-fn format_str_to_pixel_format(format: &str) -> Result<PixelFormat, ModelError> {
+/// Map a `CameraFrame` tensor format string to a HAL [`PixelFormat`].
+///
+/// The canonical form is the HAL wire name (`edgefirst_tensor::PixelFormat::as_str`,
+/// e.g. `"rgb8"`, `"NV12"`). V4L2 fourcc text (`"RGB3"`, `"GREY"`, ...) is also
+/// accepted so frames from cameras that publish fourcc text still decode.
+pub(crate) fn format_str_to_pixel_format(format: &str) -> Result<PixelFormat, ModelError> {
+    if let Some(fmt) = edgefirst_tensor::PixelFormat::from_str_code(format)
+        .and_then(|wire| PixelFormat::from_fourcc(wire.to_fourcc()))
+    {
+        return Ok(fmt);
+    }
     let fmt = match format {
         "YUYV" | "YUY2" | "yuyv" | "yuy2" => PixelFormat::Yuyv,
         "NV12" | "nv12" => PixelFormat::Nv12,
@@ -173,10 +182,27 @@ pub fn camera_frame_to_tensor_dyn(
     if frame.stride() > 0 {
         plane = plane.with_stride(frame.stride() as usize);
     }
+    let chroma = frame
+        .chroma()
+        .map(|c| {
+            let fd = c.fd().unwrap_or(frame.fd());
+            // SAFETY: fd is plane 0's fd or the chroma DMA-BUF fd, both
+            // obtained via pidfd_getfd and owned by `frame`.
+            let mut chroma = PlaneDescriptor::new(unsafe { BorrowedFd::borrow_raw(fd) })
+                .map_err(|e| {
+                    ModelError::new(ModelErrorKind::Tensor, format!("PlaneDescriptor: {e}"))
+                })?
+                .with_offset(c.offset() as usize);
+            if c.stride() > 0 {
+                chroma = chroma.with_stride(c.stride() as usize);
+            }
+            Ok::<_, ModelError>(chroma)
+        })
+        .transpose()?;
     processor
         .import_image(
             plane,
-            None,
+            chroma,
             frame.width() as usize,
             frame.height() as usize,
             format,
@@ -1230,6 +1256,29 @@ mod tests {
         assert_eq!(
             format_str_to_pixel_format("AR24").unwrap(),
             PixelFormat::Bgra
+        );
+    }
+
+    #[test]
+    fn format_accepts_every_hal_wire_name() {
+        for &wire in edgefirst_tensor::PixelFormat::all() {
+            if wire.to_fourcc() == 0 {
+                continue;
+            }
+            let fmt = format_str_to_pixel_format(wire.as_str()).unwrap();
+            assert_eq!(fmt as u32, wire.code(), "{}", wire.as_str());
+        }
+        assert_eq!(
+            format_str_to_pixel_format("rgb8").unwrap(),
+            PixelFormat::Rgb
+        );
+        assert_eq!(
+            format_str_to_pixel_format("rgba8").unwrap(),
+            PixelFormat::Rgba
+        );
+        assert_eq!(
+            format_str_to_pixel_format("mono8").unwrap(),
+            PixelFormat::Grey
         );
     }
 

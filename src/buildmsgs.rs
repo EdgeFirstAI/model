@@ -763,8 +763,9 @@ mod tests {
 
     #[test]
     fn camera_frame_cdr_roundtrip_planes() {
-        const TENSOR_STORAGE_KIND_DMA_BUF: u32 = 2;
-        const TENSOR_DTYPE_U8: u32 = 0;
+        const TENSOR_STORAGE_KIND_DMA_BUF: u32 = edgefirst_tensor::TensorMemory::DmaBuf.code();
+        const TENSOR_DTYPE_U8: u32 = edgefirst_tensor::DType::U8.code();
+        let yuyv = edgefirst_tensor::PixelFormat::Yuyv.as_str();
         let shape = [1080u64, 1920];
         let strides = [3840i64, 2];
         let plane = TensorPlaneView {
@@ -787,7 +788,7 @@ mod tests {
             strides: &strides,
             quant_scales: &[],
             quant_zero_points: &[],
-            format: "YUYV".into(),
+            format: yuyv.into(),
             color_space: "".into(),
             color_transfer: "".into(),
             color_encoding: "".into(),
@@ -806,7 +807,9 @@ mod tests {
         let t = decoded.tensor();
         assert_eq!(t.pid(), 1234);
         assert_eq!(t.shape().collect::<Vec<_>>(), vec![1080, 1920]);
-        assert_eq!(t.format(), "YUYV");
+        assert_eq!(t.storage_kind(), TENSOR_STORAGE_KIND_DMA_BUF);
+        assert_eq!(t.dtype(), TENSOR_DTYPE_U8);
+        assert_eq!(t.format(), yuyv);
         assert_eq!(t.num_planes(), 1);
         let plane = t.plane_at(0).unwrap();
         assert_eq!(plane.handle, 7);

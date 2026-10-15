@@ -3,7 +3,7 @@
 **Production-ready AI inference service with hardware-accelerated NPU inference, object tracking, and EdgeFirst Perception integration**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.90.0%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94.0%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20ARM64%20%7C%20x86__64-lightgrey.svg)]()
 
 ---
@@ -99,7 +99,7 @@ graph LR
 **Software:**
 
 - Linux kernel 5.10+ with V4L2 support
-- Rust 1.90.0 or later (for building from source)
+- Rust 1.94.0 or later (for building from source)
 - OR: Pre-built binaries from [GitHub Releases](https://github.com/EdgeFirstAI/model/releases)
 - TensorFlow Lite model file (.tflite)
 

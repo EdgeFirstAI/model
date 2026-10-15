@@ -40,7 +40,10 @@ impl edgefirst_tracker::DetectionBox for TrackerBox {
 use crate::buildmsgs::*;
 use args::{Args, LabelSetting};
 use async_pidfd::PidFd;
-use edgefirst_schemas::{self, builtin_interfaces::Time, edgefirst_msgs::CameraFrame};
+use edgefirst_hal::tensor::PixelLayout;
+use edgefirst_schemas::{
+    self, builtin_interfaces::Time, edgefirst_msgs::CameraFrame, tensor::TensorPlaneView,
+};
 use log::{error, info, trace, warn};
 use nix::{
     sys::time::TimeValLike,
@@ -76,7 +79,35 @@ pub struct ResolvedCameraFrame {
     width: u32,
     height: u32,
     format: String,
+    chroma: Option<ChromaPlane>,
     _fd_guard: File,
+}
+
+/// The chroma plane of a semi-planar camera frame that is not where HAL
+/// places it by default (plane 0 offset + stride * height in plane 0's
+/// buffer), so it must be described to HAL explicitly.
+pub struct ChromaPlane {
+    fd: Option<File>,
+    offset: u32,
+    stride: u32,
+}
+
+impl ChromaPlane {
+    /// The imported fd of the chroma buffer, or `None` when the chroma plane
+    /// shares plane 0's buffer.
+    pub fn fd(&self) -> Option<i32> {
+        self.fd.as_ref().map(AsRawFd::as_raw_fd)
+    }
+
+    /// Byte offset of the chroma plane in its buffer.
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    /// Chroma row pitch in bytes; 0 when the camera did not publish one.
+    pub fn stride(&self) -> u32 {
+        self.stride
+    }
 }
 
 impl ResolvedCameraFrame {
@@ -110,6 +141,11 @@ impl ResolvedCameraFrame {
 
     pub fn offset(&self) -> u32 {
         self.offset
+    }
+
+    /// The chroma plane, when HAL cannot derive its position from plane 0.
+    pub fn chroma(&self) -> Option<&ChromaPlane> {
+        self.chroma.as_ref()
     }
 }
 
@@ -395,10 +431,42 @@ fn camera_frame_nonzero_u32(name: &str, value: u64) -> Result<u32, std::io::Erro
     Ok(dim)
 }
 
+/// Plane 1 of a semi-planar frame (handle, offset, stride) when it must be
+/// passed to HAL explicitly, or `None` when HAL's default position for the
+/// chroma plane, plane 0 offset + stride * height in plane 0's buffer, is
+/// right. A frame without plane 1, as camera 2.x publishes NV12, uses the
+/// default; so do formats that are not semi-planar.
+fn explicit_chroma_plane(
+    format: &str,
+    width: u32,
+    height: u32,
+    plane0: &TensorPlaneView<'_>,
+    plane1: Option<&TensorPlaneView<'_>>,
+) -> Result<Option<(i64, u32, u32)>, std::io::Error> {
+    let Some(plane1) = plane1 else {
+        return Ok(None);
+    };
+    let pixel_format = match model::format_str_to_pixel_format(format) {
+        Ok(f) if f.layout() == PixelLayout::SemiPlanar => f,
+        _ => return Ok(None),
+    };
+    let offset = camera_frame_u32("chroma offset", plane1.offset)?;
+    let stride = camera_frame_u32("chroma stride", plane1.stride)?;
+    let default_offset = edgefirst_tensor::PixelFormat::from_fourcc(pixel_format.to_fourcc())
+        .and_then(|f| f.plane_table(width as usize, height as usize, plane0.stride as usize))
+        .and_then(|planes| planes.get(1).map(|p| p.offset))
+        .and_then(|o| o.checked_add(plane0.offset));
+    let at_default = plane1.handle == plane0.handle
+        && plane0.stride != 0
+        && (plane1.stride == 0 || plane1.stride == plane0.stride)
+        && default_offset == Some(plane1.offset);
+    Ok((!at_default).then_some((plane1.handle, offset, stride)))
+}
+
 fn resolve_camera_frame_fd(
     frame: CameraFrame<Vec<u8>>,
 ) -> Result<ResolvedCameraFrame, std::io::Error> {
-    let (pid, handle, stride, offset, width, height, format) = {
+    let (pid, handle, stride, offset, width, height, format, chroma) = {
         let tensor = frame.tensor();
         let plane0 = tensor
             .plane_at(0)
@@ -409,6 +477,15 @@ fn resolve_camera_frame_fd(
         let width = tensor
             .shape_at(1)
             .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
+        let width = camera_frame_nonzero_u32("width", width)?;
+        let height = camera_frame_nonzero_u32("height", height)?;
+        let chroma = explicit_chroma_plane(
+            tensor.format(),
+            width,
+            height,
+            &plane0,
+            tensor.plane_at(1).as_ref(),
+        )?;
         (
             tensor.pid(),
             plane0.handle,
@@ -417,6 +494,7 @@ fn resolve_camera_frame_fd(
             width,
             height,
             tensor.format().to_owned(),
+            chroma,
         )
     };
 
@@ -432,30 +510,47 @@ fn resolve_camera_frame_fd(
         }
     };
 
-    let target_fd = i32::try_from(handle).map_err(|_| {
-        camera_frame_invalid(format!("CameraFrame plane handle {handle} exceeds i32"))
-    })?;
-
-    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
-            );
-            return Err(e);
-        }
+    let fd = import_plane_fd(&pidfd, handle)?;
+    let chroma = match chroma {
+        Some((chroma_handle, offset, stride)) => Some(ChromaPlane {
+            fd: if chroma_handle == handle {
+                None
+            } else {
+                Some(import_plane_fd(&pidfd, chroma_handle)?)
+            },
+            offset,
+            stride,
+        }),
+        None => None,
     };
 
     Ok(ResolvedCameraFrame {
         plane_fd: fd.as_raw_fd(),
         stride: camera_frame_u32("stride", stride)?,
         offset: camera_frame_u32("offset", offset)?,
-        width: camera_frame_nonzero_u32("width", width)?,
-        height: camera_frame_nonzero_u32("height", height)?,
+        width,
+        height,
         format,
+        chroma,
         _fd_guard: fd,
         frame,
     })
+}
+
+/// Duplicate the camera's DMA-BUF `handle` into this process.
+fn import_plane_fd(pidfd: &PidFd, handle: i64) -> Result<File, std::io::Error> {
+    let target_fd = i32::try_from(handle).map_err(|_| {
+        camera_frame_invalid(format!("CameraFrame plane handle {handle} exceeds i32"))
+    })?;
+    match get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty()) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            error!(
+                "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
+            );
+            Err(e)
+        }
+    }
 }
 
 // If the receiver is empty, waits for the next message, otherwise returns the
@@ -513,6 +608,102 @@ mod tests {
                 "{stamp:?} decoded to {decoded}, expected {expected}"
             );
         }
+    }
+
+    fn plane(handle: i64, offset: u64, stride: u64) -> TensorPlaneView<'static> {
+        TensorPlaneView {
+            handle,
+            offset,
+            stride,
+            size: 0,
+            used: 0,
+            modifier: 0,
+            handle_bytes: &[],
+            data: &[],
+        }
+    }
+
+    /// NV12 whose chroma follows the luma rows at the published pitch, in the
+    /// same buffer, is left to HAL's default placement.
+    #[test]
+    fn test_nv12_chroma_after_luma_uses_hal_default() {
+        let p0 = plane(7, 256, 704);
+        for p1 in [plane(7, 256 + 704 * 480, 704), plane(7, 256 + 704 * 480, 0)] {
+            assert_eq!(
+                explicit_chroma_plane("NV12", 640, 480, &p0, Some(&p1)).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            explicit_chroma_plane("NV12", 640, 480, &p0, None).unwrap(),
+            None
+        );
+    }
+
+    /// Single-buffer NV12 with an aligned chroma offset passes the published
+    /// offset to HAL.
+    #[test]
+    fn test_nv12_aligned_chroma_is_explicit() {
+        let (stride, y, uv) = (2048, 4096, 4096 + 2048 * 1088);
+        assert_eq!(
+            explicit_chroma_plane(
+                "NV12",
+                1920,
+                1080,
+                &plane(7, y, stride),
+                Some(&plane(7, uv, stride))
+            )
+            .unwrap(),
+            Some((7, uv as u32, stride as u32))
+        );
+    }
+
+    /// NV12M: the chroma plane in its own DMA-BUF is always explicit.
+    #[test]
+    fn test_nv12m_chroma_is_explicit() {
+        assert_eq!(
+            explicit_chroma_plane(
+                "NV12",
+                1920,
+                1080,
+                &plane(70, 0, 1920),
+                Some(&plane(71, 0, 1920))
+            )
+            .unwrap(),
+            Some((71, 0, 1920))
+        );
+    }
+
+    /// A chroma pitch differing from the luma pitch is passed through.
+    #[test]
+    fn test_nv12_chroma_stride_is_explicit() {
+        assert_eq!(
+            explicit_chroma_plane(
+                "NV12",
+                640,
+                480,
+                &plane(7, 0, 640),
+                Some(&plane(7, 640 * 480, 768))
+            )
+            .unwrap(),
+            Some((7, 640 * 480, 768))
+        );
+    }
+
+    /// Plane 1 of a format that is not semi-planar is not a chroma plane.
+    #[test]
+    fn test_packed_formats_have_no_chroma_plane() {
+        assert_eq!(
+            explicit_chroma_plane(
+                "YUYV",
+                640,
+                480,
+                &plane(3, 0, 1536),
+                Some(&plane(4, 0, 1536))
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
